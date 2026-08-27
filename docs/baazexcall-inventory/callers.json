@@ -1,0 +1,43 @@
+{
+  "statusCode": 200,
+  "code": "SUCCESS",
+  "message": "Caller users fetched successfully",
+  "data": {
+    "users": [
+      {
+        "id": "d2b6ae8f-76fb-4609-9f9a-bf07a1094497",
+        "fullname": "seema",
+        "createdBy": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+        "userType": "CALLER",
+        "userStatus": "active",
+        "isDeleted": false,
+        "createdAt": "2026-08-21T06:44:49.467Z",
+        "updatedAt": "2026-08-21T06:44:49.467Z",
+        "admin": {
+          "id": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+          "fullname": "Baazexcall"
+        },
+        "totalClients": 0
+      },
+      {
+        "id": "b526c682-0386-4b5a-af7c-cc8f74a3c28d",
+        "fullname": "sheela",
+        "createdBy": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+        "userType": "CALLER",
+        "userStatus": "active",
+        "isDeleted": false,
+        "createdAt": "2026-08-21T06:40:21.522Z",
+        "updatedAt": "2026-08-21T06:40:40.987Z",
+        "admin": {
+          "id": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+          "fullname": "Baazexcall"
+        },
+        "totalClients": 0
+      }
+    ],
+    "totalCount": 2,
+    "totalPages": 1,
+    "page": 1,
+    "limit": 3
+  }
+}

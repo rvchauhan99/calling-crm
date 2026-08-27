@@ -1,0 +1,77 @@
+{
+  "statusCode": 200,
+  "code": "SUCCESS",
+  "message": "Report fetched successfully",
+  "data": {
+    "users": [
+      {
+        "userId": "d2b6ae8f-76fb-4609-9f9a-bf07a1094497",
+        "fullname": "seema",
+        "userType": "CALLER",
+        "companyId": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+        "admin": {
+          "_id": "6a87cb509fb5b852b145ef2c",
+          "id": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+          "fullname": "Baazexcall",
+          "domainUrl": "baazexcall.com"
+        },
+        "report": {
+          "clientCreate": 0,
+          "totalCallDone": 0,
+          "followUpClient": 0,
+          "ftd": 0,
+          "totalDeposit": 0,
+          "totalWithdrawal": 0,
+          "dwRatio": 0,
+          "responseCounters": {
+            "Not Answer": 0,
+            "Follow up": 0,
+            "Registered": 0,
+            "Not Reachable": 0,
+            "Disconected": 0,
+            "Not Interested": 0,
+            "language Transfer": 0,
+            "Busy/Call back": 0,
+            "Interested": 0
+          }
+        }
+      },
+      {
+        "userId": "b526c682-0386-4b5a-af7c-cc8f74a3c28d",
+        "fullname": "sheela",
+        "userType": "CALLER",
+        "companyId": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+        "admin": {
+          "_id": "6a87cb509fb5b852b145ef2c",
+          "id": "cc174cfc-5c4b-4ca9-9e4a-25d075970604",
+          "fullname": "Baazexcall",
+          "domainUrl": "baazexcall.com"
+        },
+        "report": {
+          "clientCreate": 0,
+          "totalCallDone": 0,
+          "followUpClient": 0,
+          "ftd": 0,
+          "totalDeposit": 0,
+          "totalWithdrawal": 0,
+          "dwRatio": 0,
+          "responseCounters": {
+            "Not Answer": 0,
+            "Follow up": 0,
+            "Registered": 0,
+            "Not Reachable": 0,
+            "Disconected": 0,
+            "Not Interested": 0,
+            "language Transfer": 0,
+            "Busy/Call back": 0,
+            "Interested": 0
+          }
+        }
+      }
+    ],
+    "totalCount": 2,
+    "totalPages": 1,
+    "page": 1,
+    "limit": 3
+  }
+}

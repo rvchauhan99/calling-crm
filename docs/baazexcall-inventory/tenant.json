@@ -1,0 +1,4 @@
+{
+  "error": "HTTP Error 404: Not Found",
+  "body": "{\"statusCode\":404,\"code\":\"INTERNAL_SERVER_ERROR\",\"message\":\"Domain query parameter is required\",\"data\":{}}"
+}

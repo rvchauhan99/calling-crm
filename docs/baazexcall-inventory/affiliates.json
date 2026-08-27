@@ -1,0 +1,12 @@
+{
+  "statusCode": 200,
+  "code": "SUCCESS",
+  "message": "Affiliate users fetched successfully",
+  "data": {
+    "users": [],
+    "totalCount": 0,
+    "totalPages": 0,
+    "page": 1,
+    "limit": 3
+  }
+}
