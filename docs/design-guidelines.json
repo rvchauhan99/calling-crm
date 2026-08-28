@@ -1,0 +1,107 @@
+{
+  "theme": "light",
+  "typography": {
+    "headings": {
+      "font_family": "Manrope",
+      "styles": "Tight tracking (tracking-tight), font-bold to font-extrabold. No generic sans."
+    },
+    "body": {
+      "font_family": "IBM Plex Sans",
+      "styles": "Technical, clean, highly legible for dense data arrays. Regular to Medium weights."
+    },
+    "hierarchy": {
+      "h1": "text-2xl md:text-3xl lg:text-4xl",
+      "h2": "text-xl md:text-2xl",
+      "h3": "text-lg md:text-xl",
+      "body": "text-sm",
+      "small_data": "text-xs tracking-wider uppercase text-slate-500"
+    }
+  },
+  "colors": {
+    "palette_strategy": "Vibrant Play / Soft Utility variant constrained to Sky Blue & Slate. NO GREEN.",
+    "primary": {
+      "DEFAULT": "#0EA5E9",
+      "hover": "#0284C7",
+      "light": "#E0F2FE",
+      "dark": "#0369A1"
+    },
+    "background": {
+      "base": "#FFFFFF",
+      "surface": "#F8FAFC",
+      "overlay": "#F1F5F9"
+    },
+    "text": {
+      "primary": "#0F172A",
+      "secondary": "#475569",
+      "muted": "#94A3B8"
+    },
+    "functional": {
+      "success": "#0EA5E9",
+      "warning": "#F59E0B",
+      "error": "#EF4444",
+      "info": "#3B82F6"
+    },
+    "rules": [
+      "NO GREEN ALLOWED per user instruction. Use Sky Blue for success states.",
+      "The 'Tinted Grey' Rule: Pure grey/black is banned. Use Tailwind Slate.",
+      "Never use full-screen gradients. Keep backgrounds solid and highly readable."
+    ]
+  },
+  "visual_enhancers": {
+    "borders": "1px solid border-slate-200. Keep it crisp, no thick borders.",
+    "shadows": "Subtle ambient shadows: shadow-sm for cards, shadow-md for dropdowns. Avoid heavy drop shadows.",
+    "radii": "max 8px (rounded-lg) for panels, 4px (rounded) for internal inputs/buttons. Keeps the UI professional and dense.",
+    "surfaces": "Flat Solid surfaces for data visibility. NO GLASSMORPHISM. NO TRANSPARENT BACKGROUNDS for headers, dropdowns, or overlays. Always set solid background (bg-white)."
+  },
+  "components": {
+    "tables": "Dense, scannable. Cardless layout preferred. Left-align data. Striped or subtle border-b on rows.",
+    "buttons": "Slightly rounded (rounded-md). Clear hover state darkening. Primary actions use Sky Blue.",
+    "inputs": "Shadcn standards. border-slate-200, focus:ring-2 focus:ring-sky-500. No native HTML form elements.",
+    "navigation": "Sidebar for Admin, Topbar or sidebar for Agent. Must be solid bg-slate-900 for contrast or bg-white with a hard border-b/border-r."
+  },
+  "grids_and_layouts": {
+    "dashboard_mode_b": "High Density Grid. grid-cols-1 md:grid-cols-4. Tight gaps (gap-4 or gap-6). Use h-full so widgets stretch.",
+    "agent_workspace": "Focus on 'Today Calls'. Pipeline kanban or dense data table split layout.",
+    "spacing": "Compact for data components (p-3 to p-4). Generous for macro layout (p-6 to p-8 padding on main views)."
+  },
+  "motion": {
+    "micro_interactions": "Hover states on interactive elements. transition: transform 0.2s ease, background-color 0.2s ease.",
+    "loading": "Skeleton loaders matching the shape of data. No generic spinners.",
+    "transitions": "NEVER use 'transition-all'. Target properties directly."
+  },
+  "accessibility": {
+    "contrast": "Strict APCA/WCAG AA compliance. Sky blue against white must meet 3:1 for large UI, 4.5:1 for text.",
+    "testing": "CRITICAL: All interactive and key informational elements MUST include a `data-testid` attribute (kebab-case, role-based).",
+    "focus": "High contrast rings on focus for all inputs and buttons."
+  },
+  "media": {
+    "icons": "Use Phosphor Icons (@phosphor-icons/react) for a professional, technical aesthetic.",
+    "images": {
+      "login_background": {
+        "url": "https://images.unsplash.com/photo-1707730318002-6fbd8ecd6b77?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDk1ODF8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGdlb21ldHJpYyUyMHNreSUyMGJsdWV8ZW58MHx8fHwxNzg3ODM2NjA3fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract geometric sky blue background for the login screen."
+      },
+      "avatars": [
+        "https://images.unsplash.com/photo-1560250097-0b93528c311a?crop=entropy&cs=srgb&fm=jpg",
+        "https://images.unsplash.com/photo-1629425733761-caae3b5f2e50?crop=entropy&cs=srgb&fm=jpg",
+        "https://images.unsplash.com/photo-1627161683077-e34782c24d81?crop=entropy&cs=srgb&fm=jpg"
+      ]
+    }
+  },
+  "instructions_to_main_agent": {
+    "file_type": "Create and modify .js and .jsx files ONLY. Do NOT use .tsx.",
+    "ui_library": "Use shadcn/ui components extensively. Customize the classes directly in the component file to match the flat, dense styling.",
+    "charts": "Use Recharts for the Reports & Dashboards layer. Ensure axes and lines use Slate colors.",
+    "forms": "Use Shadcn components for forms. Date pickers must use Shadcn Calendar."
+  },
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Do not converge toward generic AI outputs. Use specific font families (Manrope & IBM Plex Sans).",
+    "Never center-align the app container. Text should flow naturally left-aligned.",
+    "CRITICAL: Do not use transparent backgrounds for dropdowns, overlays, or sticky headers. ALWAYS use solid bg-white.",
+    "CRITICAL: Add `data-testid` to EVERY interactive element (buttons, tabs, inputs, table row actions).",
+    "Use Phosphor icons. Do not use AI emojis for icons.",
+    "Every interaction needs micro-animations without using 'transition-all'.",
+    "Use 'sonner' for toasts.",
+    "Respect the NO GREEN rule completely. Use Sky Blue for success and positive states."
+  ]
+}

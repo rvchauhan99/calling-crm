@@ -1,4 +1,0 @@
-{
-  "error": "HTTP Error 403: Forbidden",
-  "body": "{\"statusCode\":403,\"code\":\"INTERNAL_SERVER_ERROR\",\"message\":\"Access denied. Required role: SUPER_ADMIN\",\"data\":{}}"
-}

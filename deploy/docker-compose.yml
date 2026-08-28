@@ -1,0 +1,56 @@
+# Calling CRM — Vultr API only (MongoDB Atlas)
+# Frontend is hosted separately (e.g. Vercel).
+# Run from deploy/:  docker compose --env-file .env up -d --build
+
+name: calling-crm
+
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      FRONTEND_URL: ${FRONTEND_URL}
+      MONGO_URL: ${MONGO_URL}
+      DB_NAME: ${DB_NAME}
+      JWT_SECRET: ${JWT_SECRET}
+      COMPANY_ID: ${COMPANY_ID:-default}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DEMO_PASSWORD: ${DEMO_PASSWORD:-}
+    # Plain HTTP: map API_PORT (default 8000). With --profile tls, set API_PUBLISH=127.0.0.1:8000:8000
+    ports:
+      - "${API_PUBLISH:-8000:8000}"
+    networks:
+      - crm
+
+  # Optional HTTPS for the API host: docker compose --profile tls up -d
+  # Point DOMAIN DNS at this VPS; Caddy terminates TLS and proxies to api:8000
+  caddy:
+    image: caddy:2.8-alpine
+    profiles: ["tls"]
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - crm
+
+networks:
+  crm:
+
+volumes:
+  caddy_data:
+  caddy_config:
