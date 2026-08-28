@@ -1,5 +1,9 @@
-{$DOMAIN:localhost} {
-  encode gzip
+# Port 80 on the VPS host is used by another app — HTTPS on 443 only (ACME TLS-ALPN).
+{
+	auto_https disable_redirects
+}
 
-  reverse_proxy api:8000
+{$DOMAIN:localhost} {
+	encode gzip
+	reverse_proxy api:8000
 }

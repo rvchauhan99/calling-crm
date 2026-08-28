@@ -65,11 +65,13 @@ export default function Login() {
             </Button>
           </form>
 
-          <div className="mt-8 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-            <p className="font-semibold text-slate-600">Local setup</p>
-            <p className="mt-1">Use the admin email/password from <code>backend/.env</code> (see README).</p>
-            <p>Seeded demo users use <code>DEMO_PASSWORD</code> from the same file.</p>
-          </div>
+          {process.env.NODE_ENV === "development" && (
+            <div className="mt-8 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+              <p className="font-semibold text-slate-600">Local setup</p>
+              <p className="mt-1">Use the admin email/password from <code>backend/.env</code> (see README).</p>
+              <p>Seeded demo users use <code>DEMO_PASSWORD</code> from the same file.</p>
+            </div>
+          )}
         </div>
       </div>
 
