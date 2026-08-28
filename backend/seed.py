@@ -2,7 +2,7 @@
 import random
 from datetime import timedelta
 from core import (db, COMPANY_ID, hash_password, new_id, now_utc, now_iso,
-                  normalize_phone, verify_password)
+                  normalize_phone, verify_password, dedupe_menus_by_key)
 import os
 
 # ---------- Menu catalog (key, label, icon, path, group, order, actions) ----------
@@ -103,7 +103,24 @@ SOURCES = ["Website", "Facebook Ads", "Google Ads", "Referral", "Cold List", "We
 CITIES = ["Mumbai", "Delhi", "Bengaluru", "Pune", "Hyderabad", "Chennai", "Kolkata"]
 
 
+async def dedupe_menu_catalog():
+    """Remove duplicate menu rows left by parallel seed runs (same companyId + key)."""
+    pipeline = [
+        {"$group": {
+            "_id": {"companyId": "$companyId", "key": "$key"},
+            "ids": {"$push": "$_id"},
+            "count": {"$sum": 1},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    async for group in db.menus.aggregate(pipeline):
+        for oid in group["ids"][1:]:
+            await db.menus.delete_one({"_id": oid})
+
+
 async def ensure_indexes():
+    await dedupe_menu_catalog()
+    await db.menus.create_index([("companyId", 1), ("key", 1)], unique=True)
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id")
     await db.leads.create_index([("companyId", 1), ("phone", 1)])
@@ -121,7 +138,7 @@ async def seed():
     # Menus
     for key, label, icon, path, group, order, actions in MENU_CATALOG:
         await db.menus.update_one(
-            {"key": key},
+            {"companyId": COMPANY_ID, "key": key},
             {"$set": {"key": key, "label": label, "icon": icon, "path": path,
                       "group": group, "order": order, "actions": actions,
                       "companyId": COMPANY_ID}},

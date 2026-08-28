@@ -2,7 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
-from core import (db, COMPANY_ID, require, hash_password, new_id, now_iso, audit)
+from core import (db, COMPANY_ID, require, hash_password, new_id, now_iso, audit,
+                  dedupe_menus_by_key)
 
 router = APIRouter(prefix="/api", tags=["admin"])
 
@@ -136,7 +137,7 @@ async def delete_role(rid: str, principal: dict = Depends(require("roles_menus:d
 @router.get("/menus/catalog")
 async def menu_catalog(principal: dict = Depends(require("roles_menus:view"))):
     menus = await db.menus.find({"companyId": COMPANY_ID}, {"_id": 0}).sort("order", 1).to_list(100)
-    return {"menus": menus}
+    return {"menus": dedupe_menus_by_key(menus)}
 
 
 # ---------------- Teams ----------------

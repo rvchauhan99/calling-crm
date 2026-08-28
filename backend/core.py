@@ -193,3 +193,16 @@ async def audit(actor: dict, action: str, entity: str, entity_id: str = None, me
         "meta": meta or {},
         "created_at": now_iso(),
     })
+
+
+def dedupe_menus_by_key(menus: list) -> list:
+    """Keep first menu row per key (catalog sorted by order before calling)."""
+    seen = set()
+    out = []
+    for menu in menus:
+        key = menu.get("key")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(menu)
+    return out

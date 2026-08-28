@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 from core import (db, COMPANY_ID, verify_password, hash_password, create_access_token,
                   create_refresh_token, set_auth_cookies, get_principal, now_utc,
-                  now_iso, new_id, audit)
+                  now_iso, new_id, audit, dedupe_menus_by_key)
 import jwt
 from core import JWT_SECRET, JWT_ALGORITHM
 
@@ -129,6 +129,7 @@ async def my_menus(principal: dict = Depends(get_principal)):
     """Menu catalog filtered to menus the principal's role grants."""
     allowed = set(principal.get("menus", []))
     catalog = await db.menus.find({"companyId": COMPANY_ID}, {"_id": 0}).sort("order", 1).to_list(100)
-    return {"menus": [m for m in catalog if m["key"] in allowed],
+    filtered = [m for m in catalog if m["key"] in allowed]
+    return {"menus": dedupe_menus_by_key(filtered),
             "permissions": principal.get("permissions", []),
             "data_scope": principal.get("data_scope")}
