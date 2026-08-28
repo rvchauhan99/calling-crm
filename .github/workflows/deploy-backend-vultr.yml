@@ -1,0 +1,72 @@
+# Deploy Calling CRM API to Vultr on push to main.
+#
+# Required GitHub repo secrets (Settings → Secrets and variables → Actions):
+#   VULTR_HOST      — e.g. 139.84.223.174
+#   VULTR_USER      — e.g. root
+#   VULTR_SSH_KEY   — private SSH key (PEM) with access to the VPS
+#   VULTR_HEALTH_URL — e.g. https://139-84-223-174.sslip.io/api/health
+#
+# Server must have: Docker, deploy/.env filled, /opt/calling-crm layout.
+
+name: Deploy Backend to Vultr
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "deploy/**"
+      - ".github/workflows/deploy-backend-vultr.yml"
+
+concurrency:
+  group: vultr-backend-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy API
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.VULTR_SSH_KEY }}" > ~/.ssh/vultr
+          chmod 600 ~/.ssh/vultr
+          ssh-keyscan -H "${{ secrets.VULTR_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync backend and deploy files
+        env:
+          VULTR_HOST: ${{ secrets.VULTR_HOST }}
+          VULTR_USER: ${{ secrets.VULTR_USER }}
+        run: |
+          RSYNC_SSH="ssh -i ~/.ssh/vultr -o BatchMode=yes"
+          REMOTE="${VULTR_USER}@${VULTR_HOST}:/opt/calling-crm"
+
+          rsync -avz --delete \
+            --exclude '.env' \
+            --exclude '.venv/' \
+            --exclude '__pycache__/' \
+            --exclude '.pytest_cache/' \
+            -e "$RSYNC_SSH" \
+            backend/ "${REMOTE}/backend/"
+
+          rsync -avz \
+            --exclude '.env' \
+            -e "$RSYNC_SSH" \
+            deploy/ "${REMOTE}/deploy/"
+
+      - name: Build and restart containers
+        env:
+          VULTR_HOST: ${{ secrets.VULTR_HOST }}
+          VULTR_USER: ${{ secrets.VULTR_USER }}
+        run: |
+          ssh -i ~/.ssh/vultr -o BatchMode=yes "${VULTR_USER}@${VULTR_HOST}" \
+            "bash /opt/calling-crm/deploy/scripts/deploy-vultr.sh"
+
+      - name: Health check
+        run: curl -fsS "${{ secrets.VULTR_HEALTH_URL }}"
