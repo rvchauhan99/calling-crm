@@ -19,7 +19,10 @@ import { cn } from "@/lib/utils"
 import {
   QUEUE_BUCKETS,
   urgencyLabel,
-  toDatetimeLocalValue,
+  nowDatetimeLocalValue,
+  isCallBackDisposition,
+  isConvertDisposition,
+  isTerminalStage,
 } from "@/lib/followupBuckets"
 import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
 const SORTS = [
@@ -71,7 +74,7 @@ export default function TodayCalls() {
     setForm({
       disposition_id: "",
       notes: "",
-      follow_up_at: toDatetimeLocalValue(lead.follow_up_at),
+      follow_up_at: "",
       pipeline_stage: lead.pipeline_stage || "New",
       duration: 0,
     })
@@ -79,12 +82,21 @@ export default function TodayCalls() {
 
   const submit = async () => {
     if (!form.disposition_id) { toast.error("Select a disposition"); return }
+    const disp = dispositions.find((d) => d.id === form.disposition_id)
+    if (isCallBackDisposition(disp) && !form.follow_up_at) {
+      toast.error("Follow-up required for Call Back")
+      return
+    }
     try {
+      const converts = isConvertDisposition(disp)
+      const terminal = isTerminalStage(form.pipeline_stage) || converts
       const payload = {
         lead_id: active.id,
         ...form,
         duration: Number(form.duration) || 0,
-        follow_up_at: form.follow_up_at ? new Date(form.follow_up_at).toISOString() : null,
+        follow_up_at: terminal || !form.follow_up_at
+          ? null
+          : new Date(form.follow_up_at).toISOString(),
       }
       const { data: res } = await api.post("/calls/log", payload)
       if (res.converted) toast.success("Lead converted to client")
@@ -519,10 +531,18 @@ export default function TodayCalls() {
               onChange={(v) => {
                 const disp = dispositions.find((d) => d.id === v)
                 const mapped = mappedStageForDisposition(disp)
+                const nextStage = mapped || form.pipeline_stage
+                let follow_up_at = form.follow_up_at
+                if (isConvertDisposition(disp) || isTerminalStage(nextStage)) {
+                  follow_up_at = ""
+                } else if (isCallBackDisposition(disp)) {
+                  follow_up_at = nowDatetimeLocalValue()
+                }
                 setForm({
                   ...form,
                   disposition_id: v,
-                  pipeline_stage: mapped || form.pipeline_stage,
+                  pipeline_stage: nextStage,
+                  follow_up_at,
                 })
               }}
               options={dispositions.map((d) => ({
@@ -546,7 +566,11 @@ export default function TodayCalls() {
             <div className="grid grid-cols-2 gap-3">
               <SearchableSelect
                 value={form.pipeline_stage}
-                onChange={(v) => setForm({ ...form, pipeline_stage: v })}
+                onChange={(v) => setForm({
+                  ...form,
+                  pipeline_stage: v,
+                  follow_up_at: isTerminalStage(v) ? "" : form.follow_up_at,
+                })}
                 options={STAGES.map((s) => ({ value: s, label: s }))}
                 placeholder="Select stage"
                 searchPlaceholder="Search stages…"
@@ -568,17 +592,36 @@ export default function TodayCalls() {
                 />
               </div>
             </div>
-            <div>
-              <Label htmlFor="today-followup">Follow-up date/time</Label>
-              <Input
-                id="today-followup"
-                type="datetime-local"
-                value={form.follow_up_at}
-                className="mt-1 focus-visible:ring-sky-500"
-                onChange={(e) => setForm({ ...form, follow_up_at: e.target.value })}
-                data-testid="followup-input"
-              />
-            </div>
+            {(() => {
+              const disp = dispositions.find((d) => d.id === form.disposition_id)
+              const converts = isConvertDisposition(disp)
+              const fuDisabled = converts || isTerminalStage(form.pipeline_stage)
+              const callBack = isCallBackDisposition(disp)
+              return (
+                <div>
+                  <Label htmlFor="today-followup">
+                    Follow-up date/time{callBack && !fuDisabled ? " *" : fuDisabled ? "" : " (optional)"}
+                  </Label>
+                  <Input
+                    id="today-followup"
+                    type="datetime-local"
+                    value={form.follow_up_at}
+                    className="mt-1 focus-visible:ring-sky-500"
+                    onChange={(e) => setForm({ ...form, follow_up_at: e.target.value })}
+                    data-testid="followup-input"
+                    disabled={fuDisabled}
+                    required={callBack && !fuDisabled}
+                  />
+                  {fuDisabled ? (
+                    <p className="mt-1 text-xs text-slate-500">No follow-up after conversion / closed stage</p>
+                  ) : callBack ? (
+                    <p className="mt-1 text-xs text-slate-500">Scheduled for next follow-up (no ACW)</p>
+                  ) : (
+                    <p className="mt-1 text-xs text-slate-500">Leave blank to clear previous follow-up</p>
+                  )}
+                </div>
+              )
+            })()}
             <div>
               <Label htmlFor="today-calls-remarks">Remarks</Label>
               <Textarea

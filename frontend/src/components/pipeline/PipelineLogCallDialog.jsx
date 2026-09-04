@@ -7,7 +7,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
-import { toDatetimeLocalValue } from "@/lib/followupBuckets"
+import {
+  nowDatetimeLocalValue,
+  isCallBackDisposition,
+  isConvertDisposition,
+  isTerminalStage,
+} from "@/lib/followupBuckets"
 
 const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
 
@@ -17,10 +22,12 @@ export const mappedStageForDisposition = (disp) => {
   return disp.default_pipeline_stage || null
 }
 
-const emptyForm = (lead, stage) => ({
+const emptyForm = (lead, stage, mode) => ({
   disposition_id: "",
   notes: "",
-  follow_up_at: toDatetimeLocalValue(lead?.follow_up_at) || "",
+  // Do not copy old FU — logging clears unless a new next is entered.
+  // Pipeline move into an active stage defaults to now (next action required).
+  follow_up_at: mode === "move" && !isTerminalStage(stage) ? nowDatetimeLocalValue() : "",
   pipeline_stage: stage || lead?.pipeline_stage || "New",
   duration: 0,
 })
@@ -35,7 +42,7 @@ export const PipelineLogCallDialog = ({
   onClose,
   onSubmit,
 }) => {
-  const [form, setForm] = useState(emptyForm(null, "New"))
+  const [form, setForm] = useState(emptyForm(null, "New", "log"))
   const selectedDisp = useMemo(
     () => dispositions.find((d) => d.id === form.disposition_id),
     [dispositions, form.disposition_id],
@@ -45,7 +52,13 @@ export const PipelineLogCallDialog = ({
   const stage = mode === "move"
     ? targetStage
     : (mappedStage || form.pipeline_stage)
-  const fuRequired = stage !== "Won" && stage !== "Lost"
+  const converts = isConvertDisposition(selectedDisp)
+  const callBack = isCallBackDisposition(selectedDisp)
+  const terminal = isTerminalStage(stage) || converts
+  const fuDisabled = terminal
+  const fuRequired = !fuDisabled && (
+    callBack || (mode === "move" && !isTerminalStage(targetStage))
+  )
   const title = mode === "move"
     ? `Move to ${targetStage}`
     : `Log Call — ${lead?.name || ""}`
@@ -60,26 +73,39 @@ export const PipelineLogCallDialog = ({
 
   useEffect(() => {
     if (open && lead) {
-      setForm(emptyForm(lead, targetStage || lead.pipeline_stage))
+      setForm(emptyForm(lead, targetStage || lead.pipeline_stage, mode))
     }
-  }, [open, lead, targetStage])
+  }, [open, lead, targetStage, mode])
 
   const handleDispositionChange = (v) => {
     const disp = dispositions.find((d) => d.id === v)
     const mapped = mappedStageForDisposition(disp)
+    const nextStage = mapped || (mode === "move" ? targetStage : form.pipeline_stage)
+    let follow_up_at = form.follow_up_at
+    if (isConvertDisposition(disp) || isTerminalStage(nextStage)) {
+      follow_up_at = ""
+    } else if (isCallBackDisposition(disp)) {
+      follow_up_at = nowDatetimeLocalValue()
+    } else if (mode === "move" && !isTerminalStage(nextStage) && !follow_up_at) {
+      follow_up_at = nowDatetimeLocalValue()
+    }
     setForm((prev) => ({
       ...prev,
       disposition_id: v,
-      pipeline_stage: mapped || (mode === "move" ? targetStage : prev.pipeline_stage),
+      pipeline_stage: nextStage,
+      follow_up_at,
     }))
   }
 
   const handleSubmit = () => {
+    const nextFu = fuDisabled || !form.follow_up_at
+      ? null
+      : new Date(form.follow_up_at).toISOString()
     onSubmit?.({
       ...form,
       pipeline_stage: stage,
       duration: Number(form.duration) || 0,
-      follow_up_at: form.follow_up_at ? new Date(form.follow_up_at).toISOString() : null,
+      follow_up_at: nextFu,
     })
   }
 
@@ -129,7 +155,14 @@ export const PipelineLogCallDialog = ({
             <div className="grid grid-cols-2 gap-3">
               <SearchableSelect
                 value={stage}
-                onChange={(v) => setForm({ ...form, pipeline_stage: v })}
+                onChange={(v) => {
+                  const next = {
+                    ...form,
+                    pipeline_stage: v,
+                  }
+                  if (isTerminalStage(v) || converts) next.follow_up_at = ""
+                  setForm(next)
+                }}
                 options={STAGES.map((s) => ({ value: s, label: s }))}
                 placeholder="Stage"
                 label="Pipeline stage"
@@ -169,7 +202,7 @@ export const PipelineLogCallDialog = ({
           )}
           <div>
             <Label htmlFor="pipe-followup">
-              Follow-up date/time{fuRequired ? " *" : " (optional)"}
+              Follow-up date/time{fuRequired ? " *" : fuDisabled ? "" : " (optional)"}
             </Label>
             <Input
               id="pipe-followup"
@@ -179,7 +212,21 @@ export const PipelineLogCallDialog = ({
               onChange={(e) => setForm({ ...form, follow_up_at: e.target.value })}
               data-testid="pipeline-followup-input"
               required={fuRequired}
+              disabled={fuDisabled}
             />
+            {fuDisabled ? (
+              <p className="mt-1 text-xs text-slate-500" data-testid="fu-disabled-hint">
+                No follow-up after conversion / closed stage
+              </p>
+            ) : callBack ? (
+              <p className="mt-1 text-xs text-slate-500" data-testid="fu-callback-hint">
+                Scheduled for next follow-up (no ACW)
+              </p>
+            ) : (
+              <p className="mt-1 text-xs text-slate-500" data-testid="fu-clear-hint">
+                Leave blank to clear previous follow-up
+              </p>
+            )}
           </div>
           <div>
             <Label htmlFor="pipe-remarks">Remarks</Label>

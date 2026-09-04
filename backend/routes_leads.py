@@ -644,6 +644,15 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     if not disp:
         raise HTTPException(status_code=404, detail="Disposition not found")
 
+    # Normalize: blank / missing next FU → clear previous obligation
+    next_fu = body.follow_up_at.strip() if isinstance(body.follow_up_at, str) else body.follow_up_at
+    if not next_fu:
+        next_fu = None
+
+    should_convert = bool(disp.get("converts_to_client")) or disp.get("name") == "Converted"
+    if disp.get("name") == "Call Back" and not next_fu and not should_convert:
+        raise HTTPException(status_code=400, detail="Follow-up required for Call Back")
+
     # ACW is non-blocking: track pending separately; never 409 other leads
     fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0, "acw_pending_lead_id": 1})
     pending = fresh.get("acw_pending_lead_id") if fresh else None
@@ -654,12 +663,12 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
             "agent_id": principal["id"], "agent_name": principal["name"],
             "disposition_id": disp["id"], "disposition_name": disp["name"],
             "outcome": body.outcome, "notes": body.notes, "duration": body.duration,
-            "follow_up_at": body.follow_up_at, "created_at": now_iso()}
+            "follow_up_at": next_fu, "created_at": now_iso()}
     await db.calls.insert_one(dict(call))
 
     carry = disp["type"] == "carry_forward"
     lead_upd = {"disposition_id": disp["id"], "disposition_name": disp["name"],
-                "carry_forward": carry, "follow_up_at": body.follow_up_at,
+                "carry_forward": carry, "follow_up_at": next_fu,
                 "updated_at": now_iso()}
     mapped_stage = _mapped_stage_for_disposition(disp)
     if mapped_stage:
@@ -675,12 +684,13 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         lead_upd["pipeline_stage"] = body.pipeline_stage
     if not carry:
         lead_upd["status"] = "inactive"  # leaves active queue, retained
+    if should_convert:
+        lead_upd["follow_up_at"] = None
     await db.leads.update_one({"id": body.lead_id}, {"$set": lead_upd})
 
     # Auto-convert when disposition converts_to_client (or legacy name Converted)
     converted = False
     client_id = lead.get("client_id")
-    should_convert = bool(disp.get("converts_to_client")) or disp.get("name") == "Converted"
     if should_convert:
         fresh_lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
         if fresh_lead and not fresh_lead.get("is_client"):
@@ -691,6 +701,9 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         elif fresh_lead and fresh_lead.get("is_client"):
             client_id = fresh_lead.get("client_id")
             converted = False
+            await db.leads.update_one(
+                {"id": body.lead_id}, {"$set": {"follow_up_at": None, "updated_at": now_iso()}},
+            )
 
     # ACW pending is a reminder only: set on ACW disposition; clear only for same lead or complete-acw
     if disp.get("requires_acw"):
@@ -810,7 +823,13 @@ async def move_stage(lid: str, body: StageIn, principal: dict = Depends(require(
 # ---------------- Follow-ups ----------------
 @router.get("/followups")
 async def followups(principal: dict = Depends(require("followups:view"))):
-    q = {"companyId": COMPANY_ID, "follow_up_at": {"$ne": None}, **await scope_filter(principal, "assigned_to")}
+    q = {
+        "companyId": COMPANY_ID,
+        "follow_up_at": {"$ne": None},
+        "is_client": {"$ne": True},
+        "status": {"$ne": "converted"},
+        **await scope_filter(principal, "assigned_to"),
+    }
     leads = await db.leads.find(q, {"_id": 0}).sort("follow_up_at", 1).to_list(1000)
     return {"followups": leads}
 

@@ -182,6 +182,7 @@ describe("Followups page", () => {
           lead_id: "fu-overdue",
           disposition_id: "disp-1",
           notes: "Called back customer",
+          follow_up_at: null,
         }),
       )
     })

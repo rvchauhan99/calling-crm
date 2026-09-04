@@ -130,10 +130,14 @@ export default function Pipeline() {
       toast.error("Select a disposition")
       return
     }
+    const disp = dispositions.find((d) => d.id === payload.disposition_id)
     const stage = payload.pipeline_stage
-    const fuRequired = stage !== "Won" && stage !== "Lost"
+    const converts = Boolean(disp?.converts_to_client || disp?.name === "Converted")
+    const terminal = stage === "Won" || stage === "Lost" || converts
+    const callBack = disp?.name === "Call Back"
+    const fuRequired = !terminal && (callBack || Boolean(moveTarget))
     if (fuRequired && !payload.follow_up_at) {
-      toast.error("Follow-up date/time is required")
+      toast.error(callBack ? "Follow-up required for Call Back" : "Follow-up date/time is required")
       return
     }
     try {
@@ -143,7 +147,7 @@ export default function Pipeline() {
         outcome: "connected",
         notes: payload.notes || "",
         duration: payload.duration || 0,
-        follow_up_at: payload.follow_up_at,
+        follow_up_at: terminal ? null : (payload.follow_up_at || null),
         pipeline_stage: stage,
       })
       if (res.converted) toast.success("Lead converted to client")

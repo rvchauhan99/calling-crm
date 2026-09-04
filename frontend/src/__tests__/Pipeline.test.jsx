@@ -141,7 +141,10 @@ describe("Pipeline workbench", () => {
 
     const dialog = await screen.findByTestId("pipeline-log-call-dialog")
     expect(within(dialog).getByTestId("move-target-stage")).toHaveTextContent("Contacted")
-    expect(within(dialog).getByTestId("pipeline-followup-input")).toBeInTheDocument()
+    const fu = within(dialog).getByTestId("pipeline-followup-input")
+    expect(fu).toBeInTheDocument()
+    expect(fu.value).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/)
+    expect(within(dialog).getByTestId("fu-clear-hint")).toBeInTheDocument()
 
     await user.click(screen.getByTestId("pipeline-log-cancel"))
     expect(api.post).not.toHaveBeenCalled()
@@ -158,7 +161,10 @@ describe("Pipeline workbench", () => {
 
     const dialog = await screen.findByTestId("pipeline-log-call-dialog")
     await user.selectOptions(within(dialog).getByTestId("pipeline-disposition-select"), "d1")
-    await user.type(within(dialog).getByTestId("pipeline-followup-input"), "2026-09-10T10:00")
+    // Move mode / Call Back already prefills follow-up; set explicitly for determinism
+    fireEvent.change(within(dialog).getByTestId("pipeline-followup-input"), {
+      target: { value: "2026-09-10T10:00" },
+    })
     await user.click(within(dialog).getByTestId("pipeline-log-submit"))
 
     await waitFor(() => {

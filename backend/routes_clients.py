@@ -76,6 +76,7 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
         {"$set": {
             "is_client": True, "client_id": cid,
             "status": "converted", "pipeline_stage": "Won",
+            "follow_up_at": None,
             "updated_at": now_iso(),
         }},
     )

@@ -85,7 +85,7 @@ ROLE_DEFS = {
 # name, order, type, requires_acw, color, default_pipeline_stage, converts_to_client
 DISPOSITIONS = [
     ("Interested", 1, "carry_forward", False, "#0EA5E9", "Qualified", False),
-    ("Call Back", 2, "carry_forward", True, "#38BDF8", "Contacted", False),
+    ("Call Back", 2, "carry_forward", False, "#38BDF8", "Contacted", False),
     ("Ringing / No Answer", 3, "carry_forward", False, "#7DD3FC", "Contacted", False),
     ("Switched Off", 4, "carry_forward", False, "#94A3B8", "Contacted", False),
     ("Not Interested", 5, "non_carry_forward", False, "#F59E0B", "Lost", False),
@@ -190,6 +190,16 @@ async def migrate_disposition_pipeline_links():
     await db.dispositions.update_many(
         {"companyId": COMPANY_ID, "name": "Converted"},
         {"$set": {"default_pipeline_stage": "Won", "converts_to_client": True}},
+    )
+    # Call Back: no ACW — next work is the scheduled follow-up
+    await db.dispositions.update_many(
+        {"companyId": COMPANY_ID, "name": "Call Back"},
+        {"$set": {"requires_acw": False}},
+    )
+    # Converted / client leads never stay on follow-up queue
+    await db.leads.update_many(
+        {"companyId": COMPANY_ID, "$or": [{"is_client": True}, {"status": "converted"}]},
+        {"$set": {"follow_up_at": None}},
     )
 
 

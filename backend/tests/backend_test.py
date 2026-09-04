@@ -495,6 +495,13 @@ class TestDispositions:
         assert converted[0].get("default_pipeline_stage") == "Won"
         assert converted[0].get("converts_to_client") is True
 
+    def test_seeded_call_back_acw_disabled(self, admin):
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        cb = [d for d in disps if d["name"] == "Call Back"]
+        assert cb, "Call Back disposition must be seeded"
+        assert cb[0].get("requires_acw") is False
+        assert cb[0].get("default_pipeline_stage") == "Contacted"
+
 
 # ---------------- Today calls + ACW gate ----------------
 class TestTodayCallsACW:
@@ -713,6 +720,7 @@ class TestTodayCallsACW:
         assert body.get("client_id")
         got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
         assert got["is_client"] is True and got["pipeline_stage"] == "Won"
+        assert got.get("follow_up_at") in (None, "")
         agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
         again = agent.post(f"{BASE_URL}/api/calls/log", json={
             "lead_id": lead["id"], "disposition_id": conv["id"], "notes": "again"}, timeout=30)
@@ -762,6 +770,7 @@ class TestTodayCallsACW:
         assert r.json().get("converted") is True
         got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
         assert got["is_client"] is True and got["pipeline_stage"] == "Won"
+        assert got.get("follow_up_at") in (None, "")
         board = admin.get(f"{BASE_URL}/api/pipeline", timeout=60).json()["board"]
         won_ids = [l["id"] for l in board.get("Won", [])]
         assert lead["id"] in won_ids
@@ -769,7 +778,68 @@ class TestTodayCallsACW:
             if st == "Won":
                 continue
             assert lead["id"] not in [l["id"] for l in items]
+        fus = admin.get(f"{BASE_URL}/api/followups", timeout=60).json()["followups"]
+        assert lead["id"] not in [l["id"] for l in fus]
         admin.delete(f"{BASE_URL}/api/dispositions/{disp['id']}", timeout=30)
+
+    def test_log_call_clears_follow_up_when_blank(self, admin, agent):
+        from datetime import datetime, timezone, timedelta
+        p = "85" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_ClearFU", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        fut = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        admin.put(f"{BASE_URL}/api/followups/{lead['id']}", json={"follow_up_at": fut}, timeout=30)
+        assert admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]["follow_up_at"]
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        interested = [d for d in disps if d["name"] == "Interested"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": interested["id"],
+            "follow_up_at": None}, timeout=30)
+        assert r.status_code == 200, r.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("follow_up_at") in (None, "")
+
+    def test_call_back_requires_follow_up(self, admin, agent):
+        p = "84" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_CB_FU", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        cb = [d for d in disps if d["name"] == "Call Back"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        bad = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cb["id"]}, timeout=30)
+        assert bad.status_code == 400
+        from datetime import datetime, timezone, timedelta
+        fut = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+        ok = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cb["id"],
+            "follow_up_at": fut}, timeout=30)
+        assert ok.status_code == 200, ok.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("follow_up_at")
+
+    def test_manual_convert_clears_follow_up(self, admin):
+        from datetime import datetime, timezone, timedelta
+        p = "83" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_ConvClearFU", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        fut = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        admin.put(f"{BASE_URL}/api/followups/{lead['id']}", json={"follow_up_at": fut}, timeout=30)
+        r = admin.post(f"{BASE_URL}/api/clients/convert", json={"lead_id": lead["id"]}, timeout=30)
+        assert r.status_code == 200, r.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("follow_up_at") in (None, "")
+        assert got.get("is_client") is True
+        fus = admin.get(f"{BASE_URL}/api/followups", timeout=60).json()["followups"]
+        assert lead["id"] not in [l["id"] for l in fus]
 
     def test_call_history_search_and_export(self, admin):
         h = admin.get(f"{BASE_URL}/api/call-history?page_size=5", timeout=60)

@@ -76,3 +76,15 @@ export const toDatetimeLocalValue = (iso) => {
   const pad = (n) => String(n).padStart(2, "0")
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
+
+/** Current local datetime for datetime-local inputs. */
+export const nowDatetimeLocalValue = () => toDatetimeLocalValue(new Date().toISOString())
+
+export const isCallBackDisposition = (disp) => disp?.name === "Call Back"
+
+export const isConvertDisposition = (disp) => (
+  Boolean(disp?.converts_to_client || disp?.name === "Converted")
+)
+
+export const isTerminalStage = (stage) => stage === "Won" || stage === "Lost"
+
