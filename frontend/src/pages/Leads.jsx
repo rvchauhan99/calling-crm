@@ -77,12 +77,12 @@ export default function Leads() {
 
   const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
 
-  const setTab = (v) => {
+  const setTab = useCallback((v) => {
     const p = new URLSearchParams(params)
     p.set("tab", v)
     p.set("page", "1")
     setParams(p)
-  }
+  }, [params, setParams])
 
   const clearAllFilters = () => {
     const p = new URLSearchParams()
@@ -96,7 +96,7 @@ export default function Leads() {
     if (isOwnScope && tabParam === "unassigned") {
       setTab("assigned")
     }
-  }, [isOwnScope, tabParam])
+  }, [isOwnScope, tabParam, setTab])
 
   const loadCounts = useCallback(async () => {
     try {

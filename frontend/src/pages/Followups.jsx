@@ -101,14 +101,13 @@ export default function Followups() {
     load()
   }
 
-  const now = useMemo(() => new Date(), [list])
-
   const visible = useMemo(() => {
     if (!list) return []
+    const now = new Date()
     const sorted = sortFollowups(list, now)
     if (filter === "all") return sorted
     return sorted.filter((l) => classifyFollowup(l.follow_up_at, now) === filter)
-  }, [list, filter, now])
+  }, [list, filter])
 
   if (!list) return <PageLoader />
 
@@ -174,7 +173,7 @@ export default function Followups() {
             </TableHeader>
             <TableBody>
               {visible.map((l) => {
-                const category = classifyFollowup(l.follow_up_at, now)
+                const category = classifyFollowup(l.follow_up_at, new Date())
                 return (
                   <TableRow
                     key={l.id}
