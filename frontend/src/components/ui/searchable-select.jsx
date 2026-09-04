@@ -64,7 +64,7 @@ export function SearchableSelect({
                   <CommandItem
                     key={option.value}
                     value={option.label}
-                    keywords={[option.value, option.label]}
+                    keywords={[option.value, option.label, ...(option.keywords || [])]}
                     onSelect={() => handleSelect(option.value)}
                   >
                     <Check

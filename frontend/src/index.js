@@ -21,6 +21,14 @@ window.addEventListener("unhandledrejection", (e) => {
   if (e.reason?.isAxiosError) e.preventDefault();
 });
 
+// Benign Chrome/Radix quirk — do not show CRA overlay for ResizeObserver loop
+window.addEventListener("error", (e) => {
+  if (e.message?.includes("ResizeObserver loop")) {
+    e.stopImmediatePropagation();
+    e.preventDefault();
+  }
+});
+
 root.render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>

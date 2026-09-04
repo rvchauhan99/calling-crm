@@ -11,7 +11,7 @@ class TestAffiliateScope:
         r = affiliate.get(f"{BASE_URL}/api/clients", timeout=60)
         assert r.status_code == 200, r.text
         aff_total = r.json()["total"]
-        adm = admin.get(f"{BASE_URL}/api/clients", timeout=60).json()
+        adm = admin.get(f"{BASE_URL}/api/clients?page_size=500", timeout=60).json()
         referred = [c for c in adm["clients"] if c.get("affiliate_id") == affiliate.user["id"]]
         assert aff_total > 0, "Affiliate sees 0 clients"
         assert aff_total == len(referred), (

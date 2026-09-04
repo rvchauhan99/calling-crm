@@ -17,9 +17,12 @@ class NoteIn(BaseModel):
 
 
 @router.get("/clients")
-async def list_clients(search: Optional[str] = None, page: int = 1, page_size: int = 25,
+async def list_clients(search: Optional[str] = None, status: Optional[str] = None,
+                       page: int = 1, page_size: int = 25,
                        principal: dict = Depends(require("clients:view"))):
     q = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    if status in ("active", "inactive"):
+        q["status"] = status
     if search:
         q["$or"] = [{"name": {"$regex": search, "$options": "i"}},
                     {"phone": {"$regex": search, "$options": "i"}}]
@@ -29,6 +32,57 @@ async def list_clients(search: Optional[str] = None, page: int = 1, page_size: i
     return {"clients": clients, "total": total, "page": page, "page_size": page_size}
 
 
+@router.get("/clients/tab-counts")
+async def clients_tab_counts(principal: dict = Depends(require("clients:view"))):
+    base = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    active = await db.clients.count_documents({**base, "status": "active"})
+    inactive = await db.clients.count_documents({**base, "status": "inactive"})
+    return {"active": active, "inactive": inactive}
+
+
+@router.get("/clients/convertible-leads")
+async def convertible_leads(search: Optional[str] = None, page_size: int = 40,
+                            principal: dict = Depends(require("clients:convert"))):
+    q = {
+        "companyId": COMPANY_ID,
+        "is_client": {"$ne": True},
+        "status": {"$in": ["active", "inactive"]},
+        **await scope_filter(principal, "assigned_to"),
+    }
+    if search:
+        q["$or"] = [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"phone": {"$regex": search, "$options": "i"}},
+        ]
+    leads = await db.leads.find(
+        q, {"_id": 0, "id": 1, "name": 1, "phone": 1},
+    ).sort("updated_at", -1).limit(min(page_size, 100)).to_list(100)
+    return {"leads": leads}
+
+
+async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Optional[str] = None) -> dict:
+    cid = new_id()
+    client = {
+        "id": cid, "companyId": COMPANY_ID, "lead_id": lead["id"],
+        "name": lead["name"], "phone": lead["phone"], "email": lead.get("email", ""),
+        "assigned_to": lead.get("assigned_to"), "assigned_name": lead.get("assigned_name"),
+        "owner_id": lead.get("assigned_to") or principal["id"],
+        "affiliate_id": affiliate_id, "ftd_at": None, "balance": 0.0,
+        "status": "active", "notes": [], "created_at": now_iso(),
+    }
+    await db.clients.insert_one(dict(client))
+    await db.leads.update_one(
+        {"id": lead["id"]},
+        {"$set": {
+            "is_client": True, "client_id": cid,
+            "status": "converted", "pipeline_stage": "Won",
+            "updated_at": now_iso(),
+        }},
+    )
+    await audit(principal, "convert", "client", cid, {"lead_id": lead["id"]})
+    return client
+
+
 @router.post("/clients/convert")
 async def convert_lead(body: ConvertIn, principal: dict = Depends(require("clients:convert"))):
     lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
@@ -36,18 +90,7 @@ async def convert_lead(body: ConvertIn, principal: dict = Depends(require("clien
         raise HTTPException(status_code=404, detail="Lead not found")
     if lead.get("is_client"):
         raise HTTPException(status_code=400, detail="Lead is already a client")
-    cid = new_id()
-    client = {"id": cid, "companyId": COMPANY_ID, "lead_id": lead["id"],
-              "name": lead["name"], "phone": lead["phone"], "email": lead.get("email", ""),
-              "assigned_to": lead.get("assigned_to"), "assigned_name": lead.get("assigned_name"),
-              "owner_id": lead.get("assigned_to") or principal["id"],
-              "affiliate_id": body.affiliate_id, "ftd_at": None, "balance": 0.0,
-              "status": "active", "notes": [], "created_at": now_iso()}
-    await db.clients.insert_one(dict(client))
-    await db.leads.update_one({"id": lead["id"]},
-                              {"$set": {"is_client": True, "client_id": cid,
-                                        "status": "converted", "pipeline_stage": "Won"}})
-    await audit(principal, "convert", "client", cid, {"lead_id": lead["id"]})
+    client = await _create_client_from_lead(lead, principal, body.affiliate_id)
     return {"client": client}
 
 

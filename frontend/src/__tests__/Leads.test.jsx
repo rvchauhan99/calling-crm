@@ -95,6 +95,24 @@ describe("Leads role visibility", () => {
     expect(screen.queryByTestId("tab-assigned")).not.toBeInTheDocument()
   })
 
+  it("shows labeled filters and clear when filters active", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      dataScope: "OWN",
+      user: { id: "agent-1", user_type: "caller" },
+    })
+    __setMockSearchParams(new URLSearchParams("status=active&sort=name_asc"))
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-filters")).toBeInTheDocument()
+    })
+    expect(screen.getByText("Status")).toBeInTheDocument()
+    expect(screen.getByText("Sort")).toBeInTheDocument()
+    expect(screen.getByTestId("clear-all-filters")).toBeInTheDocument()
+  })
+
   it("shows assignment tabs for ALL-scoped users", async () => {
     useAuth.mockReturnValue({
       can: (perm) => perm === "leads:assign",

@@ -217,8 +217,13 @@ async def seed():
                                       {"$set": {"password_hash": hash_password(admin_password)}})
         await db.users.update_one({"id": admin_id}, {"$set": {"role_id": role_ids["Super Admin"]}})
 
-    # If demo already seeded, stop here
+    # Keep demo passwords in sync with DEMO_PASSWORD (like admin above)
+    demo_password = os.environ.get("DEMO_PASSWORD", "Passw0rd!")
     if await db.users.count_documents({"companyId": COMPANY_ID, "is_demo": True}) > 0:
+        await db.users.update_many(
+            {"companyId": COMPANY_ID, "is_demo": True},
+            {"$set": {"password_hash": hash_password(demo_password)}},
+        )
         return
 
     # Dispositions

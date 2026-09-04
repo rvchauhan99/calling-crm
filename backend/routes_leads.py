@@ -1,13 +1,15 @@
 """Leads, dispositions, calls (today/history), pipeline, follow-ups, lead 360."""
 import io
 import csv
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit)
 from lead_constants import LEAD_SOURCES, LEAD_SOURCES_CREATABLE
+from datetime import datetime, timedelta, timezone, time
+from routes_reports import IST, ist_today, ist_date, parse_date, date_bounds_iso
 
 router = APIRouter(prefix="/api", tags=["leads"])
 
@@ -203,7 +205,8 @@ async def _auto_assign_plan(max_leads: Optional[int], dry_run: bool = False) -> 
 async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
                      disposition: Optional[str] = None, assigned_to: Optional[str] = None,
                      assignment_status: Optional[str] = None, stage: Optional[str] = None,
-                     source: Optional[str] = None, page: int = 1, page_size: int = 25,
+                     source: Optional[str] = None, sort: Optional[str] = None,
+                     page: int = 1, page_size: int = 25,
                      principal: dict = Depends(require("leads:view"))):
     q = await _scoped_leads_query(principal)
     skip_assignment = principal.get("data_scope") == "OWN"
@@ -212,7 +215,14 @@ async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
                         stage=stage, source=source, skip_assignment_status=skip_assignment)
     total = await db.leads.count_documents(q)
     skip = (page - 1) * page_size
-    leads = await db.leads.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    sort_map = {
+        "created_at_asc": [("created_at", 1)],
+        "name_asc": [("name", 1)],
+        "updated_at_desc": [("updated_at", -1)],
+        "created_at_desc": [("created_at", -1)],
+    }
+    sort_spec = sort_map.get(sort or "created_at_desc", [("created_at", -1)])
+    leads = await db.leads.find(q, {"_id": 0}).sort(sort_spec).skip(skip).limit(page_size).to_list(page_size)
     return {"leads": leads, "total": total, "page": page, "page_size": page_size}
 
 
@@ -306,7 +316,17 @@ async def lead_360(lid: str, principal: dict = Depends(require("leads:view"))):
         raise HTTPException(status_code=404, detail="Lead not found")
     calls = await db.calls.find({"lead_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(200)
     client = await db.clients.find_one({"lead_id": lid}, {"_id": 0})
-    return {"lead": lead, "calls": calls, "client": client}
+    activity = await db.audit_logs.find(
+        {
+            "companyId": COMPANY_ID,
+            "$or": [
+                {"entity_id": lid},
+                {"meta.lead_id": lid},
+            ],
+        },
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {"lead": lead, "calls": calls, "client": client, "activity": activity}
 
 
 @router.put("/leads/{lid}")
@@ -412,16 +432,180 @@ class LogCallIn(BaseModel):
 
 @router.get("/today-calls")
 async def today_calls(principal: dict = Depends(require("today_calls:view"))):
-    today = now_utc().date().isoformat()
+    """Calls workbench: overdue / due-today / assigned-today / upcoming (7d), RBAC-scoped."""
+    from datetime import date as date_cls
+
+    today = ist_today()
+    today_s = today.isoformat()
+    now = now_utc()
+    upcoming_end = datetime.combine(today + timedelta(days=7), time.max, tzinfo=IST).astimezone(timezone.utc)
+
     scope = await scope_filter(principal, "assigned_to")
-    q = {"companyId": COMPANY_ID, "assigned_date": today, "status": "active",
-         "is_client": False, **scope}
-    leads = await db.leads.find(q, {"_id": 0}).sort("follow_up_at", 1).to_list(1000)
-    acw = principal.get("acw_pending_lead_id")
-    # re-read live acw flag
+    base = {"companyId": COMPANY_ID, "status": "active", "is_client": False, **scope}
+
+    candidates = await db.leads.find({
+        **base,
+        "$or": [
+            {"assigned_date": today_s},
+            {"follow_up_at": {"$ne": None, "$lte": upcoming_end.isoformat()}},
+        ],
+    }, {"_id": 0}).to_list(5000)
+
+    buckets = {"overdue": [], "due_today": [], "assigned_today": [], "upcoming": []}
+    seen = set()
+
+    def annotate(lead, reason):
+        item = dict(lead)
+        item["queue_reason"] = reason
+        fu = lead.get("follow_up_at")
+        days_overdue = None
+        hours_until = None
+        if fu:
+            try:
+                dt = datetime.fromisoformat(fu)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                fu_day = ist_date(fu)
+                if reason == "overdue" and fu_day:
+                    days_overdue = max(1, (today - date_cls.fromisoformat(fu_day)).days)
+                elif reason in ("due_today", "upcoming"):
+                    hours_until = round((dt - now).total_seconds() / 3600, 1)
+            except Exception:
+                pass
+        item["days_overdue"] = days_overdue
+        item["hours_until"] = hours_until
+        return item
+
+    for lead in candidates:
+        fu = lead.get("follow_up_at")
+        if not fu:
+            continue
+        fu_day = ist_date(fu)
+        if not fu_day or fu_day >= today_s:
+            continue
+        lid = lead["id"]
+        if lid in seen:
+            continue
+        seen.add(lid)
+        buckets["overdue"].append(annotate(lead, "overdue"))
+
+    for lead in candidates:
+        fu = lead.get("follow_up_at")
+        if not fu:
+            continue
+        fu_day = ist_date(fu)
+        if fu_day != today_s:
+            continue
+        lid = lead["id"]
+        if lid in seen:
+            continue
+        seen.add(lid)
+        buckets["due_today"].append(annotate(lead, "due_today"))
+
+    # Assigned today: today's assignment with no pending FU (future FU → upcoming)
+    for lead in candidates:
+        if lead.get("assigned_date") != today_s:
+            continue
+        lid = lead["id"]
+        if lid in seen:
+            continue
+        fu = lead.get("follow_up_at")
+        if fu:
+            continue
+        seen.add(lid)
+        buckets["assigned_today"].append(annotate(lead, "assigned_today"))
+
+    for lead in candidates:
+        fu = lead.get("follow_up_at")
+        if not fu:
+            continue
+        fu_day = ist_date(fu)
+        if not fu_day or fu_day <= today_s:
+            continue
+        try:
+            dt = datetime.fromisoformat(fu)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt > upcoming_end:
+                continue
+        except Exception:
+            continue
+        lid = lead["id"]
+        if lid in seen:
+            continue
+        seen.add(lid)
+        buckets["upcoming"].append(annotate(lead, "upcoming"))
+
+    def sort_key_fu(item):
+        return item.get("follow_up_at") or ""
+
+    buckets["overdue"].sort(key=sort_key_fu)
+    buckets["due_today"].sort(key=sort_key_fu)
+    buckets["assigned_today"].sort(key=lambda x: (x.get("name") or "").lower())
+    buckets["upcoming"].sort(key=sort_key_fu)
+
+    for key in buckets:
+        buckets[key] = buckets[key][:500]
+
+    flat = (
+        buckets["overdue"]
+        + buckets["due_today"]
+        + buckets["assigned_today"]
+        + buckets["upcoming"]
+    )
+
+    # Called today: unique leads this principal logged a call on (IST today). Not in flat `leads`.
+    today_calls_rows = []
+    for c in await db.calls.find(
+        {"companyId": COMPANY_ID, "agent_id": principal["id"]},
+        {"_id": 0, "lead_id": 1, "created_at": 1},
+    ).to_list(100000):
+        if ist_date(c.get("created_at")) == today_s and c.get("lead_id"):
+            today_calls_rows.append(c)
+    today_calls_rows.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    called_ids = []
+    seen_called = set()
+    for c in today_calls_rows:
+        lid = c["lead_id"]
+        if lid in seen_called:
+            continue
+        seen_called.add(lid)
+        called_ids.append(lid)
+
+    called_bucket = []
+    if called_ids:
+        lead_docs = await db.leads.find(
+            {"companyId": COMPANY_ID, "id": {"$in": called_ids[:500]}},
+            {"_id": 0},
+        ).to_list(500)
+        by_id = {l["id"]: l for l in lead_docs}
+        for lid in called_ids[:500]:
+            lead = by_id.get(lid)
+            if not lead:
+                continue
+            called_bucket.append(annotate(lead, "called_today"))
+    buckets["called_today"] = called_bucket
+
     fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0, "acw_pending_lead_id": 1})
-    acw = fresh.get("acw_pending_lead_id") if fresh else acw
-    return {"leads": leads, "acw_pending_lead_id": acw, "date": today}
+    acw = fresh.get("acw_pending_lead_id") if fresh else principal.get("acw_pending_lead_id")
+
+    return {
+        "date": today_s,
+        "acw_pending_lead_id": acw,
+        "counts": {
+            "overdue": len(buckets["overdue"]),
+            "due_today": len(buckets["due_today"]),
+            "assigned_today": len(buckets["assigned_today"]),
+            "upcoming": len(buckets["upcoming"]),
+            "called_today": len(buckets["called_today"]),
+        },
+        "tab_counts": {
+            "queue": len(flat),
+            "acw_pending": 1 if acw else 0,
+        },
+        "buckets": buckets,
+        "leads": flat,
+    }
 
 
 @router.post("/calls/log")
@@ -432,12 +616,10 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     disp = await db.dispositions.find_one({"id": body.disposition_id, "companyId": COMPANY_ID}, {"_id": 0})
     if not disp:
         raise HTTPException(status_code=404, detail="Disposition not found")
-    # ACW gate: if a prior ACW disposition is pending on a different lead, block
-    fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0})
+
+    # ACW is non-blocking: track pending separately; never 409 other leads
+    fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0, "acw_pending_lead_id": 1})
     pending = fresh.get("acw_pending_lead_id") if fresh else None
-    if pending and pending != body.lead_id:
-        raise HTTPException(status_code=409,
-                            detail="After-call work pending on another lead. Resolve it first.")
 
     cid = new_id()
     call = {"id": cid, "companyId": COMPANY_ID, "lead_id": body.lead_id,
@@ -458,15 +640,35 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         lead_upd["status"] = "inactive"  # leaves active queue, retained
     await db.leads.update_one({"id": body.lead_id}, {"$set": lead_upd})
 
-    # ACW gating: set/clear pending
+    # Auto-convert when disposition is Converted (idempotent if already client)
+    converted = False
+    client_id = lead.get("client_id")
+    if disp.get("name") == "Converted":
+        fresh_lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
+        if fresh_lead and not fresh_lead.get("is_client"):
+            from routes_clients import _create_client_from_lead
+            client = await _create_client_from_lead(fresh_lead, principal)
+            converted = True
+            client_id = client["id"]
+        elif fresh_lead and fresh_lead.get("is_client"):
+            client_id = fresh_lead.get("client_id")
+            converted = False
+
+    # ACW pending is a reminder only: set on ACW disposition; clear only for same lead or complete-acw
     if disp.get("requires_acw"):
         await db.users.update_one({"id": principal["id"]},
                                   {"$set": {"acw_pending_lead_id": body.lead_id}})
-    else:
+    elif not pending or pending == body.lead_id:
         await db.users.update_one({"id": principal["id"]},
                                   {"$set": {"acw_pending_lead_id": None}})
     await audit(principal, "log_call", "lead", body.lead_id, {"disposition": disp["name"]})
-    return {"call": call, "carry_forward": carry, "acw": bool(disp.get("requires_acw"))}
+    return {
+        "call": call,
+        "carry_forward": carry,
+        "acw": bool(disp.get("requires_acw")),
+        "converted": converted,
+        "client_id": client_id,
+    }
 
 
 @router.post("/calls/complete-acw")
@@ -477,8 +679,21 @@ async def complete_acw(principal: dict = Depends(require("today_calls:log"))):
 
 @router.get("/call-history")
 async def call_history(search: Optional[str] = None, disposition: Optional[str] = None,
-                       agent_id: Optional[str] = None, page: int = 1, page_size: int = 30,
+                       agent_id: Optional[str] = None,
+                       from_date: Optional[str] = Query(None, alias="from"),
+                       to_date: Optional[str] = Query(None, alias="to"),
+                       sort: Optional[str] = None,
+                       page: int = 1, page_size: int = 30,
                        principal: dict = Depends(require("call_history:view"))):
+    from_d = parse_date(from_date)
+    to_d = parse_date(to_date)
+    if from_date and from_d is None:
+        raise HTTPException(status_code=400, detail="Invalid from date")
+    if to_date and to_d is None:
+        raise HTTPException(status_code=400, detail="Invalid to date")
+    if from_d and to_d and from_d > to_d:
+        raise HTTPException(status_code=400, detail="from must be on or before to")
+
     q = {"companyId": COMPANY_ID, **await scope_filter(principal, "agent_id")}
     if search:
         q["$or"] = [{"lead_name": {"$regex": search, "$options": "i"}},
@@ -487,9 +702,17 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
         q["disposition_name"] = disposition
     if agent_id:
         q["agent_id"] = agent_id
+    lo, hi = date_bounds_iso(from_d, to_d)
+    if lo or hi:
+        q["created_at"] = {}
+        if lo:
+            q["created_at"]["$gte"] = lo
+        if hi:
+            q["created_at"]["$lte"] = hi
     total = await db.calls.count_documents(q)
     skip = (page - 1) * page_size
-    calls = await db.calls.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    sort_dir = 1 if sort == "created_at_asc" else -1
+    calls = await db.calls.find(q, {"_id": 0}).sort("created_at", sort_dir).skip(skip).limit(page_size).to_list(page_size)
     return {"calls": calls, "total": total, "page": page, "page_size": page_size}
 
 
@@ -499,14 +722,22 @@ class StageIn(BaseModel):
 
 
 @router.get("/pipeline")
-async def pipeline(principal: dict = Depends(require("pipeline:view"))):
-    q = {"companyId": COMPANY_ID, **await scope_filter(principal, "assigned_to")}
+async def pipeline(search: Optional[str] = None, source: Optional[str] = None,
+                   disposition: Optional[str] = None, assigned_to: Optional[str] = None,
+                   principal: dict = Depends(require("pipeline:view"))):
+    q = await _scoped_leads_query(principal)
+    skip_assignment = principal.get("data_scope") == "OWN"
+    _apply_lead_filters(
+        q, search=search, source=source, disposition=disposition,
+        assigned_to=assigned_to, skip_assignment_status=skip_assignment,
+    )
     leads = await db.leads.find(q, {"_id": 0}).sort("updated_at", -1).to_list(2000)
     board = {s: [] for s in PIPELINE_STAGES}
     for l in leads:
         s = l.get("pipeline_stage") or "New"
         board.setdefault(s, []).append(l)
-    return {"stages": PIPELINE_STAGES, "board": board}
+    counts = {s: len(board.get(s) or []) for s in PIPELINE_STAGES}
+    return {"stages": PIPELINE_STAGES, "board": board, "counts": counts, "total": len(leads)}
 
 
 @router.put("/pipeline/{lid}")

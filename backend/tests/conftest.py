@@ -65,6 +65,13 @@ def client_for(role):
 
 
 @pytest.fixture(scope="session")
+def anon():
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json"})
+    return s
+
+
+@pytest.fixture(scope="session")
 def admin():
     return client_for("admin")
 

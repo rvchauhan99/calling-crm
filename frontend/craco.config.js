@@ -28,6 +28,27 @@ function makeDevServerV5Compatible(devServerConfig) {
     "Cross-Origin-Resource-Policy": "same-origin",
   };
 
+  // Suppress benign ResizeObserver loop noise in the CRA error overlay
+  const existingOverlay = compatibleConfig.client?.overlay;
+  const overlayBase =
+    typeof existingOverlay === "object" && existingOverlay !== null
+      ? existingOverlay
+      : {};
+  compatibleConfig.client = {
+    ...compatibleConfig.client,
+    overlay: {
+      ...overlayBase,
+      runtimeErrors: (error) => {
+        const msg = error?.message || String(error || "");
+        if (msg.includes("ResizeObserver loop")) return false;
+        if (typeof overlayBase.runtimeErrors === "function") {
+          return overlayBase.runtimeErrors(error);
+        }
+        return true;
+      },
+    },
+  };
+
   if (onBeforeSetupMiddleware || setupMiddlewares) {
     compatibleConfig.setupMiddlewares = (middlewares, devServer) => {
       if (onBeforeSetupMiddleware) {

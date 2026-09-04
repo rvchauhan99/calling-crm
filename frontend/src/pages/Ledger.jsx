@@ -32,9 +32,19 @@ export default function Ledger() {
     setData(data);
   }, [page]);
   useEffect(() => { load().catch(() => {}); }, [load]);
-  useEffect(() => {
-    if (can("ledger:post")) api.get("/clients?page_size=500").then((r) => setClients(r.data.clients));
-  }, [can]);
+  const loadClients = useCallback(async () => {
+    if (!can("ledger:post")) return
+    const { data: res } = await api.get("/clients?page_size=500&status=active")
+    const list = (res.clients || [])
+      .filter((c) => c.status === "active")
+      .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+    setClients(list)
+  }, [can])
+
+  const handleOpenPost = () => {
+    setShow(true)
+    loadClients().catch(() => {})
+  }
 
   const post = async () => {
     if (!form.client_id || !form.amount) { toast.error("Client and amount required"); return; }
@@ -71,7 +81,7 @@ export default function Ledger() {
         actions={
           <>
             {can("ledger:export") && <Button variant="outline" onClick={exportCsv} data-testid="export-ledger-btn"><Download size={16} className="mr-1.5" /> Export</Button>}
-            {can("ledger:post") && <Button className="bg-sky-500 hover:bg-sky-600" onClick={() => setShow(true)} data-testid="new-entry-btn"><Plus size={16} className="mr-1.5" /> Post Entry</Button>}
+            {can("ledger:post") && <Button className="bg-sky-500 hover:bg-sky-600" onClick={handleOpenPost} data-testid="new-entry-btn"><Plus size={16} className="mr-1.5" /> Post Entry</Button>}
           </>
         } />
 
@@ -134,37 +144,32 @@ export default function Ledger() {
             <DialogDescription>Entries are immutable; corrections use reversals.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <div>
-              <Label>Client</Label>
-              <SearchableSelect
-                value={form.client_id}
-                onChange={(v) => setForm({ ...form, client_id: v })}
-                options={clients.map((c) => ({
-                  value: c.id,
-                  label: `${c.name} — ₹${Number(c.balance).toLocaleString("en-IN")}`,
-                }))}
-                placeholder="Select client"
-                searchPlaceholder="Search clients…"
-                label="Client"
-                testId="ledger-client"
-              />
-            </div>
+            <SearchableSelect
+              value={form.client_id}
+              onChange={(v) => setForm({ ...form, client_id: v })}
+              options={clients.map((c) => ({
+                value: c.id,
+                label: `${c.name} · ${c.phone || "—"} · ₹${Number(c.balance).toLocaleString("en-IN")}`,
+                keywords: [c.name, c.phone].filter(Boolean),
+              }))}
+              placeholder="Select client"
+              searchPlaceholder="Search name or phone…"
+              label="Client"
+              testId="ledger-client"
+            />
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label>Type</Label>
-                <SearchableSelect
-                  value={form.type}
-                  onChange={(v) => setForm({ ...form, type: v, category: v === "credit" ? "deposit" : "withdrawal" })}
-                  options={[
-                    { value: "credit", label: "Credit (deposit)" },
-                    { value: "debit", label: "Debit (withdrawal)" },
-                  ]}
-                  placeholder="Select type"
-                  searchPlaceholder="Search type…"
-                  label="Type"
-                  testId="ledger-type"
-                />
-              </div>
+              <SearchableSelect
+                value={form.type}
+                onChange={(v) => setForm({ ...form, type: v, category: v === "credit" ? "deposit" : "withdrawal" })}
+                options={[
+                  { value: "credit", label: "Credit (deposit)" },
+                  { value: "debit", label: "Debit (withdrawal)" },
+                ]}
+                placeholder="Select type"
+                searchPlaceholder="Search type…"
+                label="Type"
+                testId="ledger-type"
+              />
               <div><Label>Amount (₹)</Label><Input type="number" value={form.amount} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, amount: e.target.value })} data-testid="ledger-amount" /></div>
             </div>
             <div><Label>Description</Label><Input value={form.description} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, description: e.target.value })} data-testid="ledger-desc" /></div>

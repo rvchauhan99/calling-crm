@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react"
+import { useEffect, useState, useCallback, useRef, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { API, getToken, formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
@@ -7,16 +7,17 @@ import { AutoAssignDialog } from "@/components/leads/AutoAssignDialog"
 import { PhoneField } from "@/components/leads/PhoneField"
 import { EmailField } from "@/components/leads/EmailField"
 import { SourceSelect } from "@/components/leads/SourceSelect"
+import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
+import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { validateLeadForm } from "@/lib/leadValidation"
+import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
-import {
-  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
-} from "@/components/ui/sheet"
 import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Checkbox } from "@/components/ui/checkbox"
@@ -25,6 +26,13 @@ import {
 } from "@/components/ui/table"
 import { toast } from "sonner"
 import { Upload, Plus, Search, Users, Wand2, UserCheck, Download } from "lucide-react"
+
+const SORT_OPTIONS = [
+  { value: "created_at_desc", label: "Newest created" },
+  { value: "created_at_asc", label: "Oldest created" },
+  { value: "updated_at_desc", label: "Recently updated" },
+  { value: "name_asc", label: "Name A–Z" },
+]
 
 export default function Leads() {
   const { can, dataScope } = useAuth()
@@ -35,7 +43,7 @@ export default function Leads() {
   const [filterOptions, setFilterOptions] = useState(null)
   const [selected, setSelected] = useState([])
   const [agents, setAgents] = useState([])
-  const [detail, setDetail] = useState(null)
+  const [lead360Id, setLead360Id] = useState(null)
   const [showCreate, setShowCreate] = useState(false)
   const [showAssign, setShowAssign] = useState(false)
   const [showAutoAssign, setShowAutoAssign] = useState(false)
@@ -49,23 +57,39 @@ export default function Leads() {
   const stage = params.get("stage") || ""
   const source = params.get("source") || ""
   const disposition = params.get("disposition") || ""
+  const assignedTo = params.get("assigned_to") || ""
+  const sort = params.get("sort") || "created_at_desc"
   const tabParam = params.get("tab")
   const tab = isOwnScope ? "assigned" : (tabParam || "unassigned")
   const page = Number(params.get("page") || 1)
 
-  const setParam = (k, v) => {
+  const setParam = useCallback((k, v) => {
     const p = new URLSearchParams(params)
     if (v) p.set(k, v)
     else p.delete(k)
     if (k !== "page") p.set("page", "1")
     setParams(p)
-  }
+  }, [params, setParams])
+
+  const commitSearch = useCallback((v) => {
+    setParam("search", v.trim())
+  }, [setParam])
+
+  const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
 
   const setTab = (v) => {
     const p = new URLSearchParams(params)
     p.set("tab", v)
     p.set("page", "1")
     setParams(p)
+  }
+
+  const clearAllFilters = () => {
+    const p = new URLSearchParams()
+    if (!isOwnScope && tabParam) p.set("tab", tabParam)
+    p.set("page", "1")
+    setParams(p)
+    setSearchLocal("")
   }
 
   useEffect(() => {
@@ -90,6 +114,9 @@ export default function Leads() {
     if (stage) p.set("stage", stage)
     if (source) p.set("source", source)
     if (disposition) p.set("disposition", disposition)
+    if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
+    if (sort && sort !== "created_at_desc") p.set("sort", sort)
+    else if (sort) p.set("sort", sort)
     if (!isOwnScope) {
       p.set("assignment_status", tab === "assigned" ? "assigned" : "unassigned")
     }
@@ -99,7 +126,7 @@ export default function Leads() {
     setData(listData)
     setSelected([])
     loadCounts()
-  }, [search, status, stage, source, disposition, tab, page, loadCounts, isOwnScope])
+  }, [search, status, stage, source, disposition, assignedTo, sort, tab, page, loadCounts, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -108,10 +135,46 @@ export default function Leads() {
   }, [])
 
   useEffect(() => {
-    if (can("leads:assign")) {
-      api.get("/leads/assignable-callers").then((r) => setAgents(r.data.users)).catch(() => {})
+    if (isOwnScope) return
+    const loadAgents = async () => {
+      try {
+        if (can("leads:assign")) {
+          const { data: d } = await api.get("/leads/assignable-callers")
+          setAgents(d.users || [])
+          return
+        }
+        const { data: d } = await api.get("/dashboard/filter-options")
+        setAgents(d.agents || [])
+      } catch {
+        setAgents([])
+      }
     }
-  }, [can])
+    loadAgents()
+  }, [can, isOwnScope])
+
+  const filterChips = useMemo(() => {
+    const list = []
+    if (search) list.push({ key: "search", label: `Search: ${search}`, onRemove: () => setParam("search", "") })
+    if (status) list.push({ key: "status", label: `Status: ${status}`, onRemove: () => setParam("status", "") })
+    if (stage) list.push({ key: "stage", label: `Stage: ${stage}`, onRemove: () => setParam("stage", "") })
+    if (source) list.push({ key: "source", label: `Source: ${source}`, onRemove: () => setParam("source", "") })
+    if (disposition) {
+      list.push({
+        key: "disposition",
+        label: `Disposition: ${disposition === "__none__" ? "None" : disposition}`,
+        onRemove: () => setParam("disposition", ""),
+      })
+    }
+    if (!isOwnScope && assignedTo) {
+      const name = agents.find((a) => a.id === assignedTo)?.name || assignedTo
+      list.push({ key: "assigned_to", label: `Agent: ${name}`, onRemove: () => setParam("assigned_to", "") })
+    }
+    if (sort && sort !== "created_at_desc") {
+      const label = SORT_OPTIONS.find((s) => s.value === sort)?.label || sort
+      list.push({ key: "sort", label: `Sort: ${label}`, onRemove: () => setParam("sort", "") })
+    }
+    return list
+  }, [search, status, stage, source, disposition, assignedTo, sort, isOwnScope, agents, setParam])
 
   const createLead = async () => {
     const { fieldErrors, isValid } = validateLeadForm(form)
@@ -190,10 +253,7 @@ export default function Leads() {
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)) }
   }
 
-  const openDetail = async (id) => {
-    const { data: detailData } = await api.get(`/leads/${id}`)
-    setDetail(detailData)
-  }
+  const openDetail = (id) => setLead360Id(id)
 
   const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
   const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
@@ -254,72 +314,112 @@ export default function Leads() {
         </Tabs>
       )}
 
-      <div className="mb-4 flex flex-wrap items-center gap-3">
-        <div className="relative min-w-[220px] flex-1">
-          <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <Input
-            placeholder="Search name, phone, email…"
-            defaultValue={search}
-            data-testid="lead-search"
-            onChange={(e) => setParam("search", e.target.value)}
-            className="pl-9 focus-visible:ring-sky-500"
-          />
-        </div>
-        <SearchableSelect
-          value={status || "all"}
-          onChange={(v) => setParam("status", v === "all" ? "" : v)}
-          options={[
-            { value: "all", label: "All statuses" },
-            { value: "active", label: "Active" },
-            { value: "inactive", label: "Inactive" },
-            { value: "converted", label: "Converted" },
-          ]}
-          placeholder="All statuses"
-          searchPlaceholder="Search status…"
-          testId="status-filter"
-          className="w-40"
-        />
-        <SearchableSelect
-          value={stage || "all"}
-          onChange={(v) => setParam("stage", v === "all" ? "" : v)}
-          options={[
-            { value: "all", label: "All stages" },
-            ...(filterOptions?.stages || []).map((s) => ({ value: s, label: s })),
-          ]}
-          placeholder="All stages"
-          searchPlaceholder="Search stages…"
-          testId="stage-filter"
-          className="w-40"
-        />
-        <SourceSelect
-          value={source || "all"}
-          onChange={(v) => setParam("source", v === "all" ? "" : v)}
-          includeImport
-          includeAll
-          label=""
-          placeholder="All sources"
-          testId="source-filter"
-          className="w-40"
-        />
-        <SearchableSelect
-          value={disposition || "all"}
-          onChange={(v) => setParam("disposition", v === "all" ? "" : v)}
-          options={[
-            { value: "all", label: "All dispositions" },
-            { value: "__none__", label: "No disposition" },
-            ...(filterOptions?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
-          ]}
-          placeholder="All dispositions"
-          searchPlaceholder="Search dispositions…"
-          testId="disposition-filter"
-          className="w-44"
-        />
-        {selected.length > 0 && can("leads:assign") && (
-          <Button variant="outline" onClick={() => setShowAssign(true)} data-testid="assign-selected-btn">
+      <FilterToolbar
+        testId="leads-filters"
+        search={(
+          <>
+            <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Input
+              placeholder="Search name, phone, email…"
+              value={searchLocal}
+              data-testid="lead-search"
+              onChange={(e) => setSearchLocal(e.target.value)}
+              className="h-8 pl-8 focus-visible:ring-sky-500"
+              aria-label="Search name, phone, email"
+            />
+          </>
+        )}
+        fields={(
+          <>
+            <FilterField label="Status" className="w-36">
+              <SearchableSelect
+                value={status || "all"}
+                onChange={(v) => setParam("status", v === "all" ? "" : v)}
+                options={[
+                  { value: "all", label: "All statuses" },
+                  { value: "active", label: "Active" },
+                  { value: "inactive", label: "Inactive" },
+                  { value: "converted", label: "Converted" },
+                ]}
+                placeholder="All statuses"
+                testId="status-filter"
+                className="h-8"
+              />
+            </FilterField>
+            <FilterField label="Stage" className="w-36">
+              <SearchableSelect
+                value={stage || "all"}
+                onChange={(v) => setParam("stage", v === "all" ? "" : v)}
+                options={[
+                  { value: "all", label: "All stages" },
+                  ...(filterOptions?.stages || []).map((s) => ({ value: s, label: s })),
+                ]}
+                placeholder="All stages"
+                testId="stage-filter"
+                className="h-8"
+              />
+            </FilterField>
+            <FilterField label="Source" className="w-36">
+              <SourceSelect
+                value={source || "all"}
+                onChange={(v) => setParam("source", v === "all" ? "" : v)}
+                includeImport
+                includeAll
+                label=""
+                placeholder="All sources"
+                testId="source-filter"
+                className="h-8"
+              />
+            </FilterField>
+            <FilterField label="Disposition" className="min-w-[10rem] w-44">
+              <SearchableSelect
+                value={disposition || "all"}
+                onChange={(v) => setParam("disposition", v === "all" ? "" : v)}
+                options={[
+                  { value: "all", label: "All dispositions" },
+                  { value: "__none__", label: "No disposition" },
+                  ...(filterOptions?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                ]}
+                placeholder="All dispositions"
+                testId="disposition-filter"
+                className="h-8"
+              />
+            </FilterField>
+            {!isOwnScope && agents.length > 0 && (
+              <FilterField label="Agent" className="w-40">
+                <SearchableSelect
+                  value={assignedTo || "all"}
+                  onChange={(v) => setParam("assigned_to", v === "all" ? "" : v)}
+                  options={[
+                    { value: "all", label: "All agents" },
+                    ...agents.map((a) => ({ value: a.id, label: a.name })),
+                  ]}
+                  placeholder="All agents"
+                  testId="agent-filter"
+                  className="h-8"
+                />
+              </FilterField>
+            )}
+            <FilterField label="Sort" className="w-40">
+              <SearchableSelect
+                value={sort}
+                onChange={(v) => setParam("sort", v === "created_at_desc" ? "" : v)}
+                options={SORT_OPTIONS}
+                placeholder="Sort"
+                testId="sort-filter"
+                className="h-8"
+              />
+            </FilterField>
+          </>
+        )}
+        actions={selected.length > 0 && can("leads:assign") && (
+          <Button variant="outline" className="h-8" onClick={() => setShowAssign(true)} data-testid="assign-selected-btn">
             <UserCheck size={16} className="mr-1.5" /> Assign ({selected.length})
           </Button>
         )}
-      </div>
+        chips={filterChips}
+        onClearAll={filterChips.length ? clearAllFilters : undefined}
+      />
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
         {!data ? <div className="p-4"><TableSkeleton /></div> :
@@ -347,8 +447,16 @@ export default function Leads() {
                         <Checkbox checked={selected.includes(l.id)} onCheckedChange={() => toggle(l.id)} data-testid={`lead-check-${l.id}`} />
                       </TableCell>
                     )}
-                    <TableCell onClick={() => openDetail(l.id)} className="font-medium text-slate-800">{l.name}</TableCell>
-                    <TableCell onClick={() => openDetail(l.id)} className="tabular text-slate-600">{l.phone}</TableCell>
+                    <TableCell>
+                      <LeadPhoneLink leadId={l.id} onOpen={openDetail} asName testId={`lead-name-${l.id}`}>
+                        {l.name}
+                      </LeadPhoneLink>
+                    </TableCell>
+                    <TableCell>
+                      <LeadPhoneLink leadId={l.id} onOpen={openDetail} testId={`lead-phone-${l.id}`}>
+                        {l.phone}
+                      </LeadPhoneLink>
+                    </TableCell>
                     <TableCell onClick={() => openDetail(l.id)} className="text-slate-500">{l.source}</TableCell>
                     <TableCell onClick={() => openDetail(l.id)}>
                       {l.disposition_name
@@ -464,49 +572,7 @@ export default function Leads() {
         </DialogContent>
       </Dialog>
 
-      {/* Lead 360 */}
-      <Sheet open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <SheetContent className="w-full overflow-y-auto bg-white sm:max-w-lg" data-testid="lead-360">
-          {detail && (
-            <>
-              <SheetHeader>
-                <SheetTitle className="font-display text-xl">{detail.lead.name}</SheetTitle>
-                <SheetDescription>{detail.lead.phone} · {detail.lead.email}</SheetDescription>
-              </SheetHeader>
-              <div className="mt-5 grid grid-cols-2 gap-3 text-sm">
-                {[["Source", detail.lead.source], ["City", detail.lead.city || "—"], ["Stage", detail.lead.pipeline_stage],
-                  ["Assigned", detail.lead.assigned_name || "—"], ["Disposition", detail.lead.disposition_name || "—"],
-                  ["Status", detail.lead.status]].map(([k, v]) => (
-                  <div key={k} className="rounded-md bg-slate-50 p-2.5">
-                    <p className="text-[11px] uppercase tracking-wide text-slate-400">{k}</p>
-                    <p className="mt-0.5 font-medium text-slate-700">{v}</p>
-                  </div>
-                ))}
-              </div>
-              {detail.client && (
-                <div className="mt-4 rounded-md border border-sky-200 bg-sky-50 p-3 text-sm">
-                  <p className="font-semibold text-sky-800">Converted to client</p>
-                  <p className="text-sky-700">Balance: ₹{Number(detail.client.balance).toLocaleString("en-IN")}</p>
-                </div>
-              )}
-              <h4 className="mt-6 font-display text-sm font-semibold text-slate-800">Call activity ({detail.calls.length})</h4>
-              <div className="mt-2 space-y-2">
-                {detail.calls.length === 0 && <p className="text-sm text-slate-400">No calls logged.</p>}
-                {detail.calls.map((c) => (
-                  <div key={c.id} className="rounded-md border border-slate-200 p-3 text-sm">
-                    <div className="flex justify-between">
-                      <StatusPill>{c.disposition_name}</StatusPill>
-                      <span className="text-xs text-slate-400">{new Date(c.created_at).toLocaleString("en-IN")}</span>
-                    </div>
-                    {c.notes && <p className="mt-1.5 text-slate-600">{c.notes}</p>}
-                    <p className="mt-1 text-xs text-slate-400">by {c.agent_name}</p>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </SheetContent>
-      </Sheet>
+      <Lead360Sheet leadId={lead360Id} onClose={() => setLead360Id(null)} onLogged={() => load()} />
     </div>
   )
 }

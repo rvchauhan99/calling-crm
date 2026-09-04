@@ -116,7 +116,7 @@ export default function Dispositions() {
               />
             </div>
             <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
-              <div><p className="text-sm font-medium">Requires ACW</p><p className="text-xs text-slate-400">Blocks new lead until resolved</p></div>
+              <div><p className="text-sm font-medium">Requires ACW</p><p className="text-xs text-slate-400">Marks after-call work pending (does not block calling)</p></div>
               <Switch checked={form.requires_acw} onCheckedChange={(v) => setForm({ ...form, requires_acw: v })} data-testid="disp-acw" />
             </div>
             <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
