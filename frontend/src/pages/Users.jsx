@@ -9,9 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -116,21 +114,31 @@ export default function Users() {
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Role</Label>
-                <Select value={form.role_id} onValueChange={(v) => setForm({ ...form, role_id: v })}>
-                  <SelectTrigger className="mt-1" data-testid="user-role"><SelectValue placeholder="Role" /></SelectTrigger>
-                  <SelectContent className="bg-white">{roles.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}</SelectContent>
-                </Select>
+                <SearchableSelect
+                  value={form.role_id}
+                  onChange={(v) => setForm({ ...form, role_id: v })}
+                  options={roles.map((r) => ({ value: r.id, label: r.name }))}
+                  placeholder="Role"
+                  searchPlaceholder="Search roles…"
+                  label="Role"
+                  testId="user-role"
+                />
               </div>
               <div>
                 <Label>Type</Label>
-                <Select value={form.user_type} onValueChange={(v) => setForm({ ...form, user_type: v })}>
-                  <SelectTrigger className="mt-1" data-testid="user-type"><SelectValue /></SelectTrigger>
-                  <SelectContent className="bg-white">
-                    <SelectItem value="caller">Caller</SelectItem>
-                    <SelectItem value="affiliate">Affiliate</SelectItem>
-                    <SelectItem value="admin">Admin</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  value={form.user_type}
+                  onChange={(v) => setForm({ ...form, user_type: v })}
+                  options={[
+                    { value: "caller", label: "Caller" },
+                    { value: "affiliate", label: "Affiliate" },
+                    { value: "admin", label: "Admin" },
+                  ]}
+                  placeholder="Select type"
+                  searchPlaceholder="Search type…"
+                  label="Type"
+                  testId="user-type"
+                />
               </div>
             </div>
             <div><Label>Daily lead quota</Label><Input type="number" value={form.daily_quota} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, daily_quota: Number(e.target.value) })} data-testid="user-quota" /></div>

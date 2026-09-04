@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, hash_password, new_id, now_iso, audit,
-                  dedupe_menus_by_key)
+                  dedupe_menus_by_key, dedupe_roles_by_name)
 
 router = APIRouter(prefix="/api", tags=["admin"])
 
@@ -90,6 +90,7 @@ class RoleIn(BaseModel):
 @router.get("/roles")
 async def list_roles(principal: dict = Depends(require("roles_menus:view", "users:view"))):
     roles = await db.roles.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
+    roles = dedupe_roles_by_name(roles)
     for r in roles:
         r["user_count"] = await db.users.count_documents({"role_id": r["id"], "active": True})
     return {"roles": roles}

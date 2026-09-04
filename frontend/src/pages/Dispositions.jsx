@@ -9,9 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -104,13 +102,18 @@ export default function Dispositions() {
             </div>
             <div>
               <Label>Type</Label>
-              <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
-                <SelectTrigger className="mt-1" data-testid="disp-type"><SelectValue /></SelectTrigger>
-                <SelectContent className="bg-white">
-                  <SelectItem value="carry_forward">Carry forward (stays retry-eligible)</SelectItem>
-                  <SelectItem value="non_carry_forward">Non carry-forward (leaves queue)</SelectItem>
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={form.type}
+                onChange={(v) => setForm({ ...form, type: v })}
+                options={[
+                  { value: "carry_forward", label: "Carry forward (stays retry-eligible)" },
+                  { value: "non_carry_forward", label: "Non carry-forward (leaves queue)" },
+                ]}
+                placeholder="Select type"
+                searchPlaceholder="Search type…"
+                label="Type"
+                testId="disp-type"
+              />
             </div>
             <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
               <div><p className="text-sm font-medium">Requires ACW</p><p className="text-xs text-slate-400">Blocks new lead until resolved</p></div>

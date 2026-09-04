@@ -9,9 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { toast } from "sonner";
 import { Plus, UsersRound, Pencil, Trash2 } from "lucide-react";
 
@@ -88,10 +86,15 @@ export default function Teams() {
             <div><Label>Team name</Label><Input value={form.name} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="team-name" /></div>
             <div>
               <Label>Supervisor</Label>
-              <Select value={form.supervisor_id} onValueChange={(v) => setForm({ ...form, supervisor_id: v })}>
-                <SelectTrigger className="mt-1" data-testid="team-supervisor"><SelectValue placeholder="Select supervisor" /></SelectTrigger>
-                <SelectContent className="bg-white">{users.filter((u) => u.user_type === "admin").map((u) => <SelectItem key={u.id} value={u.id}>{u.name}</SelectItem>)}</SelectContent>
-              </Select>
+              <SearchableSelect
+                value={form.supervisor_id}
+                onChange={(v) => setForm({ ...form, supervisor_id: v })}
+                options={users.filter((u) => u.user_type === "admin").map((u) => ({ value: u.id, label: u.name }))}
+                placeholder="Select supervisor"
+                searchPlaceholder="Search supervisors…"
+                label="Supervisor"
+                testId="team-supervisor"
+              />
             </div>
             <div>
               <Label>Members (callers)</Label>

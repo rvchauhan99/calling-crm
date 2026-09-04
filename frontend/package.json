@@ -61,6 +61,8 @@
     "zod": "3.24.4"
   },
   "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "bash scripts/dev.sh",
     "start": "craco start",
     "build": "craco build",
     "test": "craco test"
@@ -78,9 +80,13 @@
     ]
   },
   "devDependencies": {
-    "@craco/craco": "7.1.0",
     "@babel/plugin-proposal-private-property-in-object": "7.21.11",
+    "@craco/craco": "7.1.0",
     "@eslint/js": "9.23.0",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/lodash": "4.17.24",
     "autoprefixer": "10.4.20",
     "dotenv": "16.4.5",

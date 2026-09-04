@@ -8,9 +8,7 @@ import { Label } from "@/components/ui/label";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -138,23 +136,34 @@ export default function Ledger() {
           <div className="space-y-3">
             <div>
               <Label>Client</Label>
-              <Select value={form.client_id} onValueChange={(v) => setForm({ ...form, client_id: v })}>
-                <SelectTrigger className="mt-1" data-testid="ledger-client"><SelectValue placeholder="Select client" /></SelectTrigger>
-                <SelectContent className="bg-white max-h-64">
-                  {clients.map((c) => <SelectItem key={c.id} value={c.id}>{c.name} — ₹{Number(c.balance).toLocaleString("en-IN")}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={form.client_id}
+                onChange={(v) => setForm({ ...form, client_id: v })}
+                options={clients.map((c) => ({
+                  value: c.id,
+                  label: `${c.name} — ₹${Number(c.balance).toLocaleString("en-IN")}`,
+                }))}
+                placeholder="Select client"
+                searchPlaceholder="Search clients…"
+                label="Client"
+                testId="ledger-client"
+              />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <Label>Type</Label>
-                <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v, category: v === "credit" ? "deposit" : "withdrawal" })}>
-                  <SelectTrigger className="mt-1" data-testid="ledger-type"><SelectValue /></SelectTrigger>
-                  <SelectContent className="bg-white">
-                    <SelectItem value="credit">Credit (deposit)</SelectItem>
-                    <SelectItem value="debit">Debit (withdrawal)</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  value={form.type}
+                  onChange={(v) => setForm({ ...form, type: v, category: v === "credit" ? "deposit" : "withdrawal" })}
+                  options={[
+                    { value: "credit", label: "Credit (deposit)" },
+                    { value: "debit", label: "Debit (withdrawal)" },
+                  ]}
+                  placeholder="Select type"
+                  searchPlaceholder="Search type…"
+                  label="Type"
+                  testId="ledger-type"
+                />
               </div>
               <div><Label>Amount (₹)</Label><Input type="number" value={form.amount} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, amount: e.target.value })} data-testid="ledger-amount" /></div>
             </div>

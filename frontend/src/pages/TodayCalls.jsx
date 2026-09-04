@@ -8,9 +8,7 @@ import { Input } from "@/components/ui/input";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { toast } from "sonner";
 import { PhoneCall, PhoneOutgoing, AlertTriangle, CheckCircle2 } from "lucide-react";
 
@@ -102,32 +100,37 @@ export default function TodayCalls() {
             <DialogDescription>{active?.phone}</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
-            <div>
-              <Label>Disposition</Label>
-              <Select value={form.disposition_id} onValueChange={(v) => setForm({ ...form, disposition_id: v })}>
-                <SelectTrigger className="mt-1" data-testid="disposition-select"><SelectValue placeholder="Choose outcome" /></SelectTrigger>
-                <SelectContent className="bg-white">
-                  {dispositions.map((d) => (
-                    <SelectItem key={d.id} value={d.id}>
-                      <span className="flex items-center gap-2">
-                        <span className="h-2.5 w-2.5 rounded-full" style={{ background: d.color }} />
-                        {d.name} {d.requires_acw && <span className="text-[10px] text-amber-600">ACW</span>}
-                      </span>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <SearchableSelect
+              value={form.disposition_id}
+              onChange={(v) => setForm({ ...form, disposition_id: v })}
+              options={dispositions.map((d) => ({
+                value: d.id,
+                label: d.name,
+                color: d.color,
+                requires_acw: d.requires_acw,
+              }))}
+              placeholder="Choose outcome"
+              searchPlaceholder="Search dispositions…"
+              label="Disposition"
+              testId="disposition-select"
+              renderItem={(o) => (
+                <span className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full shrink-0" style={{ background: o.color }} />
+                  {o.label}
+                  {o.requires_acw && <span className="text-[10px] text-amber-600">ACW</span>}
+                </span>
+              )}
+            />
             <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label>Pipeline stage</Label>
-                <Select value={form.pipeline_stage} onValueChange={(v) => setForm({ ...form, pipeline_stage: v })}>
-                  <SelectTrigger className="mt-1" data-testid="stage-select"><SelectValue /></SelectTrigger>
-                  <SelectContent className="bg-white">
-                    {STAGES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
+              <SearchableSelect
+                value={form.pipeline_stage}
+                onChange={(v) => setForm({ ...form, pipeline_stage: v })}
+                options={STAGES.map((s) => ({ value: s, label: s }))}
+                placeholder="Select stage"
+                searchPlaceholder="Search stages…"
+                label="Pipeline stage"
+                testId="stage-select"
+              />
               <div>
                 <Label>Duration (sec)</Label>
                 <Input type="number" value={form.duration} className="mt-1 focus-visible:ring-sky-500"

@@ -98,6 +98,34 @@ def normalize_phone(raw: str, default_cc: str = "91") -> str:
     return "+" + digits
 
 
+def normalize_and_validate_phone(raw: str, default_cc: str = "91") -> str:
+    """Normalize then validate E.164; raises ValueError with user-facing message."""
+    original = str(raw or "").strip()
+    if not original:
+        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
+    had_plus = original.startswith("+")
+    phone = normalize_phone(raw, default_cc)
+    if not phone:
+        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
+    if had_plus:
+        if not re.match(r"^\+[1-9]\d{7,14}$", phone):
+            raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
+    elif not re.match(r"^\+91[6-9]\d{9}$", phone):
+        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
+    return phone
+
+
+EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+def validate_email_optional(email: str) -> str:
+    """Return trimmed email; empty is OK; non-empty must be valid."""
+    e = (email or "").strip()
+    if e and not EMAIL_RE.match(e):
+        raise ValueError("Invalid email address")
+    return e
+
+
 # ---------- Auth principal ----------
 async def _decode_token(request: Request):
     token = request.cookies.get("access_token")
@@ -205,4 +233,17 @@ def dedupe_menus_by_key(menus: list) -> list:
             continue
         seen.add(key)
         out.append(menu)
+    return out
+
+
+def dedupe_roles_by_name(roles: list) -> list:
+    """Keep first role row per name (list should be stably ordered before calling)."""
+    seen = set()
+    out = []
+    for role in roles:
+        name = role.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(role)
     return out

@@ -10,9 +10,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select"
 import { toast } from "sonner";
 import { Plus, ShieldCheck, Pencil, Trash2, Lock } from "lucide-react";
 
@@ -99,14 +97,19 @@ export default function Roles() {
               <div><Label>Name</Label><Input value={form.name} disabled={editing?.is_system} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, name: e.target.value })} data-testid="role-name" /></div>
               <div>
                 <Label>Data scope</Label>
-                <Select value={form.data_scope} onValueChange={(v) => setForm({ ...form, data_scope: v })}>
-                  <SelectTrigger className="mt-1" data-testid="role-scope"><SelectValue /></SelectTrigger>
-                  <SelectContent className="bg-white">
-                    <SelectItem value="OWN">OWN — only their own records</SelectItem>
-                    <SelectItem value="TEAM">TEAM — their team's records</SelectItem>
-                    <SelectItem value="ALL">ALL — all records</SelectItem>
-                  </SelectContent>
-                </Select>
+                <SearchableSelect
+                  value={form.data_scope}
+                  onChange={(v) => setForm({ ...form, data_scope: v })}
+                  options={[
+                    { value: "OWN", label: "OWN — only their own records" },
+                    { value: "TEAM", label: "TEAM — their team's records" },
+                    { value: "ALL", label: "ALL — all records" },
+                  ]}
+                  placeholder="Select scope"
+                  searchPlaceholder="Search scope…"
+                  label="Data scope"
+                  testId="role-scope"
+                />
               </div>
             </div>
             <div><Label>Description</Label><Textarea value={form.description} rows={2} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, description: e.target.value })} data-testid="role-desc" /></div>

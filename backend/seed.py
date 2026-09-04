@@ -3,6 +3,7 @@ import random
 from datetime import timedelta
 from core import (db, COMPANY_ID, hash_password, new_id, now_utc, now_iso,
                   normalize_phone, verify_password, dedupe_menus_by_key)
+from lead_constants import LEAD_SOURCES
 import os
 
 # ---------- Menu catalog (key, label, icon, path, group, order, actions) ----------
@@ -99,7 +100,7 @@ FIRST = ["Aarav", "Vivaan", "Aditya", "Diya", "Ananya", "Ishaan", "Kabir", "Meer
          "Vikram", "Pooja", "Amit", "Tanya", "Nikhil", "Riya", "Sameer", "Kavya"]
 LAST = ["Sharma", "Verma", "Patel", "Gupta", "Reddy", "Nair", "Iyer", "Mehta",
         "Singh", "Kapoor", "Joshi", "Malhotra", "Rao", "Bose", "Chopra", "Desai"]
-SOURCES = ["Website", "Facebook Ads", "Google Ads", "Referral", "Cold List", "Webinar"]
+SOURCES = [s for s in LEAD_SOURCES if s not in ("Manual", "Import")]
 CITIES = ["Mumbai", "Delhi", "Bengaluru", "Pune", "Hyderabad", "Chennai", "Kolkata"]
 
 
@@ -118,9 +119,40 @@ async def dedupe_menu_catalog():
             await db.menus.delete_one({"_id": oid})
 
 
+async def dedupe_roles():
+    """Remove duplicate role rows left by parallel seed runs (same companyId + name)."""
+    pipeline = [
+        {"$group": {
+            "_id": {"companyId": "$companyId", "name": "$name"},
+            "docs": {"$push": {"id": "$id", "created_at": "$created_at", "_id": "$_id"}},
+            "count": {"$sum": 1},
+        }},
+        {"$match": {"count": {"$gt": 1}}},
+    ]
+    async for group in db.roles.aggregate(pipeline):
+        docs = group["docs"]
+        best = docs[0]
+        best_score = (-1, "")
+        for doc in docs:
+            user_count = await db.users.count_documents({"role_id": doc["id"]})
+            created = doc.get("created_at") or ""
+            score = (user_count, created)
+            if score > best_score:
+                best_score = score
+                best = doc
+        keep_id = best["id"]
+        for doc in docs:
+            if doc["id"] == keep_id:
+                continue
+            await db.users.update_many({"role_id": doc["id"]}, {"$set": {"role_id": keep_id}})
+            await db.roles.delete_one({"_id": doc["_id"]})
+
+
 async def ensure_indexes():
     await dedupe_menu_catalog()
+    await dedupe_roles()
     await db.menus.create_index([("companyId", 1), ("key", 1)], unique=True)
+    await db.roles.create_index([("companyId", 1), ("name", 1)], unique=True)
     await db.users.create_index("email", unique=True)
     await db.users.create_index("id")
     await db.leads.create_index([("companyId", 1), ("phone", 1)])
@@ -147,21 +179,24 @@ async def seed():
     # Roles
     role_ids = {}
     for name, cfg in ROLE_DEFS.items():
-        existing = await db.roles.find_one({"name": name, "companyId": COMPANY_ID})
-        if existing:
-            role_ids[name] = existing["id"]
-            # keep system role perms fresh
-            await db.roles.update_one({"id": existing["id"]}, {"$set": {
-                "permissions": cfg["permissions"], "menus": cfg["menus"],
-                "data_scope": cfg["data_scope"], "description": cfg["description"]}})
-        else:
-            rid = new_id()
-            role_ids[name] = rid
-            await db.roles.insert_one({
-                "id": rid, "companyId": COMPANY_ID, "name": name,
-                "description": cfg["description"], "permissions": cfg["permissions"],
-                "menus": cfg["menus"], "data_scope": cfg["data_scope"],
-                "is_system": cfg["is_system"], "created_at": now_iso()})
+        rid = new_id()
+        await db.roles.update_one(
+            {"companyId": COMPANY_ID, "name": name},
+            {"$set": {
+                "description": cfg["description"],
+                "permissions": cfg["permissions"],
+                "menus": cfg["menus"],
+                "data_scope": cfg["data_scope"],
+                "is_system": cfg["is_system"],
+            }, "$setOnInsert": {
+                "id": rid,
+                "companyId": COMPANY_ID,
+                "name": name,
+                "created_at": now_iso(),
+            }},
+            upsert=True)
+        role_doc = await db.roles.find_one({"companyId": COMPANY_ID, "name": name}, {"_id": 0, "id": 1})
+        role_ids[name] = role_doc["id"]
 
     # Admin user
     admin_email = os.environ.get("ADMIN_EMAIL").lower()

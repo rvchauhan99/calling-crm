@@ -66,8 +66,16 @@ class TestHealthAuth:
         assert r.status_code == 200
         u = r.json()["user"]
         assert u["data_scope"] == "ALL"
+        assert u["user_type"] == "admin"
         assert "leads:view" in u["permissions"]
         assert "password_hash" not in u
+
+    def test_me_returns_user_type_for_agent(self, agent):
+        r = agent.get(f"{BASE_URL}/api/auth/me", timeout=30)
+        assert r.status_code == 200
+        u = r.json()["user"]
+        assert u["user_type"] == "caller"
+        assert u["data_scope"] == "OWN"
 
     def test_menus_filtered_by_role(self, admin, agent, affiliate):
         a = admin.get(f"{BASE_URL}/api/auth/menus", timeout=30).json()
@@ -136,6 +144,22 @@ class TestDataScope:
         r = agent.get(f"{BASE_URL}/api/leads?page_size=50", timeout=60).json()
         assert all(l["assigned_to"] == uid for l in r["leads"])
 
+    def test_agent_unassigned_filter_returns_own_leads(self, agent):
+        uid = agent.user["id"]
+        scoped = agent.get(f"{BASE_URL}/api/leads?page_size=50", timeout=60).json()
+        unassigned_tab = agent.get(
+            f"{BASE_URL}/api/leads?assignment_status=unassigned&page_size=50", timeout=60
+        ).json()
+        assert scoped["total"] == unassigned_tab["total"]
+        assert all(l["assigned_to"] == uid for l in unassigned_tab["leads"])
+
+    def test_agent_tab_counts_own_scope(self, agent):
+        counts = agent.get(f"{BASE_URL}/api/leads/tab-counts", timeout=30).json()
+        assert counts["unassigned"] == 0
+        assert counts["assigned"] >= 0
+        scoped = agent.get(f"{BASE_URL}/api/leads?page_size=1", timeout=60).json()
+        assert counts["assigned"] == scoped["total"]
+
     def test_call_history_scope(self, admin, agent):
         a = admin.get(f"{BASE_URL}/api/call-history?page_size=1", timeout=60).json()
         ag = agent.get(f"{BASE_URL}/api/call-history?page_size=1", timeout=60).json()
@@ -159,6 +183,8 @@ class TestLeads:
         assert lead["phone"] == "+91" + phone_local
         assert lead["pipeline_stage"] == "New"
         assert lead["status"] == "active"
+        assert lead["assigned_to"] is None
+        assert lead["assigned_date"] is None
         # GET verify persistence
         g = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30)
         assert g.status_code == 200
@@ -185,9 +211,9 @@ class TestLeads:
     def test_import_csv(self, admin):
         p1 = "96" + uuid.uuid4().int.__str__()[:8]
         csv_data = ("name,phone,email,city,source\n"
-                    f"TEST_Imp1,{p1},i1@x.com,Mumbai,CSV\n"
-                    f"TEST_Imp2,{p1},i2@x.com,Mumbai,CSV\n"
-                    ",1234,bad@x.com,,CSV\n")
+                    f"TEST_Imp1,{p1},i1@x.com,Mumbai,Import\n"
+                    f"TEST_Imp2,{p1},i2@x.com,Mumbai,Import\n"
+                    ",1234,bad@x.com,,BadSource\n")
         token = admin.headers["Authorization"]
         r = requests.post(f"{BASE_URL}/api/leads/import",
                           files={"file": ("leads.csv", csv_data, "text/csv")},
@@ -221,7 +247,131 @@ class TestLeads:
     def test_auto_assign(self, admin):
         r = admin.post(f"{BASE_URL}/api/leads/auto-assign", timeout=120)
         assert r.status_code == 200, r.text
-        assert isinstance(r.json()["assigned"], int)
+        body = r.json()
+        assert isinstance(body["assigned"], int)
+        assert "by_agent" in body
+        assert "available_in_pool" in body
+
+    def test_auto_assign_max_leads_cap(self, admin):
+        phones = [f"93{uuid.uuid4().int.__str__()[:8]}" for _ in range(3)]
+        csv_rows = "".join(f"TEST_Pool_{i},{p},,Mumbai,Import\n" for i, p in enumerate(phones))
+        token = admin.headers["Authorization"]
+        imp = requests.post(f"{BASE_URL}/api/leads/import",
+                            files={"file": ("pool.csv", f"name,phone,email,city,source\n{csv_rows}", "text/csv")},
+                            headers={"Authorization": token}, timeout=60)
+        assert imp.status_code == 200, imp.text
+        for lid in [l["id"] for l in admin.get(
+                f"{BASE_URL}/api/leads?search=TEST_Pool&assignment_status=unassigned&page_size=10",
+                timeout=30).json()["leads"]]:
+            TestLeads.created.append(lid)
+        preview = admin.get(f"{BASE_URL}/api/leads/auto-assign/preview?max_leads=100", timeout=30)
+        assert preview.status_code == 200, preview.text
+        prev = preview.json()
+        assert prev["available_in_pool"] >= 3
+        assert prev["assigned"] <= prev["available_in_pool"]
+        r = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={"max_leads": 100}, timeout=120)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["assigned"] <= body["available_in_pool"]
+        assert body["requested"] == 100
+
+    def test_auto_assign_preview(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads/auto-assign/preview", timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "assigned" in body and "by_agent" in body and "available_in_pool" in body
+
+    def test_assignment_status_filter(self, admin):
+        unassigned = admin.get(f"{BASE_URL}/api/leads?assignment_status=unassigned&page_size=5", timeout=30)
+        assert unassigned.status_code == 200
+        assert all(l["assigned_to"] is None for l in unassigned.json()["leads"])
+        assigned = admin.get(f"{BASE_URL}/api/leads?assignment_status=assigned&page_size=5", timeout=30)
+        assert assigned.status_code == 200
+        assert all(l["assigned_to"] is not None for l in assigned.json()["leads"])
+
+    def test_source_filter(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads?source=Manual&page_size=5", timeout=30)
+        assert r.status_code == 200
+        assert all(l["source"] == "Manual" for l in r.json()["leads"])
+
+    def test_disposition_none_filter(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads?disposition=__none__&page_size=10", timeout=30)
+        assert r.status_code == 200
+        assert all(l["disposition_name"] is None for l in r.json()["leads"])
+
+    def test_tab_counts(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads/tab-counts", timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "unassigned" in body and "assigned" in body
+        assert body["unassigned"] + body["assigned"] >= 0
+
+    def test_filter_options(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads/filter-options", timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["stages"][0] == "New"
+        assert len(body["sources"]) == 8
+        assert "Manual" in body["sources"]
+        assert "Import" in body["sources"]
+        assert isinstance(body["dispositions"], list)
+
+    def test_create_lead_invalid_phone_letters(self, admin):
+        r = admin.post(f"{BASE_URL}/api/leads",
+                       json={"name": "Bad Phone", "phone": "ssdsdsddcdscdscdcdscccsddcc"},
+                       timeout=30)
+        assert r.status_code == 400, r.text
+        assert "Invalid phone" in r.json()["detail"]
+        assert "duplicate" not in r.json()["detail"].lower()
+
+    def test_create_lead_invalid_email(self, admin):
+        phone_local = "95" + uuid.uuid4().int.__str__()[:8]
+        r = admin.post(f"{BASE_URL}/api/leads",
+                       json={"name": "Bad Email", "phone": phone_local, "email": "sddsdsd"},
+                       timeout=30)
+        assert r.status_code == 400, r.text
+        assert "Invalid email" in r.json()["detail"]
+
+    def test_create_lead_defaults_unassigned(self, admin):
+        phone_local = "98" + uuid.uuid4().int.__str__()[:8]
+        r = admin.post(f"{BASE_URL}/api/leads",
+                       json={"name": "Unassigned Lead", "phone": phone_local, "source": "Manual"},
+                       timeout=30)
+        assert r.status_code == 200, r.text
+        lead = r.json()["lead"]
+        TestLeads.created.append(lead["id"])
+        assert lead["assigned_to"] is None
+        assert lead["assigned_name"] is None
+        assert lead["assigned_date"] is None
+
+    def test_create_lead_duplicate_valid_phone(self, admin):
+        phone_local = "97" + uuid.uuid4().int.__str__()[:8]
+        payload = {"name": "Dup A", "phone": phone_local, "source": "Manual"}
+        first = admin.post(f"{BASE_URL}/api/leads", json=payload, timeout=30)
+        assert first.status_code == 200, first.text
+        TestLeads.created.append(first.json()["lead"]["id"])
+        second = admin.post(f"{BASE_URL}/api/leads",
+                            json={"name": "Dup B", "phone": phone_local, "source": "Manual"},
+                            timeout=30)
+        assert second.status_code == 400, second.text
+        assert "already exists" in second.json()["detail"]
+
+    def test_create_lead_invalid_source(self, admin):
+        phone_local = "96" + uuid.uuid4().int.__str__()[:8]
+        r = admin.post(f"{BASE_URL}/api/leads",
+                       json={"name": "Bad Source", "phone": phone_local, "source": "Random Junk"},
+                       timeout=30)
+        assert r.status_code == 400, r.text
+        assert "Invalid source" in r.json()["detail"]
+
+    def test_import_template(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads/import/template", timeout=30)
+        assert r.status_code == 200, r.text
+        assert "name,phone,email,city,source" in r.text
+        for source in ("Website", "Facebook Ads", "Google Ads", "Referral",
+                       "Cold List", "Webinar", "Manual", "Import"):
+            assert source in r.text
+        assert r.text.count("\n") >= 8
 
     def test_pipeline_and_followups(self, admin, agent):
         p = admin.get(f"{BASE_URL}/api/pipeline", timeout=60)
@@ -523,8 +673,9 @@ class TestReports:
 class TestAdminModules:
     def test_roles_and_menu_catalog(self, admin):
         roles = admin.get(f"{BASE_URL}/api/roles", timeout=30).json()["roles"]
-        names = {r["name"] for r in roles}
-        assert {"Super Admin", "Supervisor", "Agent", "Affiliate"} <= names
+        names = [r["name"] for r in roles]
+        assert len(names) == len(set(names)), f"duplicate role names: {names}"
+        assert {"Super Admin", "Supervisor", "Agent", "Affiliate"} <= set(names)
         sysrole = [r for r in roles if r["name"] == "Super Admin"][0]
         assert sysrole["is_system"] is True and sysrole["data_scope"] == "ALL"
         assert "user_count" in sysrole

@@ -1,0 +1,12 @@
+{
+  "name": "calling-crm-backend",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Calling CRM FastAPI backend",
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "dev": "bash scripts/dev.sh",
+    "start": "bash scripts/start.sh",
+    "test": "bash scripts/test.sh"
+  }
+}
