@@ -115,11 +115,17 @@ class TestSeedCorrectness:
         assert not bad, f"converted leads not in Won stage: {bad[:5]}"
 
     def test_clients_have_ftd(self, admin):
-        r = admin.get(f"{BASE_URL}/api/clients?limit=100", timeout=60)
+        r = admin.get(f"{BASE_URL}/api/clients?page_size=100", timeout=60)
         clients = r.json()["clients"]
         assert clients
-        missing = [c["id"] for c in clients
-                   if not c.get("ftd_at") and not str(c.get("name", "")).startswith("TEST_")]
+        # Seed clients with deposits have ftd_at; convert-without-deposit is valid (no FTD yet).
+        # Ignore TEST_ fixtures and zero-balance converts from manual/app usage.
+        missing = [
+            c["id"] for c in clients
+            if not c.get("ftd_at")
+            and not str(c.get("name", "")).startswith("TEST_")
+            and float(c.get("balance") or 0) > 0
+        ]
         assert not missing, f"clients without FTD: {missing[:5]}"
 
 

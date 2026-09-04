@@ -21,8 +21,7 @@ import {
   urgencyLabel,
   toDatetimeLocalValue,
 } from "@/lib/followupBuckets"
-
-const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
+import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
 const SORTS = [
   { id: "urgency", label: "Urgency" },
   { id: "soonest", label: "Soonest FU" },
@@ -517,7 +516,15 @@ export default function TodayCalls() {
           <div className="space-y-3">
             <SearchableSelect
               value={form.disposition_id}
-              onChange={(v) => setForm({ ...form, disposition_id: v })}
+              onChange={(v) => {
+                const disp = dispositions.find((d) => d.id === v)
+                const mapped = mappedStageForDisposition(disp)
+                setForm({
+                  ...form,
+                  disposition_id: v,
+                  pipeline_stage: mapped || form.pipeline_stage,
+                })
+              }}
               options={dispositions.map((d) => ({
                 value: d.id,
                 label: d.name,
@@ -545,6 +552,9 @@ export default function TodayCalls() {
                 searchPlaceholder="Search stages…"
                 label="Pipeline stage"
                 testId="stage-select"
+                disabled={Boolean(mappedStageForDisposition(
+                  dispositions.find((d) => d.id === form.disposition_id),
+                ))}
               />
               <div>
                 <Label htmlFor="today-duration">Duration (sec)</Label>

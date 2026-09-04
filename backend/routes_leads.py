@@ -24,6 +24,31 @@ class DispositionIn(BaseModel):
     requires_acw: bool = False
     color: str = "#0EA5E9"
     active: bool = True
+    default_pipeline_stage: Optional[str] = None
+    converts_to_client: bool = False
+
+
+def _normalize_disposition_fields(body: DispositionIn) -> dict:
+    data = body.model_dump()
+    stage = data.get("default_pipeline_stage") or None
+    if stage == "" or stage == "none":
+        stage = None
+    if stage and stage not in PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Invalid default_pipeline_stage")
+    if data.get("converts_to_client"):
+        stage = "Won"
+    data["default_pipeline_stage"] = stage
+    data["converts_to_client"] = bool(data.get("converts_to_client"))
+    return data
+
+
+def _mapped_stage_for_disposition(disp: dict) -> Optional[str]:
+    if disp.get("converts_to_client") or disp.get("name") == "Converted":
+        return "Won"
+    stage = disp.get("default_pipeline_stage")
+    if stage and stage in PIPELINE_STAGES:
+        return stage
+    return None
 
 
 @router.get("/dispositions")
@@ -35,7 +60,8 @@ async def list_dispositions(principal: dict = Depends(get_principal)):
 @router.post("/dispositions")
 async def create_disposition(body: DispositionIn, principal: dict = Depends(require("dispositions:create"))):
     did = new_id()
-    doc = {"id": did, "companyId": COMPANY_ID, **body.model_dump(), "order": body.slot, "created_at": now_iso()}
+    fields = _normalize_disposition_fields(body)
+    doc = {"id": did, "companyId": COMPANY_ID, **fields, "order": body.slot, "created_at": now_iso()}
     await db.dispositions.insert_one(dict(doc))
     await audit(principal, "create", "disposition", did, {"name": body.name})
     return {"disposition": doc}
@@ -43,8 +69,9 @@ async def create_disposition(body: DispositionIn, principal: dict = Depends(requ
 
 @router.put("/dispositions/{did}")
 async def update_disposition(did: str, body: DispositionIn, principal: dict = Depends(require("dispositions:edit"))):
+    fields = _normalize_disposition_fields(body)
     res = await db.dispositions.update_one({"id": did, "companyId": COMPANY_ID},
-                                           {"$set": {**body.model_dump(), "order": body.slot}})
+                                           {"$set": {**fields, "order": body.slot}})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     await audit(principal, "update", "disposition", did)
@@ -634,16 +661,27 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     lead_upd = {"disposition_id": disp["id"], "disposition_name": disp["name"],
                 "carry_forward": carry, "follow_up_at": body.follow_up_at,
                 "updated_at": now_iso()}
-    if body.pipeline_stage:
+    mapped_stage = _mapped_stage_for_disposition(disp)
+    if mapped_stage:
+        if body.pipeline_stage and body.pipeline_stage != mapped_stage:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Disposition '{disp['name']}' maps to pipeline stage {mapped_stage}",
+            )
+        lead_upd["pipeline_stage"] = mapped_stage
+    elif body.pipeline_stage:
+        if body.pipeline_stage not in PIPELINE_STAGES:
+            raise HTTPException(status_code=400, detail="Invalid pipeline_stage")
         lead_upd["pipeline_stage"] = body.pipeline_stage
     if not carry:
         lead_upd["status"] = "inactive"  # leaves active queue, retained
     await db.leads.update_one({"id": body.lead_id}, {"$set": lead_upd})
 
-    # Auto-convert when disposition is Converted (idempotent if already client)
+    # Auto-convert when disposition converts_to_client (or legacy name Converted)
     converted = False
     client_id = lead.get("client_id")
-    if disp.get("name") == "Converted":
+    should_convert = bool(disp.get("converts_to_client")) or disp.get("name") == "Converted"
+    if should_convert:
         fresh_lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
         if fresh_lead and not fresh_lead.get("is_client"):
             from routes_clients import _create_client_from_lead
@@ -735,6 +773,8 @@ async def pipeline(search: Optional[str] = None, source: Optional[str] = None,
     board = {s: [] for s in PIPELINE_STAGES}
     for l in leads:
         s = l.get("pipeline_stage") or "New"
+        if l.get("is_client"):
+            s = "Won"
         board.setdefault(s, []).append(l)
     counts = {s: len(board.get(s) or []) for s in PIPELINE_STAGES}
     return {"stages": PIPELINE_STAGES, "board": board, "counts": counts, "total": len(leads)}
@@ -744,6 +784,21 @@ async def pipeline(search: Optional[str] = None, source: Optional[str] = None,
 async def move_stage(lid: str, body: StageIn, principal: dict = Depends(require("pipeline:edit"))):
     if body.stage not in PIPELINE_STAGES:
         raise HTTPException(status_code=400, detail="Invalid stage")
+    lead = await db.leads.find_one({"id": lid, "companyId": COMPANY_ID}, {"_id": 0})
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    if lead.get("is_client") and body.stage != "Won":
+        raise HTTPException(status_code=400, detail="Client leads must remain in Won")
+    if lead.get("disposition_id"):
+        disp = await db.dispositions.find_one(
+            {"id": lead["disposition_id"], "companyId": COMPANY_ID}, {"_id": 0}
+        )
+        mapped = _mapped_stage_for_disposition(disp) if disp else None
+        if mapped and mapped != body.stage:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Lead response '{disp['name']}' maps to {mapped}; log a matching response to move",
+            )
     res = await db.leads.update_one({"id": lid, "companyId": COMPANY_ID},
                                     {"$set": {"pipeline_stage": body.stage, "updated_at": now_iso()}})
     if res.matched_count == 0:

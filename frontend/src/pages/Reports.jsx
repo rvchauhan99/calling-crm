@@ -16,12 +16,10 @@ import {
   monthStartISO, todayISO, startOfWeekISO, monthsAgoISO, buildLeadHref,
 } from "@/components/dashboard/atoms"
 import {
-  BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
+  BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend,
 } from "recharts"
 import { Download } from "lucide-react"
-
-const PIE = ["#0EA5E9", "#0369A1", "#38BDF8", "#7DD3FC", "#F59E0B", "#EF4444", "#94A3B8", "#0284C7"]
 
 const PRESETS = [
   { id: "today", label: "Today", apply: () => ({ from: todayISO(), to: todayISO() }) },
@@ -264,25 +262,23 @@ export default function Reports() {
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="caller-kpis">
                 <KpiCard testId="kpi-calls" label="Calls" value={summary.total_calls ?? 0} hint={`${summary.total_connected ?? 0} connected`} />
                 <KpiCard testId="kpi-connect" label="Connect rate" value={`${summary.connect_rate ?? 0}%`} accent="blue" />
-                <KpiCard testId="kpi-leads" label="Leads" value={summary.total_leads ?? 0} />
-                <KpiCard testId="kpi-conv" label="Conversion" value={`${summary.conversion_rate ?? 0}%`} hint={`${summary.total_conversions ?? 0} converted`} accent="amber" />
+                <KpiCard testId="kpi-converted-resp" label="Converted responses" value={summary.converted_responses ?? 0} hint={`${summary.converted_response_share ?? 0}% of calls`} accent="amber" />
+                <KpiCard testId="kpi-conv" label="Conversion" value={`${summary.conversion_rate ?? 0}%`} hint={`${summary.total_conversions ?? 0} converted`} />
               </div>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-                  <PanelHeader title="Calls vs conversions" />
+                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm" data-testid="caller-responses-panel">
+                  <PanelHeader title="Responses by volume" hint="Calls logged" />
                   <div className="h-56">
-                    {rows.length === 0 ? (
+                    {(payload?.disposition_breakdown || []).length === 0 ? (
                       <EmptyChart />
                     ) : (
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={rows.slice(0, 10)}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                          <XAxis dataKey="name" stroke="#94a3b8" fontSize={10} tickLine={false} interval={0} angle={-20} textAnchor="end" height={48} />
-                          <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                        <BarChart data={(payload?.disposition_breakdown || []).slice(0, 8)} layout="vertical">
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                          <XAxis type="number" stroke="#94a3b8" fontSize={11} tickLine={false} allowDecimals={false} />
+                          <YAxis type="category" dataKey="name" width={100} stroke="#94a3b8" fontSize={10} tickLine={false} />
                           <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
-                          <Legend wrapperStyle={{ fontSize: 11 }} />
-                          <Bar dataKey="calls" name="Calls" fill="#0EA5E9" radius={[4, 4, 0, 0]} />
-                          <Bar dataKey="conversions" name="Conversions" fill="#0369A1" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="count" name="Calls" fill="#0EA5E9" radius={[0, 4, 4, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
                     )}
@@ -316,7 +312,8 @@ export default function Reports() {
                   ["calls", "Calls"],
                   ["connected", "Connected"],
                   ["connect_rate", "Connect %"],
-                  ["leads", "Leads"],
+                  ["top_disposition", "Top response"],
+                  ["converted_responses", "Conv. responses"],
                   ["conversions", "Conversions"],
                   ["conversion_rate", "Conv %"],
                 ]}
@@ -368,12 +365,33 @@ export default function Reports() {
             </TabsContent>
 
             <TabsContent value="company" className="mt-3 space-y-3">
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-3" data-testid="company-kpis">
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="company-kpis">
+                <KpiCard testId="kpi-co-responses" label="Responses logged" value={summary.responses_logged ?? 0} hint={`${summary.connect_rate ?? 0}% connect`} />
+                <KpiCard testId="kpi-co-conv-resp" label="Converted responses" value={summary.converted_responses ?? 0} hint={`${summary.converted_response_share ?? 0}% share`} accent="amber" />
                 <KpiCard testId="kpi-co-leads" label="Leads" value={summary.total_leads ?? 0} />
-                <KpiCard testId="kpi-co-conv" label="Conversions" value={summary.total_conversions ?? 0} accent="amber" />
-                <KpiCard testId="kpi-co-rate" label="Conversion rate" value={`${summary.conversion_rate ?? 0}%`} accent="blue" />
+                <KpiCard testId="kpi-co-rate" label="Lead conversion" value={`${summary.conversion_rate ?? 0}%`} accent="blue" />
               </div>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm" data-testid="company-responses-panel">
+                  <PanelHeader title="Responses analysis" hint="Disposition × calls" />
+                  <div className="h-56">
+                    {(payload?.disposition_breakdown || []).length === 0 ? (
+                      <EmptyChart />
+                    ) : (
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={(payload?.disposition_breakdown || []).slice(0, 10)}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                          <XAxis dataKey="name" stroke="#94a3b8" fontSize={10} tickLine={false} interval={0} angle={-25} textAnchor="end" height={56} />
+                          <YAxis stroke="#94a3b8" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
+                          <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
+                          <Legend wrapperStyle={{ fontSize: 11 }} />
+                          <Bar dataKey="count" name="Calls" fill="#0EA5E9" radius={[4, 4, 0, 0]} />
+                          <Bar dataKey="conversions" name="Converted" fill="#0369A1" radius={[4, 4, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    )}
+                  </div>
+                </div>
                 <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
                   <PanelHeader title="Leads by source" />
                   <div className="h-56">
@@ -392,31 +410,20 @@ export default function Reports() {
                     )}
                   </div>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-                  <PanelHeader title="Conversion mix" />
-                  <div className="h-56">
-                    {rows.length === 0 ? (
-                      <EmptyChart />
-                    ) : (
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={rows.filter((r) => r.conversions > 0)}
-                            dataKey="conversions"
-                            nameKey="source"
-                            innerRadius={40}
-                            outerRadius={70}
-                            paddingAngle={2}
-                          >
-                            {rows.map((_, i) => <Cell key={i} fill={PIE[i % PIE.length]} />)}
-                          </Pie>
-                          <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                    )}
-                  </div>
-                </div>
               </div>
+              <ReportTable
+                rows={payload?.disposition_breakdown || []}
+                testid="company-responses-table"
+                rateKeys={["pct"]}
+                onRowClick={(row) => navigate(buildLeadHref({ disposition: row.name, tab: "assigned" }))}
+                cols={[
+                  ["name", "Response"],
+                  ["count", "Calls"],
+                  ["pct", "Share %"],
+                  ["connected", "Connected"],
+                  ["conversions", "Converted"],
+                ]}
+              />
               <ReportTable
                 rows={rows}
                 testid="company-table"

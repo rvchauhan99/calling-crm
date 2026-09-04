@@ -51,6 +51,9 @@ const callerPayload = {
     leads: 5,
     conversions: 1,
     conversion_rate: 20,
+    top_disposition: "Interested",
+    converted_responses: 1,
+    disposition_breakdown: [{ name: "Interested", count: 6 }],
   }],
   summary: {
     total_calls: 10,
@@ -59,7 +62,14 @@ const callerPayload = {
     total_leads: 5,
     total_conversions: 1,
     conversion_rate: 20,
+    responses_logged: 10,
+    converted_responses: 1,
+    converted_response_share: 10,
   },
+  disposition_breakdown: [
+    { name: "Interested", count: 6, pct: 60 },
+    { name: "Call Back", count: 4, pct: 40 },
+  ],
   from: "2026-09-01",
   to: "2026-09-04",
 }
@@ -79,7 +89,19 @@ describe("Reports page", () => {
         return Promise.resolve({
           data: {
             rows: [{ source: "Manual", leads: 4, conversions: 1, conversion_rate: 25 }],
-            summary: { total_leads: 4, total_conversions: 1, conversion_rate: 25 },
+            summary: {
+              total_leads: 4,
+              total_conversions: 1,
+              conversion_rate: 25,
+              responses_logged: 8,
+              converted_responses: 1,
+              converted_response_share: 12.5,
+              connect_rate: 50,
+            },
+            disposition_breakdown: [
+              { name: "Interested", count: 5, pct: 62.5, connected: 4, conversions: 0 },
+              { name: "Converted", count: 1, pct: 12.5, connected: 1, conversions: 1 },
+            ],
           },
         })
       }

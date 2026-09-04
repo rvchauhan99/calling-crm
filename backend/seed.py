@@ -82,16 +82,19 @@ ROLE_DEFS = {
     },
 }
 
+# name, order, type, requires_acw, color, default_pipeline_stage, converts_to_client
 DISPOSITIONS = [
-    ("Interested", 1, "carry_forward", False, "#0EA5E9"),
-    ("Call Back", 2, "carry_forward", True, "#38BDF8"),
-    ("Ringing / No Answer", 3, "carry_forward", False, "#7DD3FC"),
-    ("Switched Off", 4, "carry_forward", False, "#94A3B8"),
-    ("Not Interested", 5, "non_carry_forward", False, "#F59E0B"),
-    ("Wrong Number", 6, "non_carry_forward", False, "#EF4444"),
-    ("Converted", 7, "non_carry_forward", True, "#0369A1"),
-    ("DND / Do Not Call", 8, "non_carry_forward", False, "#475569"),
+    ("Interested", 1, "carry_forward", False, "#0EA5E9", "Qualified", False),
+    ("Call Back", 2, "carry_forward", True, "#38BDF8", "Contacted", False),
+    ("Ringing / No Answer", 3, "carry_forward", False, "#7DD3FC", "Contacted", False),
+    ("Switched Off", 4, "carry_forward", False, "#94A3B8", "Contacted", False),
+    ("Not Interested", 5, "non_carry_forward", False, "#F59E0B", "Lost", False),
+    ("Wrong Number", 6, "non_carry_forward", False, "#EF4444", "Lost", False),
+    ("Converted", 7, "non_carry_forward", True, "#0369A1", "Won", True),
+    ("DND / Do Not Call", 8, "non_carry_forward", False, "#475569", "Lost", False),
 ]
+
+DISPOSITION_PIPELINE_DEFAULTS = {row[0]: (row[5], row[6]) for row in DISPOSITIONS}
 
 PIPELINE_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
 
@@ -164,6 +167,32 @@ async def ensure_indexes():
     await db.login_attempts.create_index("identifier")
 
 
+async def migrate_disposition_pipeline_links():
+    """Backfill default_pipeline_stage + converts_to_client on known dispositions."""
+    for name, (stage, converts) in DISPOSITION_PIPELINE_DEFAULTS.items():
+        await db.dispositions.update_many(
+            {"companyId": COMPANY_ID, "name": name},
+            {"$set": {
+                "default_pipeline_stage": stage,
+                "converts_to_client": converts,
+            }},
+        )
+    # Ensure any disposition missing the new keys gets safe defaults
+    await db.dispositions.update_many(
+        {"companyId": COMPANY_ID, "default_pipeline_stage": {"$exists": False}},
+        {"$set": {"default_pipeline_stage": None}},
+    )
+    await db.dispositions.update_many(
+        {"companyId": COMPANY_ID, "converts_to_client": {"$exists": False}},
+        {"$set": {"converts_to_client": False}},
+    )
+    # Converted by name always converts + Won
+    await db.dispositions.update_many(
+        {"companyId": COMPANY_ID, "name": "Converted"},
+        {"$set": {"default_pipeline_stage": "Won", "converts_to_client": True}},
+    )
+
+
 async def seed():
     await ensure_indexes()
 
@@ -217,6 +246,8 @@ async def seed():
                                       {"$set": {"password_hash": hash_password(admin_password)}})
         await db.users.update_one({"id": admin_id}, {"$set": {"role_id": role_ids["Super Admin"]}})
 
+    await migrate_disposition_pipeline_links()
+
     # Keep demo passwords in sync with DEMO_PASSWORD (like admin above)
     demo_password = os.environ.get("DEMO_PASSWORD", "Passw0rd!")
     if await db.users.count_documents({"companyId": COMPANY_ID, "is_demo": True}) > 0:
@@ -227,10 +258,11 @@ async def seed():
         return
 
     # Dispositions
-    for name, order, dtype, acw, color in DISPOSITIONS:
+    for name, order, dtype, acw, color, stage, converts in DISPOSITIONS:
         await db.dispositions.insert_one({
             "id": new_id(), "companyId": COMPANY_ID, "name": name, "slot": order,
             "type": dtype, "requires_acw": acw, "color": color, "order": order,
+            "default_pipeline_stage": stage, "converts_to_client": converts,
             "active": True, "created_at": now_iso()})
 
     # Demo users: supervisor + agents + affiliate

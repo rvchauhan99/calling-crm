@@ -12,12 +12,11 @@ import {
   monthStartISO, todayISO, startOfWeekISO, monthsAgoISO,
 } from "@/components/dashboard/atoms"
 import { ChevronDown, ChevronUp, Filter } from "lucide-react"
+import { cn } from "@/lib/utils"
 import {
-  BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis,
+  BarChart, Bar, XAxis, YAxis,
   CartesianGrid, Tooltip, ResponsiveContainer, Legend, AreaChart, Area,
 } from "recharts"
-
-const PIE = ["#0EA5E9", "#0369A1", "#38BDF8", "#7DD3FC", "#F59E0B", "#EF4444", "#94A3B8", "#0284C7"]
 
 const defaultFilters = () => ({
   from: monthStartISO(),
@@ -69,6 +68,7 @@ export default function Dashboard() {
   const [options, setOptions] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [responseView, setResponseView] = useState("leads")
 
   const syncUrl = useCallback((next, presetId) => {
     const p = new URLSearchParams()
@@ -219,6 +219,8 @@ export default function Dashboard() {
   const k = data.kpis
   const agingMax = Math.max(1, ...(data.aging_sla || []).map((a) => a.count))
   const funnelMax = Math.max(1, ...(data.pipeline_funnel || []).map((f) => f.count))
+  const responseMax = Math.max(1, ...(data.lead_disposition_breakdown || []).map((f) => f.count))
+  const rc = data.response_conversion || {}
   const trendData = (data.daily_trend || []).map((d) => ({
     ...d,
     label: d.date?.slice(5) || d.date,
@@ -419,8 +421,99 @@ export default function Dashboard() {
 
       {!isAffiliate && (
         <>
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="response-kpis">
+            <KpiCard
+              testId="kpi-top-response"
+              label="Top response"
+              value={rc.top_response || "—"}
+              hint={`${rc.top_response_count || 0} leads`}
+              onClick={() => rc.top_response && rc.top_response !== "No response" && goLeads({ disposition: rc.top_response })}
+            />
+            <KpiCard
+              testId="kpi-response-coverage"
+              label="With response"
+              value={`${rc.response_coverage_pct ?? 0}%`}
+              hint={`${rc.leads_with_response || 0} of ${k.total_leads}`}
+              accent="blue"
+            />
+            <KpiCard
+              testId="kpi-converted-response"
+              label="Converted"
+              value={k.converted_leads}
+              hint={`${rc.converted_share_pct ?? k.conversion_rate}% of leads`}
+              accent="amber"
+              onClick={() => goLeads({ status: "converted" })}
+            />
+            <KpiCard
+              testId="kpi-carry-forward"
+              label="Carry-forward"
+              value={`${rc.carry_forward_pct ?? 0}%`}
+              hint={`${rc.carry_forward_count || 0} leads`}
+            />
+          </div>
+
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-8">
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-8" data-testid="responses-overview">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <PanelHeader title="Responses overview" hint="Primary analysis axis" />
+                <div className="flex gap-1">
+                  <Button
+                    size="sm"
+                    variant={responseView === "leads" ? "default" : "outline"}
+                    className={cn("h-7 text-xs", responseView === "leads" && "bg-sky-500 hover:bg-sky-600")}
+                    onClick={() => setResponseView("leads")}
+                    data-testid="response-view-leads"
+                  >
+                    By last response
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={responseView === "calls" ? "default" : "outline"}
+                    className={cn("h-7 text-xs", responseView === "calls" && "bg-sky-500 hover:bg-sky-600")}
+                    onClick={() => setResponseView("calls")}
+                    data-testid="response-view-calls"
+                  >
+                    By calls logged
+                  </Button>
+                </div>
+              </div>
+              {responseView === "leads" ? (
+                <div className="space-y-0.5" data-testid="lead-disposition-bars">
+                  {(data.lead_disposition_breakdown || []).length === 0 ? (
+                    <div className="py-8 text-center text-sm text-slate-400">No leads in range</div>
+                  ) : (
+                    (data.lead_disposition_breakdown || []).map((row) => (
+                      <MiniBar
+                        key={row.name}
+                        label={`${row.label} · ${row.pct}%`}
+                        count={row.count}
+                        max={responseMax}
+                        onClick={() => goLeads({
+                          disposition: row.name === "__none__" ? "__none__" : row.name,
+                        })}
+                      />
+                    ))
+                  )}
+                </div>
+              ) : (
+                <div className="h-52">
+                  {(data.disposition_mix || []).length === 0 ? (
+                    <div className="flex h-full items-center justify-center text-sm text-slate-400">No calls</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={data.disposition_mix} layout="vertical">
+                        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
+                        <XAxis type="number" stroke="#94a3b8" fontSize={11} tickLine={false} allowDecimals={false} />
+                        <YAxis type="category" dataKey="name" width={100} stroke="#94a3b8" fontSize={10} tickLine={false} />
+                        <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
+                        <Bar dataKey="value" name="Calls" fill="#0EA5E9" radius={[0, 4, 4, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-4">
               <PanelHeader title="Lead & call trend" hint="Selected range" />
               <div className="h-52">
                 {trendData.length === 0 ? (
@@ -440,8 +533,11 @@ export default function Dashboard() {
                 )}
               </div>
             </div>
-            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-4">
-              <PanelHeader title="Pipeline funnel" />
+          </div>
+
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
+            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-4" data-testid="pipeline-funnel-panel">
+              <PanelHeader title="Pipeline funnel" hint="Derived from Responses" />
               <div className="space-y-0.5">
                 {(data.pipeline_funnel || []).map((row) => (
                   <MiniBar
@@ -451,34 +547,6 @@ export default function Dashboard() {
                     max={funnelMax}
                     onClick={() => goLeads({ stage: row.stage })}
                   />
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-            <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-4">
-              <PanelHeader title="Disposition mix" />
-              <div className="h-48">
-                {(data.disposition_mix || []).length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-sm text-slate-400">No calls</div>
-                ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={data.disposition_mix} dataKey="value" nameKey="name" innerRadius={40} outerRadius={70} paddingAngle={2}>
-                        {data.disposition_mix.map((_, i) => <Cell key={i} fill={PIE[i % PIE.length]} />)}
-                      </Pie>
-                      <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
-                    </PieChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-              <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1">
-                {(data.disposition_mix || []).slice(0, 6).map((d, i) => (
-                  <span key={d.name} className="flex items-center gap-1 text-[10px] text-slate-500">
-                    <span className="h-2 w-2 rounded-full" style={{ background: PIE[i % PIE.length] }} />
-                    {d.name}
-                  </span>
                 ))}
               </div>
             </div>

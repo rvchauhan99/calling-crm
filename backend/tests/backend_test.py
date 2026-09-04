@@ -445,28 +445,55 @@ class TestDispositions:
     def test_crud(self, admin, agent):
         r = admin.post(f"{BASE_URL}/api/dispositions", json={
             "name": uniq("TEST_Disp_"), "slot": 9, "type": "carry_forward",
-            "requires_acw": True, "color": "#0EA5E9"}, timeout=30)
+            "requires_acw": True, "color": "#0EA5E9",
+            "default_pipeline_stage": "Qualified", "converts_to_client": False}, timeout=30)
         assert r.status_code == 200, r.text
         d = r.json()["disposition"]
         assert d["requires_acw"] is True
+        assert d["default_pipeline_stage"] == "Qualified"
+        assert d["converts_to_client"] is False
         lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         assert any(x["id"] == d["id"] for x in lst)
         u = admin.put(f"{BASE_URL}/api/dispositions/{d['id']}", json={
             "name": "TEST_Disp_Upd", "slot": 9, "type": "non_carry_forward",
-            "requires_acw": False}, timeout=30)
+            "requires_acw": False, "default_pipeline_stage": "Lost",
+            "converts_to_client": False}, timeout=30)
         assert u.status_code == 200
         lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         upd = [x for x in lst if x["id"] == d["id"]][0]
         assert upd["name"] == "TEST_Disp_Upd" and upd["type"] == "non_carry_forward"
+        assert upd["default_pipeline_stage"] == "Lost"
         # agent cannot create
         assert agent.post(f"{BASE_URL}/api/dispositions", json={"name": "x"}, timeout=30).status_code == 403
         assert admin.delete(f"{BASE_URL}/api/dispositions/{d['id']}", timeout=30).status_code == 200
         lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         assert not any(x["id"] == d["id"] for x in lst)
 
+    def test_converts_to_client_forces_won(self, admin):
+        r = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": uniq("TEST_ConvDisp_"), "slot": 99, "type": "non_carry_forward",
+            "default_pipeline_stage": "Qualified", "converts_to_client": True}, timeout=30)
+        assert r.status_code == 200, r.text
+        d = r.json()["disposition"]
+        assert d["default_pipeline_stage"] == "Won"
+        assert d["converts_to_client"] is True
+        admin.delete(f"{BASE_URL}/api/dispositions/{d['id']}", timeout=30)
+
+    def test_invalid_pipeline_stage(self, admin):
+        r = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": uniq("TEST_BadStage_"), "default_pipeline_stage": "Nope"}, timeout=30)
+        assert r.status_code == 400
+
     def test_update_missing_404(self, admin):
         r = admin.put(f"{BASE_URL}/api/dispositions/none", json={"name": "x"}, timeout=30)
         assert r.status_code == 404
+
+    def test_seeded_converted_maps_to_won(self, admin):
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        converted = [d for d in disps if d["name"] == "Converted"]
+        assert converted
+        assert converted[0].get("default_pipeline_stage") == "Won"
+        assert converted[0].get("converts_to_client") is True
 
 
 # ---------------- Today calls + ACW gate ----------------
@@ -694,6 +721,56 @@ class TestTodayCallsACW:
         clients = admin.get(f"{BASE_URL}/api/clients?search=TEST_AutoConv", timeout=60).json()["clients"]
         assert len([c for c in clients if c.get("lead_id") == lead["id"]]) == 1
 
+    def test_disposition_locks_pipeline_stage(self, admin, agent):
+        p = "87" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_StageLock", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disp = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": uniq("TEST_Lock_"), "slot": 50, "type": "carry_forward",
+            "default_pipeline_stage": "Qualified"}, timeout=30).json()["disposition"]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        bad = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": disp["id"],
+            "pipeline_stage": "Lost"}, timeout=30)
+        assert bad.status_code == 400
+        ok = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": disp["id"],
+            "pipeline_stage": "Qualified", "follow_up_at": None}, timeout=30)
+        assert ok.status_code == 200, ok.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got["pipeline_stage"] == "Qualified"
+        assert got["disposition_name"] == disp["name"]
+        admin.delete(f"{BASE_URL}/api/dispositions/{disp['id']}", timeout=30)
+
+    def test_converts_to_client_flag_creates_client(self, admin, agent):
+        p = "86" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_FlagConv", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disp = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": uniq("TEST_FlagConvDisp_"), "slot": 51,
+            "type": "non_carry_forward", "converts_to_client": True}, timeout=30).json()["disposition"]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": disp["id"]}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json().get("converted") is True
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got["is_client"] is True and got["pipeline_stage"] == "Won"
+        board = admin.get(f"{BASE_URL}/api/pipeline", timeout=60).json()["board"]
+        won_ids = [l["id"] for l in board.get("Won", [])]
+        assert lead["id"] in won_ids
+        for st, items in board.items():
+            if st == "Won":
+                continue
+            assert lead["id"] not in [l["id"] for l in items]
+        admin.delete(f"{BASE_URL}/api/dispositions/{disp['id']}", timeout=30)
+
     def test_call_history_search_and_export(self, admin):
         h = admin.get(f"{BASE_URL}/api/call-history?page_size=5", timeout=60)
         assert h.status_code == 200
@@ -879,6 +956,16 @@ class TestReports:
         assert len(b["calls_trend"]) == 7
         assert len(b["disposition_mix"]) > 0
         assert "pipeline_funnel" in b and len(b["pipeline_funnel"]) >= 6
+        assert "lead_disposition_breakdown" in b
+        assert isinstance(b["lead_disposition_breakdown"], list)
+        assert len(b["lead_disposition_breakdown"]) > 0
+        row0 = b["lead_disposition_breakdown"][0]
+        assert "name" in row0 and "count" in row0 and "pct" in row0 and "label" in row0
+        assert "response_conversion" in b
+        rc = b["response_conversion"]
+        for key in ["converted_leads", "leads_with_response", "response_coverage_pct",
+                    "carry_forward_count", "top_response"]:
+            assert key in rc, key
         assert "source_breakdown" in b and "agent_performance" in b
         assert "daily_trend" in b and "aging_sla" in b and "insights" in b
         ag = agent.get(f"{BASE_URL}/api/dashboard", timeout=120).json()
@@ -945,10 +1032,29 @@ class TestReports:
         body = r.json()
         s = body["summary"]
         for key in ["total_calls", "total_connected", "connect_rate",
-                    "total_leads", "total_conversions", "conversion_rate"]:
+                    "total_leads", "total_conversions", "conversion_rate",
+                    "responses_logged", "converted_responses", "converted_response_share"]:
             assert key in s, key
         assert all("connect_rate" in row for row in body["rows"])
+        assert all("top_disposition" in row for row in body["rows"])
+        assert all("converted_responses" in row for row in body["rows"])
+        assert "disposition_breakdown" in body
+        assert isinstance(body["disposition_breakdown"], list)
 
+    def test_reports_company_disposition_breakdown(self, admin):
+        r = admin.get(f"{BASE_URL}/api/reports/company", timeout=120)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        s = body["summary"]
+        for key in ["responses_logged", "converted_responses", "converted_response_share",
+                    "total_leads", "conversion_rate"]:
+            assert key in s, key
+        assert "disposition_breakdown" in body
+        assert isinstance(body["disposition_breakdown"], list)
+        if body["disposition_breakdown"]:
+            row = body["disposition_breakdown"][0]
+            assert "name" in row and "count" in row and "pct" in row
+            assert "connected" in row and "conversions" in row
     def test_reports_date_filter(self, admin):
         all_caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
         far = admin.get(f"{BASE_URL}/api/reports/caller?from=2099-01-01&to=2099-01-31", timeout=120)

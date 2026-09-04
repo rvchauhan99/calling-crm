@@ -233,6 +233,47 @@ async def dashboard(
         disp_mix[d] = disp_mix.get(d, 0) + 1
     disposition_mix = [{"name": k, "value": v} for k, v in sorted(disp_mix.items(), key=lambda x: -x[1])]
 
+    # Lead last-response breakdown (primary Responses analysis)
+    lead_disp_counts = {}
+    for l in leads:
+        d = l.get("disposition_name") or "__none__"
+        lead_disp_counts[d] = lead_disp_counts.get(d, 0) + 1
+    lead_disposition_breakdown = []
+    for name, cnt in sorted(lead_disp_counts.items(), key=lambda x: -x[1]):
+        lead_disposition_breakdown.append({
+            "name": name,
+            "label": "No response" if name == "__none__" else name,
+            "count": cnt,
+            "pct": round((cnt / total_leads * 100) if total_leads else 0, 1),
+        })
+
+    disp_meta = {
+        d["name"]: d
+        for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
+    }
+    converted_by_response = sum(
+        1 for l in leads
+        if l.get("is_client") or l.get("status") == "converted"
+        or (l.get("disposition_name") and (
+            disp_meta.get(l["disposition_name"], {}).get("converts_to_client")
+            or l.get("disposition_name") == "Converted"
+        ))
+    )
+    with_response = sum(1 for l in leads if l.get("disposition_name"))
+    carry_forward_count = sum(1 for l in leads if l.get("carry_forward") is True)
+    top_response = lead_disposition_breakdown[0] if lead_disposition_breakdown else None
+    response_conversion = {
+        "converted_leads": converted_leads,
+        "converted_by_response": converted_by_response,
+        "converted_share_pct": round((converted_leads / total_leads * 100) if total_leads else 0, 1),
+        "leads_with_response": with_response,
+        "response_coverage_pct": round((with_response / total_leads * 100) if total_leads else 0, 1),
+        "carry_forward_count": carry_forward_count,
+        "carry_forward_pct": round((carry_forward_count / total_leads * 100) if total_leads else 0, 1),
+        "top_response": top_response["label"] if top_response else None,
+        "top_response_count": top_response["count"] if top_response else 0,
+    }
+
     # Source breakdown
     source_map = {}
     for l in leads:
@@ -404,6 +445,8 @@ async def dashboard(
             "ledger_debit": debit,
             "net_balance": round(credit - debit, 2),
         },
+        "lead_disposition_breakdown": lead_disposition_breakdown,
+        "response_conversion": response_conversion,
         "pipeline_funnel": pipeline_funnel,
         "status_breakdown": status_breakdown,
         "disposition_mix": disposition_mix,
@@ -453,11 +496,26 @@ async def caller_report(
     agents = await db.users.find({"companyId": COMPANY_ID, "user_type": "caller"}, {"_id": 0}).to_list(500)
     if assigned_to:
         agents = [a for a in agents if a["id"] == assigned_to]
+    disp_meta = {
+        d["name"]: d
+        for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
+    }
     rows = []
     for a in agents:
         aq = {"companyId": COMPANY_ID, "agent_id": a["id"], **date_q}
-        calls = await db.calls.count_documents(aq)
-        connected = await db.calls.count_documents({**aq, "outcome": "connected"})
+        calls_list = await db.calls.find(aq, {"_id": 0, "disposition_name": 1, "outcome": 1}).to_list(50000)
+        calls = len(calls_list)
+        connected = sum(1 for c in calls_list if c.get("outcome") == "connected")
+        disp_counts = {}
+        for c in calls_list:
+            dn = c.get("disposition_name") or "Unknown"
+            disp_counts[dn] = disp_counts.get(dn, 0) + 1
+        top_disp = max(disp_counts.items(), key=lambda x: x[1])[0] if disp_counts else None
+        converted_disp_calls = sum(
+            1 for c in calls_list
+            if c.get("disposition_name") == "Converted"
+            or (c.get("disposition_name") and disp_meta.get(c["disposition_name"], {}).get("converts_to_client"))
+        )
         lq = {"companyId": COMPANY_ID, "assigned_to": a["id"], **date_q}
         leads = await db.leads.count_documents(lq)
         converted = await db.leads.count_documents({**lq, "is_client": True})
@@ -470,6 +528,11 @@ async def caller_report(
             "leads": leads,
             "conversions": converted,
             "conversion_rate": round((converted / leads * 100) if leads else 0, 1),
+            "top_disposition": top_disp,
+            "converted_responses": converted_disp_calls,
+            "disposition_breakdown": [
+                {"name": k, "count": v} for k, v in sorted(disp_counts.items(), key=lambda x: -x[1])
+            ],
         })
     if principal.get("data_scope") != "ALL" and "agent_id" in scope:
         allowed = scope["agent_id"].get("$in") if isinstance(scope["agent_id"], dict) else [scope["agent_id"]]
@@ -479,6 +542,16 @@ async def caller_report(
     total_connected = sum(r["connected"] for r in rows)
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
+    total_converted_responses = sum(r["converted_responses"] for r in rows)
+    # Company-level disposition mix for caller report
+    all_disp = {}
+    for r in rows:
+        for d in r.get("disposition_breakdown") or []:
+            all_disp[d["name"]] = all_disp.get(d["name"], 0) + d["count"]
+    disposition_breakdown = [
+        {"name": k, "count": v, "pct": round((v / total_calls * 100) if total_calls else 0, 1)}
+        for k, v in sorted(all_disp.items(), key=lambda x: -x[1])
+    ]
     summary = {
         "total_calls": total_calls,
         "total_connected": total_connected,
@@ -486,10 +559,16 @@ async def caller_report(
         "total_leads": total_leads,
         "total_conversions": total_conversions,
         "conversion_rate": round((total_conversions / total_leads * 100) if total_leads else 0, 1),
+        "responses_logged": total_calls,
+        "converted_responses": total_converted_responses,
+        "converted_response_share": round(
+            (total_converted_responses / total_calls * 100) if total_calls else 0, 1
+        ),
     }
     return {
         "rows": rows,
         "summary": summary,
+        "disposition_breakdown": disposition_breakdown,
         "from": from_d.isoformat() if from_d else None,
         "to": to_d.isoformat() if to_d else None,
     }
@@ -572,14 +651,68 @@ async def company_report(
     rows = sorted(sources.values(), key=lambda x: -x["leads"])
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
+
+    cq = {"companyId": COMPANY_ID, **date_q}
+    if source:
+        # Limit calls to leads matching source when filter set
+        lead_ids = [
+            l["id"] for l in await db.leads.find(
+                {"companyId": COMPANY_ID, "source": source, **date_q},
+                {"_id": 0, "id": 1},
+            ).to_list(20000)
+        ]
+        if lead_ids:
+            cq["lead_id"] = {"$in": lead_ids}
+        else:
+            cq["lead_id"] = "__none__"
+    disp_meta = {
+        d["name"]: d
+        for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
+    }
+    call_docs = await db.calls.find(cq, {"_id": 0, "disposition_name": 1, "outcome": 1}).to_list(50000)
+    disp_counts = {}
+    connected = 0
+    converted_responses = 0
+    for c in call_docs:
+        dn = c.get("disposition_name") or "Unknown"
+        disp_counts[dn] = disp_counts.get(dn, 0) + 1
+        if c.get("outcome") == "connected":
+            connected += 1
+        if dn == "Converted" or disp_meta.get(dn, {}).get("converts_to_client"):
+            converted_responses += 1
+    responses_logged = len(call_docs)
+    disposition_breakdown = [
+        {
+            "name": k,
+            "count": v,
+            "pct": round((v / responses_logged * 100) if responses_logged else 0, 1),
+            "connected": sum(
+                1 for c in call_docs
+                if (c.get("disposition_name") or "Unknown") == k and c.get("outcome") == "connected"
+            ),
+            "conversions": sum(
+                1 for c in call_docs
+                if (c.get("disposition_name") or "Unknown") == k
+                and (k == "Converted" or disp_meta.get(k, {}).get("converts_to_client"))
+            ),
+        }
+        for k, v in sorted(disp_counts.items(), key=lambda x: -x[1])
+    ]
     summary = {
         "total_leads": total_leads,
         "total_conversions": total_conversions,
         "conversion_rate": round((total_conversions / total_leads * 100) if total_leads else 0, 1),
+        "responses_logged": responses_logged,
+        "converted_responses": converted_responses,
+        "converted_response_share": round(
+            (converted_responses / responses_logged * 100) if responses_logged else 0, 1
+        ),
+        "connect_rate": round((connected / responses_logged * 100) if responses_logged else 0, 1),
     }
     return {
         "rows": rows,
         "summary": summary,
+        "disposition_breakdown": disposition_breakdown,
         "from": from_d.isoformat() if from_d else None,
         "to": to_d.isoformat() if to_d else None,
     }
@@ -611,7 +744,8 @@ async def export_report(
         ))["rows"]
         return _csv_response(
             data,
-            ["name", "calls", "connected", "connect_rate", "leads", "conversions", "conversion_rate"],
+            ["name", "calls", "connected", "connect_rate", "leads", "conversions",
+             "conversion_rate", "top_disposition", "converted_responses"],
             "caller_report.csv",
         )
     if kind == "affiliate":

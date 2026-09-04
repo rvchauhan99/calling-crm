@@ -63,6 +63,21 @@ const summary = {
     ledger_debit: 100,
     net_balance: 900,
   },
+  lead_disposition_breakdown: [
+    { name: "Interested", label: "Interested", count: 4, pct: 40 },
+    { name: "__none__", label: "No response", count: 2, pct: 20 },
+  ],
+  response_conversion: {
+    converted_leads: 2,
+    converted_by_response: 2,
+    converted_share_pct: 20,
+    leads_with_response: 8,
+    response_coverage_pct: 80,
+    carry_forward_count: 5,
+    carry_forward_pct: 50,
+    top_response: "Interested",
+    top_response_count: 4,
+  },
   pipeline_funnel: [{ stage: "New", count: 5, rate_from_prev: 100 }],
   status_breakdown: [{ status: "active", count: 7 }],
   disposition_mix: [{ name: "Interested", value: 4 }],
@@ -108,6 +123,9 @@ describe("Dashboard analysis", () => {
     })
     expect(screen.getByTestId("kpi-calls")).toBeInTheDocument()
     expect(screen.getByTestId("status-tabs")).toBeInTheDocument()
+    expect(screen.getByTestId("responses-overview")).toBeInTheDocument()
+    expect(screen.getByTestId("lead-disposition-bars")).toBeInTheDocument()
+    expect(screen.getByTestId("response-kpis")).toBeInTheDocument()
   })
 
   it("hides assignment and agent filters for OWN scope", async () => {

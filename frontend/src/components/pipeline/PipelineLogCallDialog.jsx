@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -10,6 +10,12 @@ import { SearchableSelect } from "@/components/ui/searchable-select"
 import { toDatetimeLocalValue } from "@/lib/followupBuckets"
 
 const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
+
+export const mappedStageForDisposition = (disp) => {
+  if (!disp) return null
+  if (disp.converts_to_client || disp.name === "Converted") return "Won"
+  return disp.default_pipeline_stage || null
+}
 
 const emptyForm = (lead, stage) => ({
   disposition_id: "",
@@ -30,11 +36,27 @@ export const PipelineLogCallDialog = ({
   onSubmit,
 }) => {
   const [form, setForm] = useState(emptyForm(null, "New"))
-  const stage = targetStage || form.pipeline_stage
+  const selectedDisp = useMemo(
+    () => dispositions.find((d) => d.id === form.disposition_id),
+    [dispositions, form.disposition_id],
+  )
+  const mappedStage = mappedStageForDisposition(selectedDisp)
+  const stageLocked = Boolean(mappedStage)
+  const stage = mode === "move"
+    ? targetStage
+    : (mappedStage || form.pipeline_stage)
   const fuRequired = stage !== "Won" && stage !== "Lost"
   const title = mode === "move"
     ? `Move to ${targetStage}`
     : `Log Call — ${lead?.name || ""}`
+
+  const visibleDispositions = useMemo(() => {
+    if (mode !== "move" || !targetStage) return dispositions
+    return dispositions.filter((d) => {
+      const mapped = mappedStageForDisposition(d)
+      return !mapped || mapped === targetStage
+    })
+  }, [dispositions, mode, targetStage])
 
   useEffect(() => {
     if (open && lead) {
@@ -42,10 +64,20 @@ export const PipelineLogCallDialog = ({
     }
   }, [open, lead, targetStage])
 
+  const handleDispositionChange = (v) => {
+    const disp = dispositions.find((d) => d.id === v)
+    const mapped = mappedStageForDisposition(disp)
+    setForm((prev) => ({
+      ...prev,
+      disposition_id: v,
+      pipeline_stage: mapped || (mode === "move" ? targetStage : prev.pipeline_stage),
+    }))
+  }
+
   const handleSubmit = () => {
     onSubmit?.({
       ...form,
-      pipeline_stage: targetStage || form.pipeline_stage,
+      pipeline_stage: stage,
       duration: Number(form.duration) || 0,
       follow_up_at: form.follow_up_at ? new Date(form.follow_up_at).toISOString() : null,
     })
@@ -68,12 +100,15 @@ export const PipelineLogCallDialog = ({
             <div className="rounded-md bg-slate-50 px-3 py-2 text-sm">
               <span className="text-slate-500">Target stage: </span>
               <span className="font-semibold text-slate-800" data-testid="move-target-stage">{targetStage}</span>
+              <p className="mt-1 text-xs text-slate-500">
+                Only responses that map to this stage (or have no mapping) are listed
+              </p>
             </div>
           )}
           <SearchableSelect
             value={form.disposition_id}
-            onChange={(v) => setForm({ ...form, disposition_id: v })}
-            options={dispositions.map((d) => ({
+            onChange={handleDispositionChange}
+            options={visibleDispositions.map((d) => ({
               value: d.id,
               label: d.name,
               color: d.color,
@@ -93,12 +128,13 @@ export const PipelineLogCallDialog = ({
           {mode === "log" && (
             <div className="grid grid-cols-2 gap-3">
               <SearchableSelect
-                value={form.pipeline_stage}
+                value={stage}
                 onChange={(v) => setForm({ ...form, pipeline_stage: v })}
                 options={STAGES.map((s) => ({ value: s, label: s }))}
                 placeholder="Stage"
                 label="Pipeline stage"
                 testId="pipeline-stage-select"
+                disabled={stageLocked}
               />
               <div>
                 <Label htmlFor="pipe-duration">Duration (sec)</Label>
@@ -111,6 +147,11 @@ export const PipelineLogCallDialog = ({
                   data-testid="pipeline-duration-input"
                 />
               </div>
+              {stageLocked && (
+                <p className="col-span-2 text-xs text-slate-500" data-testid="stage-locked-hint">
+                  Stage locked by response mapping ({mappedStage})
+                </p>
+              )}
             </div>
           )}
           {mode === "move" && (

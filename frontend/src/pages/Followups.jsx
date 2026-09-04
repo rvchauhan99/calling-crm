@@ -23,10 +23,9 @@ import {
   followupPillColor,
   toDatetimeLocalValue,
 } from "@/lib/followupBuckets"
+import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
 
 export { classifyFollowup, sortFollowups } from "@/lib/followupBuckets"
-
-const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
 const FILTERS = [
   { id: "all", label: "All" },
   { id: "overdue", label: "Overdue" },
@@ -227,7 +226,15 @@ export default function Followups() {
           <div className="space-y-3">
             <SearchableSelect
               value={form.disposition_id}
-              onChange={(v) => setForm({ ...form, disposition_id: v })}
+              onChange={(v) => {
+                const disp = dispositions.find((d) => d.id === v)
+                const mapped = mappedStageForDisposition(disp)
+                setForm({
+                  ...form,
+                  disposition_id: v,
+                  pipeline_stage: mapped || form.pipeline_stage,
+                })
+              }}
               options={dispositions.map((d) => ({
                 value: d.id,
                 label: d.name,
@@ -255,6 +262,9 @@ export default function Followups() {
                 searchPlaceholder="Search stages…"
                 label="Pipeline stage"
                 testId="stage-select"
+                disabled={Boolean(mappedStageForDisposition(
+                  dispositions.find((d) => d.id === form.disposition_id),
+                ))}
               />
               <div>
                 <Label htmlFor="followups-duration">Duration (sec)</Label>
