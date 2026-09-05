@@ -42,13 +42,20 @@ jest.mock("sonner", () => ({
 
 const FIXED_NOW = new Date("2026-09-04T12:00:00")
 
+const dayOffsetIso = (dayOffset, hour = 15) => {
+  const d = new Date()
+  d.setHours(hour, 0, 0, 0)
+  d.setDate(d.getDate() + dayOffset)
+  return d.toISOString()
+}
+
 const mockFollowups = [
   {
     id: "fu-upcoming",
     name: "Upcoming Lead",
     phone: "+919111111111",
     disposition_name: "Call Back",
-    follow_up_at: "2026-09-10T10:00:00.000Z",
+    follow_up_at: dayOffsetIso(6, 10),
     pipeline_stage: "New",
   },
   {
@@ -56,7 +63,7 @@ const mockFollowups = [
     name: "Overdue Lead",
     phone: "+919222222222",
     disposition_name: "Interested",
-    follow_up_at: "2026-09-01T10:00:00.000Z",
+    follow_up_at: dayOffsetIso(-3, 10),
     pipeline_stage: "Contacted",
   },
   {
@@ -64,7 +71,7 @@ const mockFollowups = [
     name: "Today Lead",
     phone: "+919333333333",
     disposition_name: "Call Back",
-    follow_up_at: new Date(2026, 8, 4, 15, 0, 0).toISOString(),
+    follow_up_at: dayOffsetIso(0, 15),
     pipeline_stage: "Qualified",
   },
 ]

@@ -15,13 +15,15 @@ MENU_CATALOG = [
     ("pipeline", "Pipeline", "Kanban", "/pipeline", "Sales", 5, ["view", "edit"]),
     ("followups", "Follow-ups", "CalendarCheck", "/followups", "Sales", 6, ["view", "edit"]),
     ("dispositions", "Responses", "ListChecks", "/dispositions", "Config", 7, ["view", "create", "edit", "delete"]),
-    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 8, ["view", "create", "edit", "convert"]),
-    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 9, ["view", "post", "reverse", "export"]),
-    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 10, ["view", "export"]),
-    ("users", "Users", "IdentificationBadge", "/users", "Admin", 11, ["view", "create", "edit", "delete"]),
-    ("teams", "Teams", "UsersThree", "/teams", "Admin", 12, ["view", "create", "edit", "delete"]),
-    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 13, ["view", "create", "edit", "delete"]),
-    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 14, ["view"]),
+    ("sheet_sources", "Sheet Sources", "Table", "/sheet-sources", "Config", 8,
+     ["view", "create", "edit", "delete", "sync"]),
+    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 9, ["view", "create", "edit", "convert"]),
+    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 10, ["view", "post", "reverse", "export"]),
+    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 11, ["view", "export"]),
+    ("users", "Users", "IdentificationBadge", "/users", "Admin", 12, ["view", "create", "edit", "delete"]),
+    ("teams", "Teams", "UsersThree", "/teams", "Admin", 13, ["view", "create", "edit", "delete"]),
+    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 14, ["view", "create", "edit", "delete"]),
+    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 15, ["view"]),
 ]
 
 
@@ -160,6 +162,14 @@ async def ensure_indexes():
     await db.users.create_index("id")
     await db.leads.create_index([("companyId", 1), ("phone", 1)])
     await db.leads.create_index("assigned_to")
+    await db.leads.create_index(
+        [("companyId", 1), ("sheet_source_id", 1), ("external_id", 1)],
+        unique=True,
+        partialFilterExpression={"external_id": {"$type": "string"}},
+        name="sheet_external_id_unique",
+    )
+    await db.sheet_sources.create_index([("companyId", 1), ("id", 1)], unique=True)
+    await db.sheet_sync_runs.create_index([("companyId", 1), ("sheet_source_id", 1), ("created_at", -1)])
     await db.ledger.create_index("idempotency_key", unique=True, sparse=True)
     await db.ledger.create_index([("client_id", 1), ("created_at", 1)])
     await db.calls.create_index("agent_id")
@@ -200,6 +210,49 @@ async def migrate_disposition_pipeline_links():
     await db.leads.update_many(
         {"companyId": COMPANY_ID, "$or": [{"is_client": True}, {"status": "converted"}]},
         {"$set": {"follow_up_at": None}},
+    )
+
+
+SAMPLE_SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1aLEV8ZK1RkMaPzsaahfUZQ-zXKHFDSQLirF4Jbx-u0A/edit?gid=0#gid=0"
+)
+SAMPLE_SPREADSHEET_ID = "1aLEV8ZK1RkMaPzsaahfUZQ-zXKHFDSQLirF4Jbx-u0A"
+
+
+async def seed_sample_sheet_source():
+    """Upsert local Bax Meta Lead Ads sheet for live sync testing."""
+    from sheet_sync import default_column_map
+
+    await db.sheet_sources.update_one(
+        {"companyId": COMPANY_ID, "spreadsheet_id": SAMPLE_SPREADSHEET_ID},
+        {
+            "$set": {
+                "name": "Bax Meta Lead Ads (sample)",
+                "sheet_url": SAMPLE_SHEET_URL,
+                "spreadsheet_id": SAMPLE_SPREADSHEET_ID,
+                "gid": "0",
+                "enabled": True,
+                "auto_assign": False,
+                "source": "Facebook Ads",
+                "preset": "meta_lead_ads",
+                "column_map": default_column_map("meta_lead_ads"),
+                "poll_seconds": 60,
+                "companyId": COMPANY_ID,
+                "updated_at": now_iso(),
+            },
+            "$setOnInsert": {
+                "id": new_id(),
+                "last_synced_at": None,
+                "last_status": "never",
+                "last_error": None,
+                "last_result": None,
+                "syncing": False,
+                "sync_lock_until": None,
+                "created_at": now_iso(),
+            },
+        },
+        upsert=True,
     )
 
 
@@ -257,6 +310,7 @@ async def seed():
         await db.users.update_one({"id": admin_id}, {"$set": {"role_id": role_ids["Super Admin"]}})
 
     await migrate_disposition_pipeline_links()
+    await seed_sample_sheet_source()
 
     # Keep demo passwords in sync with DEMO_PASSWORD (like admin above)
     demo_password = os.environ.get("DEMO_PASSWORD", "Passw0rd!")
