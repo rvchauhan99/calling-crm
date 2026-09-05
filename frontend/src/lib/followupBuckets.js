@@ -88,3 +88,11 @@ export const isConvertDisposition = (disp) => (
 
 export const isTerminalStage = (stage) => stage === "Won" || stage === "Lost"
 
+/** Return positive number for API, or null if empty/zero/invalid. */
+export const parseDepositAmount = (raw) => {
+  if (raw === "" || raw == null) return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n
+}
+

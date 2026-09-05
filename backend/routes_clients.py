@@ -10,6 +10,7 @@ router = APIRouter(prefix="/api", tags=["clients"])
 class ConvertIn(BaseModel):
     lead_id: str
     affiliate_id: Optional[str] = None
+    deposit_amount: Optional[float] = None
 
 
 class NoteIn(BaseModel):
@@ -84,15 +85,97 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
     return client
 
 
+async def _post_conversion_deposit(
+    client_id: str,
+    amount: float,
+    principal: dict,
+    *,
+    idempotency_key: str,
+    description: str = "Initial deposit on conversion",
+) -> dict:
+    """Post credit/deposit for a client on convert. Idempotent by key. Raises HTTPException on bad amount."""
+    if amount is None:
+        return {"deposit_posted": False, "entry": None, "idempotent": False}
+    try:
+        amt = float(amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="deposit_amount must be a number")
+    if amt < 0:
+        raise HTTPException(status_code=400, detail="deposit_amount must be positive")
+    if amt == 0:
+        return {"deposit_posted": False, "entry": None, "idempotent": False}
+
+    client = await db.clients.find_one({"id": client_id, "companyId": COMPANY_ID}, {"_id": 0})
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    existing = await db.ledger.find_one({"idempotency_key": idempotency_key}, {"_id": 0})
+    if existing:
+        return {"deposit_posted": True, "entry": existing, "idempotent": True}
+
+    prev_balance = await _recompute_balance(client_id)
+    new_balance = round(prev_balance + amt, 2)
+    entry = {
+        "id": new_id(),
+        "companyId": COMPANY_ID,
+        "client_id": client_id,
+        "type": "credit",
+        "amount": round(amt, 2),
+        "balance_after": new_balance,
+        "description": description or "Initial deposit on conversion",
+        "category": "deposit",
+        "idempotency_key": idempotency_key,
+        "reversal_of": None,
+        "created_by": principal["id"],
+        "created_by_name": principal["name"],
+        "created_at": now_iso(),
+    }
+    try:
+        await db.ledger.insert_one(dict(entry))
+    except Exception:
+        dupe = await db.ledger.find_one({"idempotency_key": idempotency_key}, {"_id": 0})
+        if dupe:
+            return {"deposit_posted": True, "entry": dupe, "idempotent": True}
+        raise
+    await db.clients.update_one({"id": client_id}, {"$set": {"balance": new_balance}})
+    if not client.get("ftd_at"):
+        await db.clients.update_one({"id": client_id}, {"$set": {"ftd_at": entry["created_at"]}})
+    await audit(principal, "ledger_post", "client", client_id,
+                {"type": "credit", "amount": amt, "source": "conversion_deposit"})
+    return {"deposit_posted": True, "entry": entry, "idempotent": False}
+
+
 @router.post("/clients/convert")
 async def convert_lead(body: ConvertIn, principal: dict = Depends(require("clients:convert"))):
+    if body.deposit_amount is not None:
+        try:
+            dep_amt = float(body.deposit_amount)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="deposit_amount must be a number")
+        if dep_amt < 0:
+            raise HTTPException(status_code=400, detail="deposit_amount must be positive")
     lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     if lead.get("is_client"):
         raise HTTPException(status_code=400, detail="Lead is already a client")
     client = await _create_client_from_lead(lead, principal, body.affiliate_id)
-    return {"client": client}
+    deposit = await _post_conversion_deposit(
+        client["id"],
+        body.deposit_amount,
+        principal,
+        idempotency_key=f"convert-deposit:{client['id']}:manual-convert",
+    )
+    # Refresh client balance/ftd after optional deposit
+    if deposit.get("deposit_posted"):
+        updated = await db.clients.find_one({"id": client["id"]}, {"_id": 0})
+        if updated:
+            client = updated
+    return {
+        "client": client,
+        "deposit_posted": deposit.get("deposit_posted", False),
+        "ledger_entry_id": (deposit.get("entry") or {}).get("id") if deposit.get("entry") else None,
+    }
 
 
 @router.get("/clients/{cid}")

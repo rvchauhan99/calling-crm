@@ -62,6 +62,7 @@ const mockWorkbench = {
       follow_up_at: "2026-09-01T10:00:00.000Z",
       queue_reason: "overdue",
       days_overdue: 3,
+      last_notes: "Missed two callbacks",
     }],
     due_today: [{
       id: "lead-today",
@@ -73,6 +74,7 @@ const mockWorkbench = {
       follow_up_at: "2026-09-04T15:00:00.000Z",
       queue_reason: "due_today",
       hours_until: 3,
+      last_notes: null,
     }],
     assigned_today: [{
       id: "lead-assigned",
@@ -199,6 +201,25 @@ describe("TodayCalls workbench", () => {
     expect(screen.getByTestId("today-card-lead-called-b")).toBeInTheDocument()
     expect(screen.queryByTestId("today-card-lead-overdue")).not.toBeInTheDocument()
     expect(screen.queryByTestId("section-overdue")).not.toBeInTheDocument()
+  })
+
+  it("shows last remarks on cards and in Log Call dialog", async () => {
+    const user = userEvent.setup()
+    render(<TodayCalls />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("today-last-remarks-lead-overdue")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("today-last-remarks-lead-overdue")).toHaveTextContent(
+      "Missed two callbacks",
+    )
+    expect(screen.getByTestId("today-last-remarks-lead-today")).toHaveTextContent("—")
+
+    await user.click(screen.getByTestId("log-call-btn-lead-overdue"))
+    const dialog = await screen.findByTestId("log-call-dialog")
+    expect(within(dialog).getByTestId("log-call-last-remarks")).toHaveTextContent(
+      "Missed two callbacks",
+    )
   })
 
   it("shows Remarks and posts /calls/log", async () => {

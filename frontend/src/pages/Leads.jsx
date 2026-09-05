@@ -3,15 +3,18 @@ import { useSearchParams } from "react-router-dom"
 import api, { API, getToken, formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination"
 import { AutoAssignDialog } from "@/components/leads/AutoAssignDialog"
 import { PhoneField } from "@/components/leads/PhoneField"
 import { EmailField } from "@/components/leads/EmailField"
 import { SourceSelect } from "@/components/leads/SourceSelect"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
+import { LastRemarks } from "@/components/leads/LastRemarks"
 import { validateLeadForm } from "@/lib/leadValidation"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
+import { usePageParams } from "@/hooks/usePageParams"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -61,7 +64,7 @@ export default function Leads() {
   const sort = params.get("sort") || "created_at_desc"
   const tabParam = params.get("tab")
   const tab = isOwnScope ? "assigned" : (tabParam || "unassigned")
-  const page = Number(params.get("page") || 1)
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
   const setParam = useCallback((k, v) => {
     const p = new URLSearchParams(params)
@@ -87,6 +90,7 @@ export default function Leads() {
   const clearAllFilters = () => {
     const p = new URLSearchParams()
     if (!isOwnScope && tabParam) p.set("tab", tabParam)
+    if (pageSize !== DEFAULT_PAGE_SIZE) p.set("page_size", String(pageSize))
     p.set("page", "1")
     setParams(p)
     setSearchLocal("")
@@ -121,12 +125,12 @@ export default function Leads() {
       p.set("assignment_status", tab === "assigned" ? "assigned" : "unassigned")
     }
     p.set("page", page)
-    p.set("page_size", 25)
+    p.set("page_size", pageSize)
     const { data: listData } = await api.get(`/leads?${p.toString()}`)
     setData(listData)
     setSelected([])
     loadCounts()
-  }, [search, status, stage, source, disposition, assignedTo, sort, tab, page, loadCounts, isOwnScope])
+  }, [search, status, stage, source, disposition, assignedTo, sort, tab, page, pageSize, loadCounts, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -256,8 +260,6 @@ export default function Leads() {
   const openDetail = (id) => setLead360Id(id)
 
   const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
-  const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
-
   const tabLabel = isOwnScope ? "my" : tab === "assigned" ? "assigned" : "unassigned"
   const subtitle = data
     ? `${data.total} ${tabLabel} lead${data.total === 1 ? "" : "s"}`
@@ -434,6 +436,7 @@ export default function Leads() {
                   <TableHead>Phone</TableHead>
                   <TableHead>Source</TableHead>
                   <TableHead>Disposition</TableHead>
+                  <TableHead>Last Remarks</TableHead>
                   <TableHead>Stage</TableHead>
                   <TableHead>Assigned</TableHead>
                   <TableHead>Status</TableHead>
@@ -463,6 +466,9 @@ export default function Leads() {
                         ? <StatusPill color={l.carry_forward ? "sky" : "amber"}>{l.disposition_name}</StatusPill>
                         : <span className="text-slate-300">—</span>}
                     </TableCell>
+                    <TableCell onClick={() => openDetail(l.id)}>
+                      <LastRemarks notes={l.last_notes} testId={`lead-last-remarks-${l.id}`} />
+                    </TableCell>
                     <TableCell onClick={() => openDetail(l.id)} className="text-slate-600">{l.pipeline_stage}</TableCell>
                     <TableCell onClick={() => openDetail(l.id)} className="text-slate-500">{l.assigned_name || "—"}</TableCell>
                     <TableCell onClick={() => openDetail(l.id)}>
@@ -475,14 +481,14 @@ export default function Leads() {
           )}
       </div>
 
-      {data && totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setParam("page", String(page - 1))} data-testid="prev-page">Prev</Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setParam("page", String(page + 1))} data-testid="next-page">Next</Button>
-          </div>
-        </div>
+      {data && (
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
       )}
 
       <AutoAssignDialog

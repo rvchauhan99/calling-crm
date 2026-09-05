@@ -101,8 +101,14 @@ class AssignIn(BaseModel):
     agent_id: str
 
 
+class AutoAssignAllocationIn(BaseModel):
+    agent_id: str
+    count: int
+
+
 class AutoAssignIn(BaseModel):
     max_leads: Optional[int] = None
+    allocations: Optional[List[AutoAssignAllocationIn]] = None
 
 
 CSV_TEMPLATE_ROWS = [
@@ -178,8 +184,27 @@ def _apply_lead_filters(q: dict, *, search: Optional[str] = None, status: Option
     return q
 
 
-async def _auto_assign_plan(max_leads: Optional[int], dry_run: bool = False) -> dict:
-    """Compute or execute quota-based auto-assign from the unassigned pool."""
+async def _agent_assigned_today_map(agents: list, today: str) -> dict:
+    result = {}
+    for agent in agents:
+        result[agent["id"]] = await db.leads.count_documents(
+            {"assigned_to": agent["id"], "assigned_date": today})
+    return result
+
+
+async def _auto_assign_plan(
+    max_leads: Optional[int],
+    dry_run: bool = False,
+    allocations: Optional[List[AutoAssignAllocationIn]] = None,
+) -> dict:
+    """Compute or execute equal (round-robin) auto-assign from the unassigned pool.
+
+    When `allocations` is provided, assign exactly those per-agent counts (validated
+    against remaining daily slots and pool size). Otherwise distribute `max_leads`
+    (or the full pool) equally among callers with remaining quota.
+    """
+    from auto_assign import plan_equal_assignments, build_by_agent_from_allocations
+
     agents = await db.users.find({"companyId": COMPANY_ID, "user_type": "caller", "active": True},
                                  {"_id": 0}).to_list(100)
     if not agents:
@@ -189,40 +214,60 @@ async def _auto_assign_plan(max_leads: Optional[int], dry_run: bool = False) -> 
         {"companyId": COMPANY_ID, "status": "active", "is_client": False, "assigned_to": None},
         {"_id": 0}).to_list(5000)
     pool_size = len(pool)
-    cap = min(max(0, max_leads), pool_size) if max_leads is not None else pool_size
-    by_agent = []
+    assigned_today_map = await _agent_assigned_today_map(agents, today)
+    agents_by_id = {a["id"]: a for a in agents}
+
+    if allocations is not None:
+        allocation_counts: dict = {}
+        for item in allocations:
+            if item.count < 0:
+                raise HTTPException(status_code=400, detail="Allocation count cannot be negative")
+            if item.agent_id not in agents_by_id:
+                raise HTTPException(status_code=400, detail=f"Unknown or inactive agent: {item.agent_id}")
+            allocation_counts[item.agent_id] = allocation_counts.get(item.agent_id, 0) + int(item.count)
+
+        by_agent = build_by_agent_from_allocations(agents, assigned_today_map, allocation_counts)
+        for row in by_agent:
+            if row["assigned"] > row["slots_available"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Allocation for {row['agent_name']} ({row['assigned']}) exceeds slots ({row['slots_available']})",
+                )
+        total_requested = sum(int(r["assigned"]) for r in by_agent)
+        if total_requested > pool_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Allocations sum ({total_requested}) exceeds unassigned pool ({pool_size})",
+            )
+        requested = max_leads if max_leads is not None else total_requested
+    else:
+        cap = min(max(0, max_leads), pool_size) if max_leads is not None else pool_size
+        by_agent = plan_equal_assignments(agents, assigned_today_map, cap)
+        total_requested = sum(int(r["assigned"]) for r in by_agent)
+        requested = max_leads
+
+    # Execute assignments in by_agent order (deterministic name/id sort)
     total_assigned = 0
     idx = 0
-    for agent in agents:
-        quota = agent.get("daily_quota", 0) or 0
-        assigned_today = await db.leads.count_documents(
-            {"assigned_to": agent["id"], "assigned_date": today})
-        slots = max(0, quota - assigned_today)
-        will_assign = 0
-        for _ in range(slots):
-            if idx >= len(pool) or total_assigned >= cap:
+    for row in by_agent:
+        need = int(row["assigned"])
+        got = 0
+        for _ in range(need):
+            if idx >= len(pool):
                 break
             lead = pool[idx]
             idx += 1
-            will_assign += 1
+            got += 1
             total_assigned += 1
             if not dry_run:
                 await db.leads.update_one({"id": lead["id"]}, {"$set": {
-                    "assigned_to": agent["id"], "assigned_name": agent["name"],
-                    "owner_id": agent["id"], "assigned_date": today}})
-        by_agent.append({
-            "agent_id": agent["id"],
-            "agent_name": agent["name"],
-            "assigned": will_assign,
-            "quota": quota,
-            "assigned_today_before": assigned_today,
-            "slots_available": slots,
-        })
-        if total_assigned >= cap:
-            break
+                    "assigned_to": row["agent_id"], "assigned_name": row["agent_name"],
+                    "owner_id": row["agent_id"], "assigned_date": today}})
+        row["assigned"] = got
+
     return {
         "assigned": total_assigned,
-        "requested": max_leads,
+        "requested": requested,
         "available_in_pool": pool_size,
         "by_agent": [a for a in by_agent if a["slots_available"] > 0 or a["assigned"] > 0],
     }
@@ -278,6 +323,7 @@ async def create_lead(body: LeadIn, principal: dict = Depends(require("leads:cre
            "pipeline_stage": "New", "custom_fields": body.custom_fields,
            "follow_up_at": None, "is_client": False, "client_id": None,
            "assigned_date": assigned_date,
+           "last_notes": None, "last_notes_at": None,
            "created_at": now_iso(), "updated_at": now_iso()}
     await db.leads.insert_one(dict(doc))
     await audit(principal, "create", "lead", lid, {"name": parsed["name"]})
@@ -403,7 +449,8 @@ async def assign_leads(body: AssignIn, principal: dict = Depends(require("leads:
 async def auto_assign(body: AutoAssignIn = AutoAssignIn(),
                       principal: dict = Depends(require("leads:assign"))):
     """Distribute unassigned/pooled leads to active callers up to their daily quota."""
-    result = await _auto_assign_plan(body.max_leads, dry_run=False)
+    result = await _auto_assign_plan(
+        body.max_leads, dry_run=False, allocations=body.allocations)
     await audit(principal, "auto-assign", "lead", None, {"count": result["assigned"]})
     return result
 
@@ -439,6 +486,7 @@ async def import_leads(file: UploadFile = File(...), principal: dict = Depends(r
                "disposition_name": None, "carry_forward": True, "pipeline_stage": "New",
                "custom_fields": {}, "follow_up_at": None, "is_client": False,
                "client_id": None, "assigned_date": None,
+               "last_notes": None, "last_notes_at": None,
                "created_at": now_iso(), "updated_at": now_iso()}
         await db.leads.insert_one(dict(doc))
         created += 1
@@ -455,6 +503,7 @@ class LogCallIn(BaseModel):
     duration: int = 0
     follow_up_at: Optional[str] = None
     pipeline_stage: Optional[str] = None
+    deposit_amount: Optional[float] = None
 
 
 @router.get("/today-calls")
@@ -652,23 +701,33 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     should_convert = bool(disp.get("converts_to_client")) or disp.get("name") == "Converted"
     if disp.get("name") == "Call Back" and not next_fu and not should_convert:
         raise HTTPException(status_code=400, detail="Follow-up required for Call Back")
+    if body.deposit_amount is not None:
+        try:
+            dep_amt = float(body.deposit_amount)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="deposit_amount must be a number")
+        if dep_amt < 0:
+            raise HTTPException(status_code=400, detail="deposit_amount must be positive")
 
     # ACW is non-blocking: track pending separately; never 409 other leads
     fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0, "acw_pending_lead_id": 1})
     pending = fresh.get("acw_pending_lead_id") if fresh else None
 
+    notes = (body.notes or "").strip()
+    call_at = now_iso()
     cid = new_id()
     call = {"id": cid, "companyId": COMPANY_ID, "lead_id": body.lead_id,
             "lead_name": lead["name"], "lead_phone": lead["phone"],
             "agent_id": principal["id"], "agent_name": principal["name"],
             "disposition_id": disp["id"], "disposition_name": disp["name"],
-            "outcome": body.outcome, "notes": body.notes, "duration": body.duration,
-            "follow_up_at": next_fu, "created_at": now_iso()}
+            "outcome": body.outcome, "notes": notes, "duration": body.duration,
+            "follow_up_at": next_fu, "created_at": call_at}
     await db.calls.insert_one(dict(call))
 
     carry = disp["type"] == "carry_forward"
     lead_upd = {"disposition_id": disp["id"], "disposition_name": disp["name"],
                 "carry_forward": carry, "follow_up_at": next_fu,
+                "last_notes": notes, "last_notes_at": call_at,
                 "updated_at": now_iso()}
     mapped_stage = _mapped_stage_for_disposition(disp)
     if mapped_stage:
@@ -691,19 +750,39 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     # Auto-convert when disposition converts_to_client (or legacy name Converted)
     converted = False
     client_id = lead.get("client_id")
+    deposit_posted = False
+    ledger_entry_id = None
     if should_convert:
         fresh_lead = await db.leads.find_one({"id": body.lead_id, "companyId": COMPANY_ID}, {"_id": 0})
         if fresh_lead and not fresh_lead.get("is_client"):
-            from routes_clients import _create_client_from_lead
+            from routes_clients import _create_client_from_lead, _post_conversion_deposit
             client = await _create_client_from_lead(fresh_lead, principal)
             converted = True
             client_id = client["id"]
+            dep = await _post_conversion_deposit(
+                client_id,
+                body.deposit_amount,
+                principal,
+                idempotency_key=f"convert-deposit:{client_id}:{cid}",
+            )
+            deposit_posted = bool(dep.get("deposit_posted"))
+            ledger_entry_id = (dep.get("entry") or {}).get("id") if dep.get("entry") else None
         elif fresh_lead and fresh_lead.get("is_client"):
             client_id = fresh_lead.get("client_id")
             converted = False
             await db.leads.update_one(
                 {"id": body.lead_id}, {"$set": {"follow_up_at": None, "updated_at": now_iso()}},
             )
+            if client_id and body.deposit_amount:
+                from routes_clients import _post_conversion_deposit
+                dep = await _post_conversion_deposit(
+                    client_id,
+                    body.deposit_amount,
+                    principal,
+                    idempotency_key=f"convert-deposit:{client_id}:{cid}",
+                )
+                deposit_posted = bool(dep.get("deposit_posted"))
+                ledger_entry_id = (dep.get("entry") or {}).get("id") if dep.get("entry") else None
 
     # ACW pending is a reminder only: set on ACW disposition; clear only for same lead or complete-acw
     if disp.get("requires_acw"):
@@ -719,6 +798,8 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         "acw": bool(disp.get("requires_acw")),
         "converted": converted,
         "client_id": client_id,
+        "deposit_posted": deposit_posted,
+        "ledger_entry_id": ledger_entry_id,
     }
 
 

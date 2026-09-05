@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import api, { API, getToken, formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
 import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money, StatCard } from "@/components/common";
+import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -24,13 +25,14 @@ export default function Ledger() {
   const [data, setData] = useState(null);
   const [clients, setClients] = useState([]);
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   const [show, setShow] = useState(false);
   const [form, setForm] = useState({ client_id: "", type: "credit", amount: "", category: "deposit", description: "" });
 
   const load = useCallback(async () => {
-    const { data } = await api.get(`/ledger?page=${page}&page_size=40`);
+    const { data } = await api.get(`/ledger?page=${page}&page_size=${pageSize}`);
     setData(data);
-  }, [page]);
+  }, [page, pageSize]);
   useEffect(() => { load().catch(() => {}); }, [load]);
   const loadClients = useCallback(async () => {
     if (!can("ledger:post")) return
@@ -44,6 +46,11 @@ export default function Ledger() {
   const handleOpenPost = () => {
     setShow(true)
     loadClients().catch(() => {})
+  }
+
+  const handlePageSizeChange = (size) => {
+    setPageSize(size)
+    setPage(1)
   }
 
   const post = async () => {
@@ -72,8 +79,6 @@ export default function Ledger() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a"); a.href = url; a.download = "ledger.csv"; a.click();
   };
-
-  const totalPages = data ? Math.ceil(data.total / data.page_size) : 1;
 
   return (
     <div data-testid="ledger-page">
@@ -128,14 +133,14 @@ export default function Ledger() {
           )}
       </div>
 
-      {data && totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} data-testid="prev-page">Prev</Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} data-testid="next-page">Next</Button>
-          </div>
-        </div>
+      {data && (
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total}
+          onPageChange={setPage}
+          onPageSizeChange={handlePageSizeChange}
+        />
       )}
 
       <Dialog open={show} onOpenChange={setShow}>

@@ -8,6 +8,7 @@ import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { PipelineLogCallDialog, PIPELINE_STAGES } from "@/components/pipeline/PipelineLogCallDialog"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
+import { LastRemarks } from "@/components/leads/LastRemarks"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { SearchableSelect } from "@/components/ui/searchable-select"
@@ -149,9 +150,13 @@ export default function Pipeline() {
         duration: payload.duration || 0,
         follow_up_at: terminal ? null : (payload.follow_up_at || null),
         pipeline_stage: stage,
+        ...(payload.deposit_amount != null ? { deposit_amount: payload.deposit_amount } : {}),
       })
-      if (res.converted) toast.success("Lead converted to client")
-      else toast.success(moveTarget ? `Moved to ${stage}` : "Call logged")
+      if (res.converted) {
+        toast.success(res.deposit_posted
+          ? "Lead converted to client · Deposit posted"
+          : "Lead converted to client")
+      } else toast.success(moveTarget ? `Moved to ${stage}` : "Call logged")
       setMoveTarget(null)
       setLogLead(null)
       load()
@@ -322,6 +327,12 @@ export default function Pipeline() {
                           </StatusPill>
                         )}
                       </div>
+                      <LastRemarks
+                        notes={l.last_notes}
+                        compact
+                        className="mt-1.5 text-xs"
+                        testId={`pipeline-card-last-remarks-${l.id}`}
+                      />
                       {canLog && (
                         <Button
                           size="sm"
@@ -363,6 +374,7 @@ export default function Pipeline() {
                   <TableHead>Phone</TableHead>
                   <TableHead>Stage</TableHead>
                   <TableHead>Disposition</TableHead>
+                  <TableHead>Last Remarks</TableHead>
                   <TableHead>Assigned</TableHead>
                   <TableHead>Follow-up</TableHead>
                   <TableHead className="w-28" />
@@ -402,6 +414,9 @@ export default function Pipeline() {
                       )}
                     </TableCell>
                     <TableCell>{l.disposition_name || "—"}</TableCell>
+                    <TableCell>
+                      <LastRemarks notes={l.last_notes} testId={`pipeline-last-remarks-${l.id}`} />
+                    </TableCell>
                     <TableCell className="text-slate-500">{l.assigned_name || "—"}</TableCell>
                     <TableCell className="text-xs text-slate-500">
                       {l.follow_up_at ? new Date(l.follow_up_at).toLocaleString("en-IN") : "—"}

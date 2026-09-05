@@ -57,6 +57,7 @@ const mockFollowups = [
     disposition_name: "Call Back",
     follow_up_at: dayOffsetIso(6, 10),
     pipeline_stage: "New",
+    last_notes: "Will call next week",
   },
   {
     id: "fu-overdue",
@@ -65,6 +66,7 @@ const mockFollowups = [
     disposition_name: "Interested",
     follow_up_at: dayOffsetIso(-3, 10),
     pipeline_stage: "Contacted",
+    last_notes: "Asked for pricing",
   },
   {
     id: "fu-today",
@@ -73,6 +75,7 @@ const mockFollowups = [
     disposition_name: "Call Back",
     follow_up_at: dayOffsetIso(0, 15),
     pipeline_stage: "Qualified",
+    last_notes: null,
   },
 ]
 
@@ -162,6 +165,25 @@ describe("Followups page", () => {
     expect(screen.getByTestId("followup-row-fu-overdue")).toBeInTheDocument()
     expect(screen.queryByTestId("followup-row-fu-today")).not.toBeInTheDocument()
     expect(screen.queryByTestId("followup-row-fu-upcoming")).not.toBeInTheDocument()
+  })
+
+  it("shows last remarks in table and Log Call dialog", async () => {
+    const user = userEvent.setup()
+    render(<Followups />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("followup-last-remarks-fu-overdue")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("followup-last-remarks-fu-overdue")).toHaveTextContent(
+      "Asked for pricing",
+    )
+    expect(screen.getByTestId("followup-last-remarks-fu-today")).toHaveTextContent("—")
+
+    await user.click(screen.getByTestId("log-call-btn-fu-overdue"))
+    const dialog = await screen.findByTestId("log-call-dialog")
+    expect(within(dialog).getByTestId("log-call-last-remarks")).toHaveTextContent(
+      "Asked for pricing",
+    )
   })
 
   it("opens Log Call dialog with Remarks and posts /calls/log", async () => {

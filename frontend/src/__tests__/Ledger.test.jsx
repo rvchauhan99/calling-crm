@@ -40,7 +40,7 @@ describe("Ledger client picker", () => {
             entries: [],
             total: 0,
             page: 1,
-            page_size: 40,
+            page_size: 25,
             totals: { credit: 0, debit: 0 },
           },
         })

@@ -35,7 +35,7 @@ describe("CallHistory filters", () => {
     api.get.mockImplementation((url) => {
       if (url.startsWith("/call-history?")) {
         return Promise.resolve({
-          data: { calls: [], total: 0, page: 1, page_size: 30 },
+          data: { calls: [], total: 0, page: 1, page_size: 25 },
         })
       }
       if (url === "/dispositions") {
@@ -77,7 +77,7 @@ describe("CallHistory filters", () => {
             }],
             total: 1,
             page: 1,
-            page_size: 30,
+            page_size: 25,
           },
         })
       }

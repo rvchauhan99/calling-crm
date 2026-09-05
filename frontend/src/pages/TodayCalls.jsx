@@ -3,6 +3,7 @@ import api, { formatApiError } from "@/lib/api"
 import { EmptyState, PageLoader, StatusPill } from "@/components/common"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
+import { LastRemarks } from "@/components/leads/LastRemarks"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
@@ -23,6 +24,7 @@ import {
   isCallBackDisposition,
   isConvertDisposition,
   isTerminalStage,
+  parseDepositAmount,
 } from "@/lib/followupBuckets"
 import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
 const SORTS = [
@@ -50,7 +52,7 @@ export default function TodayCalls() {
   const [active, setActive] = useState(null)
   const [lead360Id, setLead360Id] = useState(null)
   const [form, setForm] = useState({
-    disposition_id: "", notes: "", follow_up_at: "", pipeline_stage: "", duration: 0,
+    disposition_id: "", notes: "", follow_up_at: "", pipeline_stage: "", duration: 0, deposit_amount: "",
   })
   const [bucketFilter, setBucketFilter] = useState("all")
   const [search, setSearch] = useState("")
@@ -77,6 +79,7 @@ export default function TodayCalls() {
       follow_up_at: "",
       pipeline_stage: lead.pipeline_stage || "New",
       duration: 0,
+      deposit_amount: "",
     })
   }
 
@@ -90,17 +93,24 @@ export default function TodayCalls() {
     try {
       const converts = isConvertDisposition(disp)
       const terminal = isTerminalStage(form.pipeline_stage) || converts
+      const deposit = converts ? parseDepositAmount(form.deposit_amount) : null
       const payload = {
         lead_id: active.id,
-        ...form,
+        disposition_id: form.disposition_id,
+        notes: form.notes,
         duration: Number(form.duration) || 0,
+        pipeline_stage: form.pipeline_stage,
         follow_up_at: terminal || !form.follow_up_at
           ? null
           : new Date(form.follow_up_at).toISOString(),
       }
+      if (deposit != null) payload.deposit_amount = deposit
       const { data: res } = await api.post("/calls/log", payload)
-      if (res.converted) toast.success("Lead converted to client")
-      else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
+      if (res.converted) {
+        toast.success(res.deposit_posted
+          ? "Lead converted to client · Deposit posted"
+          : "Lead converted to client")
+      } else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
       setActive(null)
       load()
     } catch (e) {
@@ -482,6 +492,13 @@ export default function TodayCalls() {
                                   <StatusPill color="slate">Fresh</StatusPill>
                                 )}
                               </div>
+                              <LastRemarks
+                                notes={l.last_notes}
+                                compact
+                                showLabel
+                                className="mt-1.5"
+                                testId={`today-last-remarks-${l.id}`}
+                              />
                             </div>
                             <div className="flex shrink-0 flex-col gap-1">
                               <Button
@@ -622,6 +639,32 @@ export default function TodayCalls() {
                 </div>
               )
             })()}
+            {isConvertDisposition(dispositions.find((d) => d.id === form.disposition_id)) && (
+              <div data-testid="convert-deposit-section">
+                <Label htmlFor="today-deposit">Deposit amount (₹)</Label>
+                <Input
+                  id="today-deposit"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  value={form.deposit_amount}
+                  className="mt-1 focus-visible:ring-sky-500"
+                  placeholder="Optional"
+                  onChange={(e) => setForm({ ...form, deposit_amount: e.target.value })}
+                  data-testid="convert-deposit-amount"
+                  aria-label="Deposit amount"
+                />
+                <p className="mt-1 text-xs text-slate-500">Optional — posts to Finance Ledger</p>
+              </div>
+            )}
+            <div>
+              <LastRemarks
+                notes={active?.last_notes}
+                showLabel
+                className="rounded-md border border-slate-100 bg-slate-50 p-2.5"
+                testId="log-call-last-remarks"
+              />
+            </div>
             <div>
               <Label htmlFor="today-calls-remarks">Remarks</Label>
               <Textarea

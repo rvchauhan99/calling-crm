@@ -281,6 +281,156 @@ class TestLeads:
         body = r.json()
         assert "assigned" in body and "by_agent" in body and "available_in_pool" in body
 
+    def test_auto_assign_equal_split_after_quota_bump(self, admin):
+        """After raising quotas, a small batch must split across callers — not fill the first agent."""
+        roles = admin.get(f"{BASE_URL}/api/roles", timeout=30).json()["roles"]
+        agent_role = [r for r in roles if r["name"] == "Agent"][0]["id"]
+        users = admin.get(f"{BASE_URL}/api/users?user_type=caller", timeout=30).json()["users"]
+        active_callers = [u for u in users if u.get("active") and u.get("user_type") == "caller"]
+        saved = [(u["id"], u.get("daily_quota", 0), u["name"], u["email"], u["role_id"],
+                  u.get("user_type", "caller"), u.get("team_id"), u.get("active", True))
+                 for u in active_callers]
+        created_users = []
+        try:
+            for u in active_callers:
+                admin.put(f"{BASE_URL}/api/users/{u['id']}", json={
+                    "name": u["name"], "email": u["email"], "role_id": u["role_id"],
+                    "user_type": u.get("user_type", "caller"), "team_id": u.get("team_id"),
+                    "daily_quota": 0, "active": True}, timeout=30)
+            callers = []
+            for i, name in enumerate(["TEST_AA_Amy", "TEST_AA_Bob", "TEST_AA_Cara"]):
+                email = f"test_aa_{i}_{uuid.uuid4().hex[:6]}@example.com"
+                cr = admin.post(f"{BASE_URL}/api/users", json={
+                    "name": name, "email": email, "password": TEST_PASSWORD,
+                    "role_id": agent_role, "user_type": "caller", "daily_quota": 500}, timeout=30)
+                assert cr.status_code == 200, cr.text
+                callers.append(cr.json()["user"])
+                created_users.append(cr.json()["user"]["id"])
+            tag = f"TEST_AAEq_{uuid.uuid4().hex[:6]}"
+            phones = [f"91{uuid.uuid4().int.__str__()[:8]}" for _ in range(5)]
+            csv_rows = "".join(f"{tag}_{i},{p},,Mumbai,Import\n" for i, p in enumerate(phones))
+            token = admin.headers["Authorization"]
+            imp = requests.post(f"{BASE_URL}/api/leads/import",
+                                files={"file": ("eq.csv", f"name,phone,email,city,source\n{csv_rows}", "text/csv")},
+                                headers={"Authorization": token}, timeout=60)
+            assert imp.status_code == 200, imp.text
+            leads = admin.get(
+                f"{BASE_URL}/api/leads?search={tag}&assignment_status=unassigned&page_size=20",
+                timeout=30).json()["leads"]
+            assert len(leads) >= 5
+            for lid in [l["id"] for l in leads]:
+                TestLeads.created.append(lid)
+            preview = admin.get(f"{BASE_URL}/api/leads/auto-assign/preview?max_leads=5", timeout=30)
+            assert preview.status_code == 200, preview.text
+            prev = preview.json()
+            with_slots = [a for a in prev["by_agent"] if a["slots_available"] > 0]
+            assert len(with_slots) == 3, prev["by_agent"]
+            assert prev["assigned"] == 5
+            receivers = [a for a in prev["by_agent"] if a["assigned"] > 0]
+            assert len(receivers) == 3, f"expected equal split across 3 agents, got {prev['by_agent']}"
+            counts = sorted(a["assigned"] for a in receivers)
+            assert counts == [1, 2, 2]
+            assert max(a["assigned"] for a in receivers) < 5
+            r = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={"max_leads": 5}, timeout=120)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["assigned"] == 5
+            post_receivers = [a for a in body["by_agent"] if a["assigned"] > 0]
+            assert len(post_receivers) == 3
+            assert sorted(a["assigned"] for a in post_receivers) == [1, 2, 2]
+        finally:
+            for uid, quota, name, email, role_id, user_type, team_id, active in saved:
+                admin.put(f"{BASE_URL}/api/users/{uid}", json={
+                    "name": name, "email": email, "role_id": role_id,
+                    "user_type": user_type, "team_id": team_id,
+                    "daily_quota": quota, "active": active}, timeout=30)
+            for uid in created_users:
+                admin.delete(f"{BASE_URL}/api/users/{uid}", timeout=30)
+
+    def test_auto_assign_custom_allocations_and_validation(self, admin):
+        roles = admin.get(f"{BASE_URL}/api/roles", timeout=30).json()["roles"]
+        agent_role = [r for r in roles if r["name"] == "Agent"][0]["id"]
+        users = admin.get(f"{BASE_URL}/api/users?user_type=caller", timeout=30).json()["users"]
+        active_callers = [u for u in users if u.get("active") and u.get("user_type") == "caller"]
+        saved = [(u["id"], u.get("daily_quota", 0), u["name"], u["email"], u["role_id"],
+                  u.get("user_type", "caller"), u.get("team_id"), u.get("active", True))
+                 for u in active_callers]
+        created_users = []
+        try:
+            for u in active_callers:
+                admin.put(f"{BASE_URL}/api/users/{u['id']}", json={
+                    "name": u["name"], "email": u["email"], "role_id": u["role_id"],
+                    "user_type": u.get("user_type", "caller"), "team_id": u.get("team_id"),
+                    "daily_quota": 0, "active": True}, timeout=30)
+            a = admin.post(f"{BASE_URL}/api/users", json={
+                "name": "TEST_AA_AllocA", "email": f"test_alloc_a_{uuid.uuid4().hex[:6]}@example.com",
+                "password": TEST_PASSWORD, "role_id": agent_role, "user_type": "caller",
+                "daily_quota": 10}, timeout=30).json()["user"]
+            b = admin.post(f"{BASE_URL}/api/users", json={
+                "name": "TEST_AA_AllocB", "email": f"test_alloc_b_{uuid.uuid4().hex[:6]}@example.com",
+                "password": TEST_PASSWORD, "role_id": agent_role, "user_type": "caller",
+                "daily_quota": 10}, timeout=30).json()["user"]
+            created_users.extend([a["id"], b["id"]])
+            # B is already at quota (simulate full agent) — fill with assigned leads
+            for i in range(10):
+                p = f"92{uuid.uuid4().int.__str__()[:8]}"
+                lead = admin.post(f"{BASE_URL}/api/leads",
+                                  json={"name": f"TEST_AA_Fill_{i}", "phone": p,
+                                        "assigned_to": b["id"]}, timeout=30).json()["lead"]
+                TestLeads.created.append(lead["id"])
+            tag = f"TEST_AAAl_{uuid.uuid4().hex[:6]}"
+            phones = [f"93{uuid.uuid4().int.__str__()[:8]}" for _ in range(4)]
+            csv_rows = "".join(f"{tag}_{i},{p},,Mumbai,Import\n" for i, p in enumerate(phones))
+            token = admin.headers["Authorization"]
+            requests.post(f"{BASE_URL}/api/leads/import",
+                          files={"file": ("al.csv", f"name,phone,email,city,source\n{csv_rows}", "text/csv")},
+                          headers={"Authorization": token}, timeout=60)
+            for lid in [l["id"] for l in admin.get(
+                    f"{BASE_URL}/api/leads?search={tag}&assignment_status=unassigned&page_size=20",
+                    timeout=30).json()["leads"]]:
+                TestLeads.created.append(lid)
+            # Over-slot rejected
+            bad = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={
+                "allocations": [{"agent_id": a["id"], "count": 11}]}, timeout=30)
+            assert bad.status_code == 400, bad.text
+            # Unknown agent rejected
+            unk = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={
+                "allocations": [{"agent_id": "nope-agent", "count": 1}]}, timeout=30)
+            assert unk.status_code == 400, unk.text
+            # Custom split: A gets 3 (B at quota cannot get any if we try over slots)
+            full_b = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={
+                "allocations": [{"agent_id": b["id"], "count": 1}]}, timeout=30)
+            assert full_b.status_code == 400, full_b.text
+            ok = admin.post(f"{BASE_URL}/api/leads/auto-assign", json={
+                "allocations": [
+                    {"agent_id": a["id"], "count": 3},
+                    {"agent_id": b["id"], "count": 0},
+                ]}, timeout=120)
+            assert ok.status_code == 200, ok.text
+            body = ok.json()
+            assert body["assigned"] == 3
+            by_a = {x["agent_id"]: x for x in body["by_agent"]}
+            assert by_a[a["id"]]["assigned"] == 3
+            # Equal preview skips full agent B
+            prev = admin.get(f"{BASE_URL}/api/leads/auto-assign/preview?max_leads=2", timeout=30).json()
+            ids = {x["agent_id"] for x in prev["by_agent"] if x["slots_available"] > 0}
+            assert a["id"] in ids
+            assert b["id"] not in ids
+        finally:
+            for uid, quota, name, email, role_id, user_type, team_id, active in saved:
+                admin.put(f"{BASE_URL}/api/users/{uid}", json={
+                    "name": name, "email": email, "role_id": role_id,
+                    "user_type": user_type, "team_id": team_id,
+                    "daily_quota": quota, "active": active}, timeout=30)
+            for uid in created_users:
+                admin.delete(f"{BASE_URL}/api/users/{uid}", timeout=30)
+
+    def test_auto_assign_rbac_deny(self, agent):
+        r = agent.post(f"{BASE_URL}/api/leads/auto-assign", json={"max_leads": 1}, timeout=30)
+        assert r.status_code == 403, r.text
+        p = agent.get(f"{BASE_URL}/api/leads/auto-assign/preview", timeout=30)
+        assert p.status_code == 403, p.text
+
     def test_assignment_status_filter(self, admin):
         unassigned = admin.get(f"{BASE_URL}/api/leads?assignment_status=unassigned&page_size=5", timeout=30)
         assert unassigned.status_code == 200
@@ -584,12 +734,13 @@ class TestTodayCallsACW:
         """Overdue / due_today / assigned_today (no FU) / upcoming; priority keeps one bucket."""
         from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc)
-        overdue_id = self._mk_assigned(admin, agent, "TEST_WB_OD_", "1")
-        due_id = self._mk_assigned(admin, agent, "TEST_WB_DT_", "2")
-        assigned_id = self._mk_assigned(admin, agent, "TEST_WB_AT_", "3")
-        upcoming_id = self._mk_assigned(admin, agent, "TEST_WB_UP_", "4")
+        # Prefix AAA_ so name-sorted assigned_today stays inside the 500-cap under load.
+        overdue_id = self._mk_assigned(admin, agent, "AAA_TEST_WB_OD_", "1")
+        due_id = self._mk_assigned(admin, agent, "AAA_TEST_WB_DT_", "2")
+        assigned_id = self._mk_assigned(admin, agent, "AAA_TEST_WB_AT_", "3")
+        upcoming_id = self._mk_assigned(admin, agent, "AAA_TEST_WB_UP_", "4")
         # assigned_today with overdue FU must land in overdue only (priority)
-        priority_id = self._mk_assigned(admin, agent, "TEST_WB_PR_", "5")
+        priority_id = self._mk_assigned(admin, agent, "AAA_TEST_WB_PR_", "5")
 
         assert agent.put(f"{BASE_URL}/api/followups/{overdue_id}",
                          json={"follow_up_at": (now - timedelta(days=2)).isoformat()},
@@ -597,8 +748,9 @@ class TestTodayCallsACW:
         assert agent.put(f"{BASE_URL}/api/followups/{due_id}",
                          json={"follow_up_at": now.isoformat()},
                          timeout=30).status_code == 200
+        # Tomorrow FU (still upcoming vs due_today); early so it survives sort + 500-cap
         assert agent.put(f"{BASE_URL}/api/followups/{upcoming_id}",
-                         json={"follow_up_at": (now + timedelta(days=3)).isoformat()},
+                         json={"follow_up_at": (now + timedelta(days=1)).isoformat()},
                          timeout=30).status_code == 200
         assert agent.put(f"{BASE_URL}/api/followups/{priority_id}",
                          json={"follow_up_at": (now - timedelta(days=1)).isoformat()},
@@ -606,11 +758,11 @@ class TestTodayCallsACW:
 
         body = agent.get(f"{BASE_URL}/api/today-calls", timeout=60).json()
         by_reason = {l["id"]: l["queue_reason"] for l in body["leads"]}
-        assert by_reason[overdue_id] == "overdue"
-        assert by_reason[due_id] == "due_today"
-        assert by_reason[assigned_id] == "assigned_today"
-        assert by_reason[upcoming_id] == "upcoming"
-        assert by_reason[priority_id] == "overdue"
+        assert by_reason.get(overdue_id) == "overdue", by_reason
+        assert by_reason.get(due_id) == "due_today", by_reason
+        assert by_reason.get(assigned_id) == "assigned_today", by_reason
+        assert by_reason.get(upcoming_id) == "upcoming", by_reason
+        assert by_reason.get(priority_id) == "overdue", by_reason
         # assigned_today lead has no FU and is not in other buckets
         assert assigned_id not in {l["id"] for l in body["buckets"]["overdue"]}
         assert assigned_id not in {l["id"] for l in body["buckets"]["due_today"]}
@@ -729,6 +881,89 @@ class TestTodayCallsACW:
         clients = admin.get(f"{BASE_URL}/api/clients?search=TEST_AutoConv", timeout=60).json()["clients"]
         assert len([c for c in clients if c.get("lead_id") == lead["id"]]) == 1
 
+    def test_convert_with_optional_deposit(self, admin, agent):
+        p = "85" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_DepConv", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        conv = [d for d in admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+                if d["name"] == "Converted"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "notes": "with deposit", "pipeline_stage": "Won",
+            "deposit_amount": 5000}, timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("converted") is True
+        assert body.get("deposit_posted") is True
+        assert body.get("ledger_entry_id")
+        cid = body["client_id"]
+        detail = admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()
+        assert detail["client"]["balance"] == 5000
+        assert detail["client"].get("ftd_at")
+        credits = [e for e in detail["ledger"] if e["type"] == "credit" and e["category"] == "deposit"]
+        assert len(credits) >= 1
+        assert credits[0]["amount"] == 5000
+        # Idempotent: same call id key on re-log with deposit for already-client
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        again = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "deposit_amount": 5000}, timeout=30)
+        assert again.status_code == 200
+        # New call id → new idempotency key → would double-post; use unique amounts carefully
+        # Second log with same amount creates ANOTHER deposit (different call id) — that's OK.
+        # Verify negative rejected
+        p2 = "84" + uuid.uuid4().int.__str__()[:8]
+        lead2 = admin.post(f"{BASE_URL}/api/leads",
+                           json={"name": "TEST_DepNeg", "phone": p2}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead2["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead2["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        bad = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead2["id"], "disposition_id": conv["id"],
+            "deposit_amount": -10}, timeout=30)
+        assert bad.status_code == 400
+
+    def test_convert_without_deposit(self, admin, agent):
+        p = "83" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_NoDep", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        conv = [d for d in admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+                if d["name"] == "Converted"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"]}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json().get("converted") is True
+        assert r.json().get("deposit_posted") is False
+        cid = r.json()["client_id"]
+        detail = admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()
+        assert detail["client"]["balance"] == 0
+        assert detail["client"].get("ftd_at") in (None, "")
+
+    def test_manual_convert_with_deposit(self, admin):
+        p = "82" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_ManDep", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        r = admin.post(f"{BASE_URL}/api/clients/convert",
+                       json={"lead_id": lead["id"], "deposit_amount": 2500}, timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("deposit_posted") is True
+        assert body["client"]["balance"] == 2500
+        # Idempotent manual convert key
+        r2 = admin.post(f"{BASE_URL}/api/clients/convert",
+                        json={"lead_id": lead["id"], "deposit_amount": 2500}, timeout=30)
+        assert r2.status_code == 400  # already a client
+
     def test_disposition_locks_pipeline_stage(self, admin, agent):
         p = "87" + uuid.uuid4().int.__str__()[:8]
         lead = admin.post(f"{BASE_URL}/api/leads",
@@ -802,6 +1037,64 @@ class TestTodayCallsACW:
         assert r.status_code == 200, r.text
         got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
         assert got.get("follow_up_at") in (None, "")
+
+    def test_log_call_sets_last_notes_on_lead(self, admin, agent):
+        """Happy path + overwrite: last_notes denormalized from call remarks."""
+        p = "83" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_LastNotes", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        assert lead.get("last_notes") is None
+        assert lead.get("last_notes_at") is None
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        cf = [d for d in disps if d["type"] == "carry_forward" and not d.get("requires_acw")][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+
+        r1 = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cf["id"],
+            "notes": "  First remarks  "}, timeout=30)
+        assert r1.status_code == 200, r1.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got["last_notes"] == "First remarks"
+        assert got.get("last_notes_at")
+        assert any(c["notes"] == "First remarks" for c in
+                   admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["calls"])
+
+        # List endpoints expose last_notes
+        listed = admin.get(f"{BASE_URL}/api/leads?search=TEST_LastNotes&page_size=50", timeout=60).json()
+        hit = next((l for l in listed["leads"] if l["id"] == lead["id"]), None)
+        assert hit is not None
+        assert hit["last_notes"] == "First remarks"
+
+        tc = agent.get(f"{BASE_URL}/api/today-calls", timeout=60).json()
+        tc_hit = next((l for l in tc["leads"] if l["id"] == lead["id"]), None)
+        if tc_hit is None:
+            for bucket in tc.get("buckets", {}).values():
+                tc_hit = next((l for l in bucket if l["id"] == lead["id"]), None)
+                if tc_hit:
+                    break
+        assert tc_hit is not None
+        assert tc_hit["last_notes"] == "First remarks"
+
+        # Overwrite with empty notes (latest call wins)
+        r2 = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cf["id"],
+            "notes": "   "}, timeout=30)
+        assert r2.status_code == 200, r2.text
+        got2 = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got2["last_notes"] == ""
+        assert got2.get("last_notes_at")
+        assert got2["last_notes_at"] >= got["last_notes_at"]
+
+        # Different notes overwrite again
+        r3 = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cf["id"],
+            "notes": "Second remarks"}, timeout=30)
+        assert r3.status_code == 200, r3.text
+        got3 = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got3["last_notes"] == "Second remarks"
 
     def test_call_back_requires_follow_up(self, admin, agent):
         p = "84" + uuid.uuid4().int.__str__()[:8]

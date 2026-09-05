@@ -289,9 +289,11 @@ async def fetch_sheet_csv(spreadsheet_id: str, gid: str = "0", *, client: Option
 
 
 async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
-    """Quota-walk assign only the given lead IDs (newly created). Returns assigned count."""
+    """Equal round-robin assign only the given lead IDs (newly created). Returns assigned count."""
     if not lead_ids:
         return 0
+    from auto_assign import plan_equal_assignments
+
     agents = await db.users.find(
         {"companyId": COMPANY_ID, "user_type": "caller", "active": True},
         {"_id": 0},
@@ -312,15 +314,20 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
     # Preserve insert order from lead_ids
     by_id = {l["id"]: l for l in pool}
     ordered = [by_id[lid] for lid in lead_ids if lid in by_id]
-    idx = 0
-    total = 0
+    if not ordered:
+        return 0
+
+    assigned_today_map = {}
     for agent in agents:
-        quota = agent.get("daily_quota", 0) or 0
-        assigned_today = await db.leads.count_documents(
+        assigned_today_map[agent["id"]] = await db.leads.count_documents(
             {"assigned_to": agent["id"], "assigned_date": today}
         )
-        slots = max(0, quota - assigned_today)
-        for _ in range(slots):
+    by_agent = plan_equal_assignments(agents, assigned_today_map, len(ordered))
+    idx = 0
+    total = 0
+    for row in by_agent:
+        need = int(row.get("assigned") or 0)
+        for _ in range(need):
             if idx >= len(ordered):
                 break
             lead = ordered[idx]
@@ -328,15 +335,13 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
             await db.leads.update_one(
                 {"id": lead["id"]},
                 {"$set": {
-                    "assigned_to": agent["id"],
-                    "assigned_name": agent["name"],
-                    "owner_id": agent["id"],
+                    "assigned_to": row["agent_id"],
+                    "assigned_name": row["agent_name"],
+                    "owner_id": row["agent_id"],
                     "assigned_date": today,
                 }},
             )
             total += 1
-        if idx >= len(ordered):
-            break
     return total
 
 
@@ -530,6 +535,8 @@ async def sync_source(
                     "is_client": False,
                     "client_id": None,
                     "assigned_date": None,
+                    "last_notes": None,
+                    "last_notes_at": None,
                     "external_id": external_id,
                     "sheet_source_id": source_id,
                     "sheet_source_name": source.get("name"),

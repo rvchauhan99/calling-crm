@@ -1,43 +1,47 @@
-import { useEffect, useState, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
-import api from "@/lib/api";
-import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { useEffect, useState, useCallback } from "react"
+import { useSearchParams } from "react-router-dom"
+import api from "@/lib/api"
+import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { TablePagination } from "@/components/TablePagination"
+import { usePageParams } from "@/hooks/usePageParams"
+import { Input } from "@/components/ui/input"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "@/components/ui/table";
-import { FileSearch, Search } from "lucide-react";
+} from "@/components/ui/table"
+import { FileSearch, Search } from "lucide-react"
 
 const ACTION_COLORS = {
   login: "sky", create: "blue", update: "sky", delete: "red", deactivate: "red",
   ledger_post: "blue", ledger_reverse: "amber", export: "slate", import: "sky",
   assign: "sky", convert: "blue", log_call: "sky",
-};
+}
 
 export default function Audit() {
-  const [params, setParams] = useSearchParams();
-  const [data, setData] = useState(null);
-  const search = params.get("search") || "";
-  const page = Number(params.get("page") || 1);
+  const [params, setParams] = useSearchParams()
+  const [data, setData] = useState(null)
+  const search = params.get("search") || ""
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
   const setParam = (k, v) => {
-    const p = new URLSearchParams(params);
-    if (v) p.set(k, v); else p.delete(k);
-    if (k !== "page") p.set("page", "1");
-    setParams(p);
-  };
+    const p = new URLSearchParams(params)
+    if (v) p.set(k, v); else p.delete(k)
+    if (k !== "page") p.set("page", "1")
+    setParams(p)
+  }
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams();
-    if (search) p.set("search", search);
-    p.set("page", page); p.set("page_size", 40);
-    try { const { data } = await api.get(`/audit?${p.toString()}`); setData(data); }
-    catch { setData({ logs: [], total: 0, page_size: 40 }); }
-  }, [search, page]);
-  useEffect(() => { load(); }, [load]);
-
-  const totalPages = data ? Math.ceil(data.total / data.page_size) : 1;
+    const p = new URLSearchParams()
+    if (search) p.set("search", search)
+    p.set("page", page)
+    p.set("page_size", pageSize)
+    try {
+      const { data: res } = await api.get(`/audit?${p.toString()}`)
+      setData(res)
+    } catch {
+      setData({ logs: [], total: 0, page_size: pageSize })
+    }
+  }, [search, page, pageSize])
+  useEffect(() => { load() }, [load])
 
   return (
     <div data-testid="audit-page">
@@ -75,15 +79,15 @@ export default function Audit() {
           )}
       </div>
 
-      {data && totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setParam("page", String(page - 1))} data-testid="prev-page">Prev</Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setParam("page", String(page + 1))} data-testid="next-page">Next</Button>
-          </div>
-        </div>
+      {data && (
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
       )}
     </div>
-  );
+  )
 }

@@ -177,6 +177,39 @@ async def ensure_indexes():
     await db.login_attempts.create_index("identifier")
 
 
+async def backfill_lead_last_notes():
+    """Copy latest call notes onto each lead (one-shot for existing rows)."""
+    pipeline = [
+        {"$match": {"companyId": COMPANY_ID}},
+        {"$sort": {"created_at": -1}},
+        {"$group": {
+            "_id": "$lead_id",
+            "notes": {"$first": "$notes"},
+            "created_at": {"$first": "$created_at"},
+        }},
+    ]
+    async for row in db.calls.aggregate(pipeline):
+        lid = row.get("_id")
+        if not lid:
+            continue
+        notes = row.get("notes")
+        if notes is None:
+            notes = ""
+        elif isinstance(notes, str):
+            notes = notes.strip()
+        else:
+            notes = str(notes)
+        await db.leads.update_one(
+            {"id": lid, "companyId": COMPANY_ID},
+            {"$set": {"last_notes": notes, "last_notes_at": row.get("created_at")}},
+        )
+    # Leads with no calls and missing fields get nulls
+    await db.leads.update_many(
+        {"companyId": COMPANY_ID, "last_notes": {"$exists": False}},
+        {"$set": {"last_notes": None, "last_notes_at": None}},
+    )
+
+
 async def migrate_disposition_pipeline_links():
     """Backfill default_pipeline_stage + converts_to_client on known dispositions."""
     for name, (stage, converts) in DISPOSITION_PIPELINE_DEFAULTS.items():
@@ -310,6 +343,7 @@ async def seed():
         await db.users.update_one({"id": admin_id}, {"$set": {"role_id": role_ids["Super Admin"]}})
 
     await migrate_disposition_pipeline_links()
+    await backfill_lead_last_notes()
     await seed_sample_sheet_source()
 
     # Keep demo passwords in sync with DEMO_PASSWORD (like admin above)
@@ -389,6 +423,7 @@ async def seed():
             if (disp and disp["name"] == "Call Back") else None,
             "is_client": False, "client_id": None,
             "assigned_date": created.date().isoformat(),
+            "last_notes": None, "last_notes_at": None,
             "created_at": created.isoformat(), "updated_at": created.isoformat(),
         }
         leads.append(lead)
@@ -402,17 +437,23 @@ async def seed():
 
     # Call activity history
     calls = []
+    sample_notes = "Discussed the offering. Follow-up noted."
     for l in random.sample(leads, 80):
         d = disp_map[l["disposition_name"]] if l["disposition_name"] else random.choice(disp_docs)
         when = now_utc() - timedelta(days=random.randint(0, 20), minutes=random.randint(0, 600))
+        when_iso = when.isoformat()
         calls.append({
             "id": new_id(), "companyId": COMPANY_ID, "lead_id": l["id"],
             "lead_name": l["name"], "lead_phone": l["phone"],
             "agent_id": l["assigned_to"], "agent_name": l["assigned_name"],
             "disposition_id": d["id"], "disposition_name": d["name"],
-            "outcome": "connected", "notes": "Discussed the offering. Follow-up noted.",
+            "outcome": "connected", "notes": sample_notes,
             "duration": random.randint(30, 480),
-            "follow_up_at": None, "created_at": when.isoformat()})
+            "follow_up_at": None, "created_at": when_iso})
+        await db.leads.update_one(
+            {"id": l["id"]},
+            {"$set": {"last_notes": sample_notes, "last_notes_at": when_iso}},
+        )
     await db.calls.insert_many(calls)
 
     # Clients from converted leads + ledger

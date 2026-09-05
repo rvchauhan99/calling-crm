@@ -7,6 +7,7 @@ import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from "@/components/ui/sheet"
 import { PipelineLogCallDialog } from "@/components/pipeline/PipelineLogCallDialog"
+import { LastRemarks } from "@/components/leads/LastRemarks"
 import { toast } from "sonner"
 import { PhoneCall } from "lucide-react"
 
@@ -75,9 +76,13 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
         duration: payload.duration || 0,
         follow_up_at: payload.follow_up_at,
         pipeline_stage: payload.pipeline_stage,
+        ...(payload.deposit_amount != null ? { deposit_amount: payload.deposit_amount } : {}),
       })
-      if (res.converted) toast.success("Lead converted to client")
-      else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
+      if (res.converted) {
+        toast.success(res.deposit_posted
+          ? "Lead converted to client · Deposit posted"
+          : "Lead converted to client")
+      } else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
       setLogOpen(false)
       setRefreshKey((k) => k + 1)
       onLogged?.(detail.lead.id, res)
@@ -134,6 +139,14 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
                   <StatusPill color={lead.carry_forward ? "sky" : "amber"}>{lead.disposition_name}</StatusPill>
                 )}
               </div>
+
+              <LastRemarks
+                notes={lead.last_notes}
+                showLabel
+                compact
+                className="mt-3 rounded-md border border-slate-100 bg-slate-50 p-2.5"
+                testId="lead-360-last-remarks"
+              />
 
               {canLog && (
                 <div className="mt-4">

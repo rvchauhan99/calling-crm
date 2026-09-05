@@ -7,11 +7,13 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { LastRemarks } from "@/components/leads/LastRemarks"
 import {
   nowDatetimeLocalValue,
   isCallBackDisposition,
   isConvertDisposition,
   isTerminalStage,
+  parseDepositAmount,
 } from "@/lib/followupBuckets"
 
 const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
@@ -30,6 +32,7 @@ const emptyForm = (lead, stage, mode) => ({
   follow_up_at: mode === "move" && !isTerminalStage(stage) ? nowDatetimeLocalValue() : "",
   pipeline_stage: stage || lead?.pipeline_stage || "New",
   duration: 0,
+  deposit_amount: "",
 })
 
 /** Shared Log Call / move-stage dialog used by Pipeline drop + detail. */
@@ -101,11 +104,13 @@ export const PipelineLogCallDialog = ({
     const nextFu = fuDisabled || !form.follow_up_at
       ? null
       : new Date(form.follow_up_at).toISOString()
+    const deposit = converts ? parseDepositAmount(form.deposit_amount) : null
     onSubmit?.({
       ...form,
       pipeline_stage: stage,
       duration: Number(form.duration) || 0,
       follow_up_at: nextFu,
+      deposit_amount: deposit,
     })
   }
 
@@ -229,6 +234,14 @@ export const PipelineLogCallDialog = ({
             )}
           </div>
           <div>
+            <LastRemarks
+              notes={lead?.last_notes}
+              showLabel
+              className="rounded-md border border-slate-100 bg-slate-50 p-2.5"
+              testId="log-call-last-remarks"
+            />
+          </div>
+          <div>
             <Label htmlFor="pipe-remarks">Remarks</Label>
             <Textarea
               id="pipe-remarks"
@@ -240,6 +253,24 @@ export const PipelineLogCallDialog = ({
               aria-label="Remarks"
             />
           </div>
+          {converts && (
+            <div data-testid="convert-deposit-section">
+              <Label htmlFor="pipe-deposit">Deposit amount (₹)</Label>
+              <Input
+                id="pipe-deposit"
+                type="number"
+                min={0}
+                step="0.01"
+                value={form.deposit_amount}
+                className="mt-1"
+                placeholder="Optional"
+                onChange={(e) => setForm({ ...form, deposit_amount: e.target.value })}
+                data-testid="convert-deposit-amount"
+                aria-label="Deposit amount"
+              />
+              <p className="mt-1 text-xs text-slate-500">Optional — posts to Finance Ledger</p>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} data-testid="pipeline-log-cancel">Cancel</Button>

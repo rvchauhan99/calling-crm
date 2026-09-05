@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, useCallback, useMemo } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -17,6 +17,17 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
+  const [counts, setCounts] = useState({})
+
+  const syncCountsFromPreview = useCallback((data) => {
+    const next = {}
+    for (const a of data?.by_agent || []) {
+      if (a.slots_available > 0 || a.assigned > 0) {
+        next[a.agent_id] = a.assigned
+      }
+    }
+    setCounts(next)
+  }, [])
 
   const loadPreview = useCallback(async (count) => {
     setPreviewLoading(true)
@@ -25,19 +36,22 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
       if (count) p.set("max_leads", count)
       const { data } = await api.get(`/leads/auto-assign/preview?${p.toString()}`)
       setPreview(data)
+      syncCountsFromPreview(data)
     } catch (e) {
       setPreview(null)
+      setCounts({})
       toast.error(formatApiError(e.response?.data?.detail))
     } finally {
       setPreviewLoading(false)
     }
-  }, [])
+  }, [syncCountsFromPreview])
 
   useEffect(() => {
     if (!open) {
       setMaxLeads("")
       setPreview(null)
       setResult(null)
+      setCounts({})
       return
     }
     loadPreview("")
@@ -51,10 +65,51 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
     loadPreview(value.trim() ? String(parsed) : "")
   }
 
+  const handleCountChange = (agentId, slotsAvailable, raw) => {
+    setResult(null)
+    if (raw.trim() === "") {
+      setCounts((prev) => ({ ...prev, [agentId]: 0 }))
+      return
+    }
+    const n = Number(raw)
+    if (Number.isNaN(n) || n < 0) return
+    const clamped = Math.min(Math.floor(n), slotsAvailable)
+    setCounts((prev) => ({ ...prev, [agentId]: clamped }))
+  }
+
+  const agents = useMemo(() => {
+    const source = result || preview
+    return source?.by_agent?.filter((a) => a.assigned > 0 || a.slots_available > 0) || []
+  }, [result, preview])
+
+  const totalSelected = useMemo(() => {
+    if (result) return result.assigned
+    return agents.reduce((sum, a) => sum + (Number(counts[a.agent_id]) || 0), 0)
+  }, [result, agents, counts])
+
+  const requestedCap = preview
+    ? (maxLeads.trim()
+      ? Math.min(Number(maxLeads), preview.available_in_pool)
+      : preview.assigned)
+    : 0
+
+  const showPoolNote = preview && maxLeads.trim()
+    && Number(maxLeads) > preview.available_in_pool
+
+  const showTotalMismatch = !result && preview && maxLeads.trim()
+    && totalSelected !== requestedCap && totalSelected > 0
+
   const handleConfirm = async () => {
     setLoading(true)
     try {
-      const body = {}
+      const body = {
+        allocations: agents
+          .map((a) => ({
+            agent_id: a.agent_id,
+            count: Number(counts[a.agent_id]) || 0,
+          }))
+          .filter((a) => a.count > 0),
+      }
       if (maxLeads.trim()) body.max_leads = Number(maxLeads)
       const { data } = await api.post("/leads/auto-assign", body)
       setResult(data)
@@ -67,27 +122,15 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
     }
   }
 
-  const effectiveCap = preview
-    ? (maxLeads.trim()
-      ? Math.min(Number(maxLeads), preview.available_in_pool)
-      : preview.assigned)
-    : 0
-
-  const showPoolNote = preview && maxLeads.trim()
-    && Number(maxLeads) > preview.available_in_pool
-
-  const summary = result || preview
-  const agents = summary?.by_agent?.filter((a) => a.assigned > 0 || a.slots_available > 0) || []
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto bg-white sm:max-w-lg" data-testid="auto-assign-dialog">
+      <DialogContent className="max-h-[90vh] overflow-y-auto bg-white sm:max-w-2xl" data-testid="auto-assign-dialog">
         <DialogHeader>
           <DialogTitle>{result ? "Assignment complete" : "Auto-assign leads"}</DialogTitle>
           <DialogDescription>
             {result
               ? `${result.assigned} leads assigned from ${result.available_in_pool} available in pool.`
-              : "Distribute unassigned leads to callers based on daily quota."}
+              : "Distribute unassigned leads equally among callers with remaining daily quota. Adjust per-agent counts before confirming."}
           </DialogDescription>
         </DialogHeader>
 
@@ -115,14 +158,21 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
                   Only {preview.available_in_pool} leads available — {preview.available_in_pool} will be assigned.
                 </p>
               )}
+              {showTotalMismatch && (
+                <p className="mt-1.5 text-xs text-amber-600" data-testid="auto-assign-total-note">
+                  Selected total is {totalSelected} (cap was {requestedCap}). Counts will be used as entered.
+                </p>
+              )}
             </div>
           </div>
         )}
 
-        {summary && agents.length > 0 && (
+        {(result || preview) && agents.length > 0 && (
           <div>
             <h4 className="mb-2 text-sm font-semibold text-slate-700">
-              {result ? "Agent summary" : `Preview — ${effectiveCap} lead${effectiveCap === 1 ? "" : "s"} will be assigned`}
+              {result
+                ? "Agent summary"
+                : `Preview — ${totalSelected} lead${totalSelected === 1 ? "" : "s"} will be assigned`}
             </h4>
             <div className="rounded-md border border-slate-200">
               <Table>
@@ -142,7 +192,22 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
                       <TableCell className="text-right tabular-nums">{a.quota}</TableCell>
                       <TableCell className="text-right tabular-nums">{a.assigned_today_before}</TableCell>
                       <TableCell className="text-right tabular-nums">{a.slots_available}</TableCell>
-                      <TableCell className="text-right tabular-nums font-medium text-sky-600">{a.assigned}</TableCell>
+                      <TableCell className="text-right">
+                        {result ? (
+                          <span className="tabular-nums font-medium text-sky-600">{a.assigned}</span>
+                        ) : (
+                          <Input
+                            type="number"
+                            min="0"
+                            max={a.slots_available}
+                            value={counts[a.agent_id] ?? 0}
+                            onChange={(e) => handleCountChange(a.agent_id, a.slots_available, e.target.value)}
+                            className="ml-auto h-8 w-20 text-right tabular-nums focus-visible:ring-sky-500"
+                            aria-label={`Will assign for ${a.agent_name}`}
+                            data-testid={`auto-assign-agent-count-${a.agent_id}`}
+                          />
+                        )}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -169,11 +234,11 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
               <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
               <Button
                 className="bg-sky-500 hover:bg-sky-600"
-                disabled={loading || previewLoading || !preview || preview.assigned === 0}
+                disabled={loading || previewLoading || !preview || totalSelected === 0}
                 onClick={handleConfirm}
                 data-testid="confirm-auto-assign-btn"
               >
-                {loading ? "Assigning…" : `Assign ${effectiveCap} leads`}
+                {loading ? "Assigning…" : `Assign ${totalSelected} leads`}
               </Button>
             </>
           )}

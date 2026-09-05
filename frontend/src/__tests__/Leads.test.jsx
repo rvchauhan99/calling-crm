@@ -49,6 +49,7 @@ const mockLeadsResponse = {
     pipeline_stage: "New",
     assigned_to: "agent-1",
     assigned_name: "Rohan",
+    last_notes: "Interested in solar package",
   }],
   total: 1,
   page: 1,
@@ -143,5 +144,23 @@ describe("Leads role visibility", () => {
     })
 
     expect(screen.getByTestId("tab-assigned")).toBeInTheDocument()
+  })
+
+  it("shows last remarks column for leads", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      dataScope: "OWN",
+      user: { id: "agent-1", user_type: "caller" },
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-last-remarks-lead-1")).toBeInTheDocument()
+    })
+    expect(screen.getByText("Last Remarks")).toBeInTheDocument()
+    expect(screen.getByTestId("lead-last-remarks-lead-1")).toHaveTextContent(
+      "Interested in solar package",
+    )
   })
 })

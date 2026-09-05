@@ -3,7 +3,9 @@ import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money } from "@/components/common"
+import { TablePagination } from "@/components/TablePagination"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
+import { usePageParams } from "@/hooks/usePageParams"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -21,6 +23,7 @@ import {
 } from "@/components/ui/table"
 import { toast } from "sonner"
 import { UserCog, Search, Plus, UserPlus } from "lucide-react"
+import { parseDepositAmount } from "@/lib/followupBuckets"
 
 export default function Clients() {
   const { can } = useAuth()
@@ -34,10 +37,11 @@ export default function Clients() {
   const [convertible, setConvertible] = useState([])
   const [convertLeadId, setConvertLeadId] = useState("")
   const [convertSearch, setConvertSearch] = useState("")
+  const [convertDeposit, setConvertDeposit] = useState("")
 
   const search = params.get("search") || ""
-  const page = Number(params.get("page") || 1)
   const statusTab = params.get("status") === "inactive" ? "inactive" : "active"
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
   const setParam = (k, v) => {
     const p = new URLSearchParams(params)
@@ -52,14 +56,14 @@ export default function Clients() {
     if (search) p.set("search", search)
     p.set("status", statusTab)
     p.set("page", page)
-    p.set("page_size", 25)
+    p.set("page_size", pageSize)
     const [{ data: list }, { data: counts }] = await Promise.all([
       api.get(`/clients?${p.toString()}`),
       api.get("/clients/tab-counts"),
     ])
     setData(list)
     setTabCounts(counts)
-  }, [search, page, statusTab])
+  }, [search, page, pageSize, statusTab])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -88,6 +92,7 @@ export default function Clients() {
     setShowConvert(true)
     setConvertLeadId("")
     setConvertSearch("")
+    setConvertDeposit("")
     loadConvertible().catch(() => {})
   }
 
@@ -97,16 +102,19 @@ export default function Clients() {
       return
     }
     try {
-      await api.post("/clients/convert", { lead_id: convertLeadId })
-      toast.success("Lead converted to client")
+      const deposit = parseDepositAmount(convertDeposit)
+      const body = { lead_id: convertLeadId }
+      if (deposit != null) body.deposit_amount = deposit
+      const { data: res } = await api.post("/clients/convert", body)
+      toast.success(res.deposit_posted
+        ? "Lead converted to client · Deposit posted"
+        : "Lead converted to client")
       setShowConvert(false)
       load()
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail))
     }
   }
-
-  const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
 
   return (
     <div data-testid="clients-page">
@@ -188,14 +196,14 @@ export default function Clients() {
           )}
       </div>
 
-      {data && totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setParam("page", String(page - 1))} data-testid="prev-page">Prev</Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setParam("page", String(page + 1))} data-testid="next-page">Next</Button>
-          </div>
-        </div>
+      {data && (
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
       )}
 
       <Sheet open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
@@ -328,6 +336,22 @@ export default function Clients() {
               label="Lead"
               testId="convert-lead-select"
             />
+            <div data-testid="convert-deposit-section">
+              <Label htmlFor="clients-deposit">Deposit amount (₹)</Label>
+              <Input
+                id="clients-deposit"
+                type="number"
+                min={0}
+                step="0.01"
+                value={convertDeposit}
+                className="mt-1 focus-visible:ring-sky-500"
+                placeholder="Optional"
+                onChange={(e) => setConvertDeposit(e.target.value)}
+                data-testid="convert-deposit-amount"
+                aria-label="Deposit amount"
+              />
+              <p className="mt-1 text-xs text-slate-500">Optional — posts to Finance Ledger</p>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowConvert(false)}>Cancel</Button>

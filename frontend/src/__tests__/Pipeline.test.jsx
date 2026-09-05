@@ -53,6 +53,7 @@ const board = {
       assigned_to: "a1",
       assigned_name: "Rohan",
       follow_up_at: null,
+      last_notes: "Needs site survey",
     }],
     Contacted: [],
     Qualified: [],
@@ -116,6 +117,27 @@ describe("Pipeline workbench", () => {
     })
     expect(screen.getByText("Source")).toBeInTheDocument()
     expect(screen.getByText("Disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("pipeline-card-last-remarks-lead-1")).toHaveTextContent(
+      "Needs site survey",
+    )
+  })
+
+  it("shows last remarks in list view and log dialog", async () => {
+    const user = userEvent.setup()
+    __setMockSearchParams(new URLSearchParams("view=list"))
+    render(<Pipeline />)
+    await waitFor(() => {
+      expect(screen.getByTestId("pipeline-last-remarks-lead-1")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("pipeline-last-remarks-lead-1")).toHaveTextContent(
+      "Needs site survey",
+    )
+
+    await user.click(screen.getByTestId("list-log-call-lead-1"))
+    const dialog = await screen.findByTestId("pipeline-log-call-dialog")
+    expect(within(dialog).getByTestId("log-call-last-remarks")).toHaveTextContent(
+      "Needs site survey",
+    )
   })
 
   it("kanban Call button opens log dialog without opening detail", async () => {

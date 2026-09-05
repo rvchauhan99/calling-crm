@@ -46,6 +46,7 @@ describe("Lead360Sheet", () => {
               disposition_name: null,
               status: "active",
               follow_up_at: null,
+              last_notes: "Good call summary",
               created_at: "2026-09-01T10:00:00.000Z",
               updated_at: "2026-09-01T10:00:00.000Z",
             },
@@ -84,6 +85,39 @@ describe("Lead360Sheet", () => {
     expect(screen.getByTestId("lead-360-calls")).toHaveTextContent("Interested")
     expect(screen.getByTestId("lead-360-activity")).toHaveTextContent("log_call")
     expect(screen.getByTestId("lead-360-log-call")).toBeInTheDocument()
+    expect(screen.getByTestId("lead-360-last-remarks")).toHaveTextContent("Good call summary")
+    expect(screen.getByTestId("lead-360-last-remarks")).toHaveTextContent("Last Remarks")
+  })
+
+  it("shows empty last remarks when missing", async () => {
+    api.get.mockImplementation((url) => {
+      if (url === "/leads/l1") {
+        return Promise.resolve({
+          data: {
+            lead: {
+              id: "l1",
+              name: "Ada",
+              phone: "+919876543210",
+              source: "Manual",
+              pipeline_stage: "New",
+              status: "active",
+              last_notes: null,
+            },
+            calls: [],
+            client: null,
+            activity: [],
+          },
+        })
+      }
+      if (url === "/dispositions") {
+        return Promise.resolve({ data: { dispositions: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    render(<Lead360Sheet leadId="l1" onClose={() => {}} />)
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-360-last-remarks")).toHaveTextContent("—")
+    })
   })
 
   it("phone click path is covered via onOpen parent — sheet closes via onClose", async () => {

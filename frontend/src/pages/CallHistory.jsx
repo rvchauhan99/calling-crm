@@ -3,10 +3,12 @@ import { useSearchParams } from "react-router-dom"
 import api, { API, getToken } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
+import { usePageParams } from "@/hooks/usePageParams"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { SearchableSelect } from "@/components/ui/searchable-select"
@@ -31,7 +33,7 @@ export default function CallHistory() {
   const from = params.get("from") || ""
   const to = params.get("to") || ""
   const sort = params.get("sort") || "created_at_desc"
-  const page = Number(params.get("page") || 1)
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
   const setParam = useCallback((k, v) => {
     const p = new URLSearchParams(params)
@@ -45,7 +47,9 @@ export default function CallHistory() {
   const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
 
   const clearAll = () => {
-    setParams(new URLSearchParams({ page: "1" }))
+    const p = new URLSearchParams({ page: "1" })
+    if (pageSize !== DEFAULT_PAGE_SIZE) p.set("page_size", String(pageSize))
+    setParams(p)
     setSearchLocal("")
   }
 
@@ -58,10 +62,10 @@ export default function CallHistory() {
     if (to) p.set("to", to)
     if (sort) p.set("sort", sort)
     p.set("page", page)
-    p.set("page_size", 30)
+    p.set("page_size", pageSize)
     const { data: d } = await api.get(`/call-history?${p.toString()}`)
     setData(d)
-  }, [search, disposition, agentId, from, to, sort, page, isOwnScope])
+  }, [search, disposition, agentId, from, to, sort, page, pageSize, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -104,8 +108,6 @@ export default function CallHistory() {
     }
     return list
   }, [search, disposition, agentId, from, to, sort, isOwnScope, agents, setParam])
-
-  const totalPages = data ? Math.ceil(data.total / data.page_size) : 1
 
   return (
     <div data-testid="call-history-page">
@@ -241,14 +243,14 @@ export default function CallHistory() {
           )}
       </div>
 
-      {data && totalPages > 1 && (
-        <div className="mt-4 flex items-center justify-between text-sm text-slate-500">
-          <span>Page {page} of {totalPages}</span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setParam("page", String(page - 1))} data-testid="prev-page">Prev</Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setParam("page", String(page + 1))} data-testid="next-page">Next</Button>
-          </div>
-        </div>
+      {data && (
+        <TablePagination
+          page={page}
+          pageSize={pageSize}
+          total={data.total}
+          onPageChange={setPage}
+          onPageSizeChange={setPageSize}
+        />
       )}
 
       <Lead360Sheet leadId={lead360Id} onClose={() => setLead360Id(null)} />
