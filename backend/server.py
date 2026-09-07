@@ -26,6 +26,10 @@ _sheet_poll_task = None
 _lead_import_worker_task = None
 
 
+def _run_seed_enabled() -> bool:
+    return os.environ.get("RUN_SEED", "").strip().lower() in ("1", "true", "yes")
+
+
 def _parse_iso(ts):
     if not ts:
         return None
@@ -71,11 +75,14 @@ async def _sheet_poll_loop():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _sheet_poll_task, _lead_import_worker_task
-    try:
-        await seed()
-        logger.info("Seed complete")
-    except Exception as e:
-        logger.exception("Seed failed: %s", e)
+    if _run_seed_enabled():
+        try:
+            await seed()
+            logger.info("Seed complete")
+        except Exception as e:
+            logger.exception("Seed failed: %s", e)
+    else:
+        logger.info("Seed skipped (live database)")
     _lead_import_worker_task = start_lead_import_worker()
     logger.info("Lead import worker started")
     if os.environ.get("SHEET_SYNC_DISABLED", "").lower() not in ("1", "true", "yes"):
@@ -106,9 +113,23 @@ app.include_router(routes_reports.router)
 app.include_router(routes_sheet_sources.router)
 
 
+def _health_ok():
+    return {"status": "ok"}
+
+
+@app.get("/")
+async def root_health():
+    return _health_ok()
+
+
+@app.get("/health")
+async def probe_health():
+    return _health_ok()
+
+
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    return _health_ok()
 
 
 app.add_middleware(
@@ -125,4 +146,4 @@ if __name__ == "__main__":
     import uvicorn
     port = listen_port()
     logger.info("Listening on 0.0.0.0:%s", port)
-    uvicorn.run("server:app", host="0.0.0.0", port=port)
+    uvicorn.run("server:app", host="0.0.0.0", port=port, workers=1)

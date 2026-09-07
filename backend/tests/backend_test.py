@@ -20,6 +20,24 @@ class TestHealthAuth:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
+    def test_platform_health_aliases(self, anon):
+        for path in ("/", "/health", "/api/health"):
+            r = anon.get(f"{BASE_URL}{path}", timeout=30)
+            assert r.status_code == 200, path
+            assert r.json()["status"] == "ok"
+
+    def test_run_seed_opt_in_only(self, monkeypatch):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        import server
+        monkeypatch.delenv("RUN_SEED", raising=False)
+        assert server._run_seed_enabled() is False
+        monkeypatch.setenv("RUN_SEED", "1")
+        assert server._run_seed_enabled() is True
+        monkeypatch.setenv("RUN_SEED", "false")
+        assert server._run_seed_enabled() is False
+
     def test_listen_port_app_platform(self, monkeypatch):
         import sys
         from pathlib import Path

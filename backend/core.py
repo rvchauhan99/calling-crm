@@ -14,7 +14,7 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 COMPANY_ID = os.environ.get("COMPANY_ID", "default")
 JWT_ALGORITHM = "HS256"
 
-client = AsyncIOMotorClient(MONGO_URL)
+client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=8000)
 db = client[DB_NAME]
 
 
