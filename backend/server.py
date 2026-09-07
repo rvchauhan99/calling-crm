@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
@@ -20,32 +21,8 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Calling CRM API")
-
-app.include_router(routes_auth.router)
-app.include_router(routes_admin.router)
-app.include_router(routes_leads.router)
-app.include_router(routes_clients.router)
-app.include_router(routes_reports.router)
-app.include_router(routes_sheet_sources.router)
-
 _sheet_poll_task = None
 _lead_import_worker_task = None
-
-
-@app.get("/api/health")
-async def health():
-    return {"status": "ok"}
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
-)
 
 
 def _parse_iso(ts):
@@ -90,8 +67,8 @@ async def _sheet_poll_loop():
             logger.exception("Sheet poll loop error")
 
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
     global _sheet_poll_task, _lead_import_worker_task
     try:
         await seed()
@@ -105,11 +82,7 @@ async def startup():
         logger.info("Sheet sync poll loop started")
     else:
         logger.info("Sheet sync poll loop disabled (SHEET_SYNC_DISABLED)")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    global _sheet_poll_task, _lead_import_worker_task
+    yield
     await stop_lead_import_worker()
     _lead_import_worker_task = None
     if _sheet_poll_task:
@@ -120,3 +93,28 @@ async def shutdown():
             pass
         _sheet_poll_task = None
     client.close()
+
+
+app = FastAPI(title="Calling CRM API", lifespan=lifespan)
+
+app.include_router(routes_auth.router)
+app.include_router(routes_admin.router)
+app.include_router(routes_leads.router)
+app.include_router(routes_clients.router)
+app.include_router(routes_reports.router)
+app.include_router(routes_sheet_sources.router)
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok"}
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
+)
