@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import api from "@/lib/api"
 import Followups, { classifyFollowup, sortFollowups } from "@/pages/Followups"
+import { __setMockSearchParams, __getMockSetParams } from "react-router-dom"
 
 jest.mock("@/context/AuthContext", () => ({
   useAuth: () => ({ can: () => true, dataScope: "ALL", user: { id: "u1" } }),
@@ -51,15 +52,6 @@ const dayOffsetIso = (dayOffset, hour = 15) => {
 
 const mockFollowups = [
   {
-    id: "fu-upcoming",
-    name: "Upcoming Lead",
-    phone: "+919111111111",
-    disposition_name: "Call Back",
-    follow_up_at: dayOffsetIso(6, 10),
-    pipeline_stage: "New",
-    last_notes: "Will call next week",
-  },
-  {
     id: "fu-overdue",
     name: "Overdue Lead",
     phone: "+919222222222",
@@ -77,12 +69,33 @@ const mockFollowups = [
     pipeline_stage: "Qualified",
     last_notes: null,
   },
+  {
+    id: "fu-upcoming",
+    name: "Upcoming Lead",
+    phone: "+919111111111",
+    disposition_name: "Call Back",
+    follow_up_at: dayOffsetIso(6, 10),
+    pipeline_stage: "New",
+    last_notes: "Will call next week",
+  },
 ]
+
+function rowsForUrl(url) {
+  const qs = new URLSearchParams(url.split("?")[1] || "")
+  const bucket = qs.get("bucket") || "all"
+  const items = bucket === "all"
+    ? mockFollowups
+    : mockFollowups.filter((l) => classifyFollowup(l.follow_up_at) === bucket)
+  return items
+}
 
 function mockApi(acwId = null) {
   api.get.mockImplementation((url) => {
-    if (url === "/followups") {
-      return Promise.resolve({ data: { followups: mockFollowups } })
+    if (url.startsWith("/followups")) {
+      const items = rowsForUrl(url)
+      return Promise.resolve({
+        data: { followups: items, total: items.length, page: 1, page_size: 25 },
+      })
     }
     if (url === "/dispositions") {
       return Promise.resolve({
@@ -117,6 +130,7 @@ describe("classifyFollowup / sortFollowups", () => {
 describe("Followups page", () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    __setMockSearchParams(new URLSearchParams())
     mockApi()
   })
 
@@ -132,6 +146,38 @@ describe("Followups page", () => {
     expect(screen.getByTestId("log-call-btn-fu-today")).toBeInTheDocument()
     expect(screen.queryByTestId("clear-followup-fu-overdue")).not.toBeInTheDocument()
     expect(screen.queryByText("Done")).not.toBeInTheDocument()
+  })
+
+  it("requests page and page_size and shows counted pagination", async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/followups")) {
+        return Promise.resolve({
+          data: {
+            followups: mockFollowups,
+            total: 87,
+            page: 1,
+            page_size: 25,
+          },
+        })
+      }
+      if (url === "/dispositions") {
+        return Promise.resolve({ data: { dispositions: [] } })
+      }
+      if (url === "/today-calls") {
+        return Promise.resolve({ data: { leads: [], acw_pending_lead_id: null } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Followups />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("table-pagination")).toBeInTheDocument()
+    })
+    expect(api.get).toHaveBeenCalledWith("/followups?page=1&page_size=25")
+    expect(screen.getByTestId("pagination-range")).toHaveTextContent("1–25 of 87")
+    expect(screen.getByText("87 scheduled callbacks")).toBeInTheDocument()
+    expect(screen.getByTestId("next-page")).toBeEnabled()
   })
 
   it("orders rows overdue, today, then upcoming", async () => {
@@ -152,7 +198,7 @@ describe("Followups page", () => {
     expect(rows[2]).toHaveAttribute("data-category", "upcoming")
   })
 
-  it("filters to overdue only", async () => {
+  it("writes overdue bucket and resets page on filter click", async () => {
     const user = userEvent.setup()
     render(<Followups />)
 
@@ -162,6 +208,22 @@ describe("Followups page", () => {
 
     await user.click(screen.getByTestId("followups-filter-overdue"))
 
+    const setParams = __getMockSetParams()
+    expect(setParams).toHaveBeenCalled()
+    const last = setParams.mock.calls[setParams.mock.calls.length - 1][0]
+    const qs = last instanceof URLSearchParams ? last : new URLSearchParams(last)
+    expect(qs.get("bucket")).toBe("overdue")
+    expect(qs.get("page")).toBe("1")
+  })
+
+  it("honors bucket from URL and shows only that page", async () => {
+    __setMockSearchParams(new URLSearchParams("bucket=overdue"))
+    render(<Followups />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("followup-row-fu-overdue")).toBeInTheDocument()
+    })
+    expect(api.get).toHaveBeenCalledWith("/followups?page=1&page_size=25&bucket=overdue")
     expect(screen.getByTestId("followup-row-fu-overdue")).toBeInTheDocument()
     expect(screen.queryByTestId("followup-row-fu-today")).not.toBeInTheDocument()
     expect(screen.queryByTestId("followup-row-fu-upcoming")).not.toBeInTheDocument()

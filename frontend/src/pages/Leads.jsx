@@ -1,10 +1,11 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from "react"
+import { useEffect, useState, useCallback, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { API, getToken, formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
 import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination"
 import { AutoAssignDialog } from "@/components/leads/AutoAssignDialog"
+import { LeadImportDialog } from "@/components/leads/LeadImportDialog"
 import { PhoneField } from "@/components/leads/PhoneField"
 import { EmailField } from "@/components/leads/EmailField"
 import { SourceSelect } from "@/components/leads/SourceSelect"
@@ -50,10 +51,10 @@ export default function Leads() {
   const [showCreate, setShowCreate] = useState(false)
   const [showAssign, setShowAssign] = useState(false)
   const [showAutoAssign, setShowAutoAssign] = useState(false)
+  const [showImport, setShowImport] = useState(false)
   const [assignAgent, setAssignAgent] = useState("")
   const [form, setForm] = useState({ name: "", phone: "", email: "", source: "Manual", city: "" })
   const [formErrors, setFormErrors] = useState({})
-  const fileRef = useRef()
 
   const search = params.get("search") || ""
   const status = params.get("status") || ""
@@ -211,24 +212,6 @@ export default function Leads() {
     }
   }
 
-  const doImport = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-    const fd = new FormData()
-    fd.append("file", file)
-    try {
-      const res = await fetch(`${API}/leads/import`, {
-        method: "POST", body: fd,
-        headers: { Authorization: `Bearer ${getToken()}` },
-      })
-      const d = await res.json()
-      if (!res.ok) throw new Error(formatApiError(d.detail))
-      toast.success(`Imported ${d.created} · ${d.duplicates} dupes · ${d.invalid} invalid`)
-      load()
-    } catch (err) { toast.error(err.message) }
-    fileRef.current.value = ""
-  }
-
   const downloadTemplate = async () => {
     try {
       const res = await fetch(`${API}/leads/import/template`, {
@@ -288,8 +271,7 @@ export default function Leads() {
                 <Button variant="outline" onClick={downloadTemplate} data-testid="download-template-btn">
                   <Download size={16} className="mr-1.5" /> Download Template
                 </Button>
-                <input ref={fileRef} type="file" accept=".csv" hidden onChange={doImport} data-testid="import-input" />
-                <Button variant="outline" onClick={() => fileRef.current.click()} data-testid="import-btn">
+                <Button variant="outline" onClick={() => setShowImport(true)} data-testid="import-btn">
                   <Upload size={16} className="mr-1.5" /> Import CSV
                 </Button>
               </>
@@ -496,7 +478,11 @@ export default function Leads() {
         onOpenChange={setShowAutoAssign}
         onComplete={load}
       />
-
+      <LeadImportDialog
+        open={showImport}
+        onOpenChange={setShowImport}
+        onComplete={load}
+      />
       {/* Create */}
       <Dialog open={showCreate} onOpenChange={(open) => { setShowCreate(open); if (!open) setFormErrors({}) }}>
         <DialogContent className="bg-white" data-testid="create-lead-dialog">

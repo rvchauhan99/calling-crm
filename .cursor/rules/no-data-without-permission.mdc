@@ -1,0 +1,41 @@
+---
+description: Never write database or dummy test data without an explicit yes from the user
+alwaysApply: true
+---
+
+# Ask before any data write — Calling CRM
+
+Do **not** insert, update, delete, seed, import, or create dummy/test records unless the user has **explicitly said yes** in this conversation. Silence, “verify the feature,” or mandatory-testing is **not** permission.
+
+## Stop and ask first
+
+- Mongo writes on any database: local `calling_crm`, Atlas via `deploy/.env`, or any other `MONGO_URL`
+- Seed, cutover `--apply`, CSV/API import, dummy users/leads/clients, or `TEST_*` records
+- **pytest** or any script that writes to the database
+- Browser or API flows that create, update, or delete real records
+
+Wait for a clear yes (e.g. “run pytest”, “apply cutover”, “create test leads”). Then do only what was approved.
+
+## Allowed without asking
+
+- Read-only inspection (`GET`, Mongo find, logs)
+- Editing source or test **code** (do not execute anything that writes data)
+- Frontend RTL tests (`yarn test`) that mock the API and do not hit Mongo
+
+## Interaction with mandatory testing
+
+Write or update pytest files as required. **Ask before running backend pytest.** Do not run it because verification “needs it.” Report that pytest is waiting on permission.
+
+## Examples
+
+```text
+# BAD — unsolicited dummy lead for browser QA
+POST /api/leads  {"name": "TEST_AutoConv", ...}
+
+# BAD — pytest or cutover because the task says verify
+pytest tests/backend_test.py
+python scripts/local/cutover_import_leads.py --apply
+
+# GOOD — ask, then wait
+"Backend pytest will write tagged leads to local Mongo. Run it?"
+```

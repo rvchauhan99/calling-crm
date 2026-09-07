@@ -42,6 +42,16 @@ yarn-error.log*
 
 # Emergent / agent noise (do not re-add)
 .emergent/
+
+# Local-only scripts (never commit — contain destructive ops)
+backend/scripts/local/
 memory/test_credentials.md
 test_reports/
 test_result.md
+
+# Go-live cutover PII (do not commit)
+backend/DATA*.csv
+backend/cutover_import_errors.csv
+backend/cutover_import_duplicates.csv
+backend/cutover_import.py
+backend/tests/test_cutover_import_leads.py

@@ -162,6 +162,9 @@ async def ensure_indexes():
     await db.users.create_index("id")
     await db.leads.create_index([("companyId", 1), ("phone", 1)])
     await db.leads.create_index("assigned_to")
+    await db.leads.create_index([("companyId", 1), ("follow_up_at", 1)])
+    await db.lead_import_jobs.create_index("id", unique=True)
+    await db.lead_import_jobs.create_index([("companyId", 1), ("status", 1), ("created_at", 1)])
     await db.leads.create_index(
         [("companyId", 1), ("sheet_source_id", 1), ("external_id", 1)],
         unique=True,

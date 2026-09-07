@@ -14,6 +14,7 @@ import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
 from seed import seed
 from sheet_sync import sync_source
+from lead_import_jobs import start_lead_import_worker, stop_lead_import_worker
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -29,6 +30,7 @@ app.include_router(routes_reports.router)
 app.include_router(routes_sheet_sources.router)
 
 _sheet_poll_task = None
+_lead_import_worker_task = None
 
 
 @app.get("/api/health")
@@ -42,6 +44,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
@@ -89,12 +92,14 @@ async def _sheet_poll_loop():
 
 @app.on_event("startup")
 async def startup():
-    global _sheet_poll_task
+    global _sheet_poll_task, _lead_import_worker_task
     try:
         await seed()
         logger.info("Seed complete")
     except Exception as e:
         logger.exception("Seed failed: %s", e)
+    _lead_import_worker_task = start_lead_import_worker()
+    logger.info("Lead import worker started")
     if os.environ.get("SHEET_SYNC_DISABLED", "").lower() not in ("1", "true", "yes"):
         _sheet_poll_task = asyncio.create_task(_sheet_poll_loop())
         logger.info("Sheet sync poll loop started")
@@ -104,7 +109,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _sheet_poll_task
+    global _sheet_poll_task, _lead_import_worker_task
+    await stop_lead_import_worker()
+    _lead_import_worker_task = None
     if _sheet_poll_task:
         _sheet_poll_task.cancel()
         try:

@@ -1,6 +1,9 @@
-import { useEffect, useState, useCallback, useMemo } from "react"
+import { useEffect, useState, useCallback } from "react"
+import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
 import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { TablePagination } from "@/components/TablePagination"
+import { usePageParams } from "@/hooks/usePageParams"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LastRemarks } from "@/components/leads/LastRemarks"
@@ -20,7 +23,6 @@ import { CalendarCheck, PhoneCall, AlertTriangle, CheckCircle2 } from "lucide-re
 import { cn } from "@/lib/utils"
 import {
   classifyFollowup,
-  sortFollowups,
   followupPillColor,
   nowDatetimeLocalValue,
   isCallBackDisposition,
@@ -39,30 +41,46 @@ const FILTERS = [
 ]
 
 export default function Followups() {
-  const [list, setList] = useState(null)
+  const [params, setParams] = useSearchParams()
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
+  const filter = FILTERS.some((f) => f.id === params.get("bucket")) ? params.get("bucket") : "all"
+  const [data, setData] = useState(null)
   const [dispositions, setDispositions] = useState([])
   const [acwId, setAcwId] = useState(null)
-  const [filter, setFilter] = useState("all")
   const [active, setActive] = useState(null)
   const [lead360Id, setLead360Id] = useState(null)
   const [form, setForm] = useState({
     disposition_id: "", notes: "", follow_up_at: "", pipeline_stage: "", duration: 0, deposit_amount: "",
   })
 
-  const load = useCallback(async () => {
-    const [fu, ds, tc] = await Promise.all([
-      api.get("/followups"),
+  const loadMeta = useCallback(async () => {
+    const [ds, tc] = await Promise.all([
       api.get("/dispositions"),
       api.get("/today-calls"),
     ])
-    setList(fu.data.followups || [])
     setDispositions((ds.data.dispositions || []).filter((d) => d.active))
     setAcwId(tc.data.acw_pending_lead_id || null)
   }, [])
 
+  const load = useCallback(async () => {
+    const p = new URLSearchParams()
+    p.set("page", String(page))
+    p.set("page_size", String(pageSize))
+    if (filter && filter !== "all") p.set("bucket", filter)
+    const { data: fu } = await api.get(`/followups?${p.toString()}`)
+    setData(fu)
+  }, [page, pageSize, filter])
+
+  useEffect(() => { loadMeta().catch(() => {}) }, [loadMeta])
   useEffect(() => { load().catch(() => {}) }, [load])
 
-  const handleFilterClick = (id) => setFilter(id)
+  const handleFilterClick = (id) => {
+    const p = new URLSearchParams(params)
+    if (!id || id === "all") p.delete("bucket")
+    else p.set("bucket", id)
+    p.set("page", "1")
+    setParams(p)
+  }
 
   const openLog = (lead) => {
     setActive(lead)
@@ -109,6 +127,7 @@ export default function Followups() {
       } else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
       setActive(null)
       load()
+      loadMeta()
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail))
     }
@@ -118,23 +137,19 @@ export default function Followups() {
     await api.post("/calls/complete-acw")
     toast.success("After-call work completed")
     load()
+    loadMeta()
   }
 
-  const visible = useMemo(() => {
-    if (!list) return []
-    const now = new Date()
-    const sorted = sortFollowups(list, now)
-    if (filter === "all") return sorted
-    return sorted.filter((l) => classifyFollowup(l.follow_up_at, now) === filter)
-  }, [list, filter])
+  if (!data) return <PageLoader />
 
-  if (!list) return <PageLoader />
+  const list = data.followups || []
+  const total = Number(data.total) || 0
 
   return (
     <div data-testid="followups-page">
       <PageHeader
         title="Follow-ups"
-        subtitle={`${visible.length} scheduled callbacks`}
+        subtitle={`${total} scheduled callbacks`}
         actions={acwId && (
           <Button variant="outline" onClick={handleCompleteAcw} data-testid="complete-acw-btn">
             <CheckCircle2 size={16} className="mr-1.5" /> Complete ACW
@@ -172,7 +187,7 @@ export default function Followups() {
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {visible.length === 0 ? (
+        {list.length === 0 ? (
           <EmptyState
             icon={CalendarCheck}
             title="No follow-ups scheduled"
@@ -192,7 +207,7 @@ export default function Followups() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {visible.map((l) => {
+              {list.map((l) => {
                 const category = classifyFollowup(l.follow_up_at, new Date())
                 return (
                   <TableRow
@@ -240,6 +255,14 @@ export default function Followups() {
           </Table>
         )}
       </div>
+
+      <TablePagination
+        page={page}
+        pageSize={pageSize}
+        total={total}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+      />
 
       <Dialog open={!!active} onOpenChange={(o) => !o && setActive(null)}>
         <DialogContent className="bg-white" data-testid="log-call-dialog">
@@ -396,7 +419,7 @@ export default function Followups() {
         </DialogContent>
       </Dialog>
 
-      <Lead360Sheet leadId={lead360Id} onClose={() => setLead360Id(null)} onLogged={() => load()} />
+      <Lead360Sheet leadId={lead360Id} onClose={() => setLead360Id(null)} onLogged={() => { load(); loadMeta() }} />
     </div>
   )
 }

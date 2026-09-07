@@ -1,8 +1,14 @@
 """Leads, dispositions, calls (today/history), pipeline, follow-ups, lead 360."""
-import io
-import csv
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import Response
+from lead_import import ImportValidationError, run_lead_import
+from lead_import_jobs import (
+    create_lead_import_job,
+    get_job_error_csv,
+    get_job_for_actor,
+    job_status_dto,
+    sse_response,
+)
 from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
@@ -169,12 +175,12 @@ def _apply_lead_filters(q: dict, *, search: Optional[str] = None, status: Option
     elif disposition:
         q["disposition_name"] = disposition
     if not skip_assignment_status:
-        if assignment_status == "unassigned":
+        if assigned_to:
+            q["assigned_to"] = assigned_to
+        elif assignment_status == "unassigned":
             q["assigned_to"] = None
         elif assignment_status == "assigned":
             q["assigned_to"] = {"$ne": None}
-        elif assigned_to:
-            q["assigned_to"] = assigned_to
     elif assigned_to:
         q["assigned_to"] = assigned_to
     if stage:
@@ -373,6 +379,12 @@ async def auto_assign_preview(max_leads: Optional[int] = None,
     return result
 
 
+def _ensure_csv_filename(filename: Optional[str]):
+    name = (filename or "").lower()
+    if not name.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are supported")
+
+
 @router.get("/leads/import/template")
 async def import_template(principal: dict = Depends(require("leads:import"))):
     return Response(
@@ -380,6 +392,40 @@ async def import_template(principal: dict = Depends(require("leads:import"))):
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="leads_import_template.csv"'},
     )
+
+
+@router.post("/leads/import-jobs", status_code=202)
+async def create_import_job(file: UploadFile = File(...), principal: dict = Depends(require("leads:import"))):
+    _ensure_csv_filename(file.filename)
+    raw = await file.read()
+    try:
+        queued = await create_lead_import_job(raw, file.filename or "leads.csv", principal["id"])
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await audit(principal, "import-job", "lead", queued["jobId"], {"file_name": file.filename})
+    return queued
+
+
+@router.get("/leads/import-jobs/{job_id}/events")
+async def import_job_events(job_id: str, principal: dict = Depends(require("leads:import"))):
+    await get_job_for_actor(job_id, principal["id"])
+    return sse_response(job_id)
+
+
+@router.get("/leads/import-jobs/{job_id}/errors.csv")
+async def import_job_error_csv(job_id: str, principal: dict = Depends(require("leads:import"))):
+    file_name, csv_text = await get_job_error_csv(job_id, principal["id"])
+    return Response(
+        content=csv_text,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{file_name}"'},
+    )
+
+
+@router.get("/leads/import-jobs/{job_id}")
+async def import_job_status(job_id: str, principal: dict = Depends(require("leads:import"))):
+    job = await get_job_for_actor(job_id, principal["id"])
+    return job_status_dto(job)
 
 
 @router.get("/leads/{lid}")
@@ -457,41 +503,16 @@ async def auto_assign(body: AutoAssignIn = AutoAssignIn(),
 
 @router.post("/leads/import")
 async def import_leads(file: UploadFile = File(...), principal: dict = Depends(require("leads:import"))):
-    content = (await file.read()).decode("utf-8", errors="ignore")
-    reader = csv.DictReader(io.StringIO(content))
-    created, dupes, invalid = 0, 0, 0
-    for row in reader:
-        row = {(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
-        name = row.get("name") or row.get("full name") or ""
-        raw_phone = row.get("phone") or row.get("mobile") or row.get("number") or ""
-        if not name:
-            invalid += 1
-            continue
-        try:
-            phone = normalize_and_validate_phone(raw_phone)
-        except ValueError:
-            invalid += 1
-            continue
-        row_source = row.get("source") or "Import"
-        if row_source not in LEAD_SOURCES:
-            invalid += 1
-            continue
-        if await db.leads.find_one({"companyId": COMPANY_ID, "phone": phone}):
-            dupes += 1
-            continue
-        doc = {"id": new_id(), "companyId": COMPANY_ID, "name": name, "phone": phone,
-               "email": row.get("email", ""), "source": row_source,
-               "city": row.get("city", ""), "status": "active", "assigned_to": None,
-               "assigned_name": None, "owner_id": None, "disposition_id": None,
-               "disposition_name": None, "carry_forward": True, "pipeline_stage": "New",
-               "custom_fields": {}, "follow_up_at": None, "is_client": False,
-               "client_id": None, "assigned_date": None,
-               "last_notes": None, "last_notes_at": None,
-               "created_at": now_iso(), "updated_at": now_iso()}
-        await db.leads.insert_one(dict(doc))
-        created += 1
-    await audit(principal, "import", "lead", None, {"created": created, "dupes": dupes, "invalid": invalid})
-    return {"created": created, "duplicates": dupes, "invalid": invalid}
+    _ensure_csv_filename(file.filename)
+    raw = await file.read()
+    try:
+        result = await run_lead_import(raw)
+    except ImportValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await audit(principal, "import", "lead", None, {
+        "created": result.created, "dupes": result.duplicates, "invalid": result.invalid,
+    })
+    return {"created": result.created, "duplicates": result.duplicates, "invalid": result.invalid}
 
 
 # ---------------- Today Calls & disposition logging ----------------
@@ -902,17 +923,46 @@ async def move_stage(lid: str, body: StageIn, principal: dict = Depends(require(
 
 
 # ---------------- Follow-ups ----------------
+FOLLOWUP_PAGE_SIZE_MAX = 100
+FOLLOWUP_BUCKETS = {"all", "overdue", "today", "upcoming"}
+
+
+def _followup_at_clause(bucket: Optional[str]) -> dict:
+    """IST calendar bounds for follow_up_at. Unknown bucket → all."""
+    key = (bucket or "all").strip().lower()
+    if key not in FOLLOWUP_BUCKETS:
+        key = "all"
+    clause: dict = {"$ne": None}
+    if key == "all":
+        return clause
+    today = ist_today()
+    lo, hi = date_bounds_iso(today, today)
+    if key == "overdue":
+        clause["$lt"] = lo
+    elif key == "today":
+        clause["$gte"] = lo
+        clause["$lte"] = hi
+    else:
+        clause["$gt"] = hi
+    return clause
+
+
 @router.get("/followups")
-async def followups(principal: dict = Depends(require("followups:view"))):
+async def followups(page: int = 1, page_size: int = 25, bucket: Optional[str] = None,
+                    principal: dict = Depends(require("followups:view"))):
+    page = max(1, page)
+    page_size = min(FOLLOWUP_PAGE_SIZE_MAX, max(1, page_size))
     q = {
         "companyId": COMPANY_ID,
-        "follow_up_at": {"$ne": None},
+        "follow_up_at": _followup_at_clause(bucket),
         "is_client": {"$ne": True},
         "status": {"$ne": "converted"},
         **await scope_filter(principal, "assigned_to"),
     }
-    leads = await db.leads.find(q, {"_id": 0}).sort("follow_up_at", 1).to_list(1000)
-    return {"followups": leads}
+    total = await db.leads.count_documents(q)
+    skip = (page - 1) * page_size
+    leads = await db.leads.find(q, {"_id": 0}).sort("follow_up_at", 1).skip(skip).limit(page_size).to_list(page_size)
+    return {"followups": leads, "total": total, "page": page, "page_size": page_size}
 
 
 class FollowupIn(BaseModel):

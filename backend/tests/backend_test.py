@@ -1,4 +1,5 @@
 """Backend API tests for Calling CRM (auth, RBAC, scopes, leads, calls, clients, ledger, reports, admin)."""
+import time
 import uuid
 import pytest
 import requests
@@ -128,6 +129,10 @@ class TestRBAC:
             r = admin.get(f"{BASE_URL}{path}", timeout=60)
             assert r.status_code == 200, f"{path} -> {r.status_code} {r.text[:200]}"
 
+    def test_affiliate_denied_followups(self, affiliate):
+        r = affiliate.get(f"{BASE_URL}/api/followups", timeout=30)
+        assert r.status_code == 403, r.text
+
 
 # ---------------- Data scope ----------------
 class TestDataScope:
@@ -171,6 +176,7 @@ class TestDataScope:
 # ---------------- Leads CRUD / import / assign ----------------
 class TestLeads:
     created = []
+    jobs = []
 
     def test_create_lead_normalizes_phone_and_dedup(self, admin):
         phone_local = "98" + uuid.uuid4().int.__str__()[:8]
@@ -223,6 +229,108 @@ class TestLeads:
         assert body["created"] == 1, body
         assert body["duplicates"] == 1, body
         assert body["invalid"] == 1, body
+        found = admin.get(f"{BASE_URL}/api/leads?search={p1}", timeout=30).json()
+        assert found["total"] == 1
+        TestLeads.created.append(found["leads"][0]["id"])
+
+    def test_import_job_forbidden_for_agent(self, agent):
+        csv_data = "name,phone,email,city,source\nAgent,9876543210,a@x.com,Mumbai,Import\n"
+        r = requests.post(
+            f"{BASE_URL}/api/leads/import-jobs",
+            files={"file": ("leads.csv", csv_data, "text/csv")},
+            headers={"Authorization": agent.headers["Authorization"]},
+            timeout=30,
+        )
+        assert r.status_code == 403, r.text
+
+    def test_import_job_rejects_empty_and_over_cap(self, admin):
+        token = admin.headers["Authorization"]
+        empty = requests.post(
+            f"{BASE_URL}/api/leads/import-jobs",
+            files={"file": ("leads.csv", "", "text/csv")},
+            headers={"Authorization": token},
+            timeout=30,
+        )
+        assert empty.status_code == 400, empty.text
+        assert "empty" in empty.json()["detail"].lower()
+
+        xls = requests.post(
+            f"{BASE_URL}/api/leads/import-jobs",
+            files={"file": ("leads.xlsx", b"not-csv", "application/octet-stream")},
+            headers={"Authorization": token},
+            timeout=30,
+        )
+        assert xls.status_code == 400, xls.text
+
+        oversized = "name,phone\n" + ("x,1\n" * 50001)
+        cap = requests.post(
+            f"{BASE_URL}/api/leads/import-jobs",
+            files={"file": ("leads.csv", oversized, "text/csv")},
+            headers={"Authorization": token},
+            timeout=60,
+        )
+        assert cap.status_code == 400, cap.text
+        assert "50000" in cap.json()["detail"]
+
+    def test_import_job_creates_and_error_csv_keeps_original_columns(self, admin):
+        p1 = "93" + uuid.uuid4().int.__str__()[:8]
+        csv_data = (
+            "name,phone,email,city,source,notes,campaign\n"
+            f"TEST_Job1,{p1},i1@x.com,Mumbai,Import,keep-me,spring\n"
+            f"TEST_Job2,{p1},i2@x.com,Mumbai,Import,dupe-row,spring\n"
+            ",1234,bad@x.com,,BadSource,invalid-row,spring\n"
+        )
+        token = admin.headers["Authorization"]
+        r = requests.post(
+            f"{BASE_URL}/api/leads/import-jobs",
+            files={"file": ("leads.csv", csv_data, "text/csv")},
+            headers={"Authorization": token},
+            timeout=30,
+        )
+        assert r.status_code == 202, r.text
+        job_id = r.json()["jobId"]
+        assert r.json()["status"] == "queued"
+        TestLeads.jobs.append(job_id)
+
+        body = None
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            status = admin.get(f"{BASE_URL}/api/leads/import-jobs/{job_id}", timeout=30)
+            assert status.status_code == 200, status.text
+            body = status.json()
+            if body["status"] in ("completed", "failed"):
+                break
+            time.sleep(0.2)
+        assert body is not None
+        assert body["status"] == "completed", body
+        assert body["progress"]["created"] == 1, body
+        assert body["progress"]["duplicates"] == 1, body
+        assert body["progress"]["invalid"] == 1, body
+        assert body["progress"]["successRows"] == 1, body
+        assert body["progress"]["failedRows"] == 2, body
+        assert body["errorCsvAvailable"] is True
+
+        events = requests.get(
+            f"{BASE_URL}/api/leads/import-jobs/{job_id}/events",
+            headers={"Authorization": token},
+            stream=True,
+            timeout=10,
+        )
+        assert events.status_code == 200, events.text
+        assert "text/event-stream" in events.headers.get("content-type", "")
+        events.close()
+
+        err = admin.get(f"{BASE_URL}/api/leads/import-jobs/{job_id}/errors.csv", timeout=30)
+        assert err.status_code == 200, err.text
+        text = err.text
+        header = text.splitlines()[0]
+        assert header == "name,phone,email,city,source,notes,campaign,error_reason"
+        assert "dupe-row" in text
+        assert "invalid-row" in text
+        assert "keep-me" not in text
+        assert "Duplicate phone" in text
+        assert "Name is required" in text
+
         found = admin.get(f"{BASE_URL}/api/leads?search={p1}", timeout=30).json()
         assert found["total"] == 1
         TestLeads.created.append(found["leads"][0]["id"])
@@ -439,6 +547,39 @@ class TestLeads:
         assert assigned.status_code == 200
         assert all(l["assigned_to"] is not None for l in assigned.json()["leads"])
 
+    def test_assigned_tab_agent_filter_not_overridden(self, admin, agent):
+        tag = uniq("TEST_AgFilter_")
+        callers = admin.get(f"{BASE_URL}/api/leads/assignable-callers", timeout=30).json()["users"]
+        others = [u for u in callers if u["id"] != agent.user["id"]]
+        assert others, "need a second caller to prove mixed assignees are excluded"
+        other_id = others[0]["id"]
+        agent_id = agent.user["id"]
+        for uid in (agent_id, other_id):
+            phone = "94" + uuid.uuid4().int.__str__()[:8]
+            lead = admin.post(
+                f"{BASE_URL}/api/leads",
+                json={"name": tag, "phone": phone, "source": "Manual"},
+                timeout=30,
+            ).json()["lead"]
+            TestLeads.created.append(lead["id"])
+            assigned = admin.post(
+                f"{BASE_URL}/api/leads/assign",
+                json={"lead_ids": [lead["id"]], "agent_id": uid},
+                timeout=30,
+            )
+            assert assigned.status_code == 200, assigned.text
+        r = admin.get(
+            f"{BASE_URL}/api/leads?assignment_status=assigned&assigned_to={agent_id}"
+            f"&search={tag}&page_size=20",
+            timeout=30,
+        )
+        assert r.status_code == 200, r.text
+        leads = r.json()["leads"]
+        assert leads, "expected the lead assigned to the filtered agent"
+        assert all(l["assigned_to"] == agent_id for l in leads)
+        assert all(l["name"] == tag for l in leads)
+        assert other_id not in {l["assigned_to"] for l in leads}
+
     def test_source_filter(self, admin):
         r = admin.get(f"{BASE_URL}/api/leads?source=Manual&page_size=5", timeout=30)
         assert r.status_code == 200
@@ -537,7 +678,12 @@ class TestLeads:
         assert set(body["board"].keys()) >= set(body["stages"])
         assert "counts" in body and body["total"] == sum(body["counts"].values())
         f = agent.get(f"{BASE_URL}/api/followups", timeout=60)
-        assert f.status_code == 200 and isinstance(f.json()["followups"], list)
+        assert f.status_code == 200
+        body = f.json()
+        assert isinstance(body["followups"], list)
+        assert isinstance(body.get("total"), int) and body["total"] >= 0
+        assert body.get("page") == 1 and body.get("page_size") == 25
+        assert len(body["followups"]) <= body["page_size"]
 
     def test_pipeline_source_filter(self, admin):
         p = "95" + uuid.uuid4().int.__str__()[:8]
@@ -582,12 +728,146 @@ class TestLeads:
         assert "activity" in body and isinstance(body["activity"], list)
         assert any(a.get("action") == "create" or a.get("entity") == "lead" for a in body["activity"]) or len(body["activity"]) >= 0
 
+    def _mk_followup_lead(self, admin, name, follow_up_at, agent_id=None):
+        phone = "94" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(
+            f"{BASE_URL}/api/leads",
+            json={"name": name, "phone": phone},
+            timeout=30,
+        ).json()["lead"]
+        TestLeads.created.append(lead["id"])
+        if agent_id:
+            assigned = admin.post(
+                f"{BASE_URL}/api/leads/assign",
+                json={"lead_ids": [lead["id"]], "agent_id": agent_id},
+                timeout=30,
+            )
+            assert assigned.status_code == 200, assigned.text
+        r = admin.put(
+            f"{BASE_URL}/api/followups/{lead['id']}",
+            json={"follow_up_at": follow_up_at},
+            timeout=30,
+        )
+        assert r.status_code == 200, r.text
+        return lead
+
+    def test_followups_pagination_count(self, admin):
+        before = admin.get(f"{BASE_URL}/api/followups?bucket=overdue&page_size=1", timeout=60)
+        assert before.status_code == 200, before.text
+        base = before.json()
+        assert base["page"] == 1 and base["page_size"] == 1
+        assert isinstance(base["total"], int)
+        base_total = base["total"]
+
+        a = self._mk_followup_lead(admin, "TEST_FU_PageA", "1968-04-11T01:00:00+00:00")
+        b = self._mk_followup_lead(admin, "TEST_FU_PageB", "1968-04-11T02:00:00+00:00")
+        c = self._mk_followup_lead(admin, "TEST_FU_PageC", "1968-04-11T03:00:00+00:00")
+
+        page1 = admin.get(
+            f"{BASE_URL}/api/followups?bucket=overdue&page=1&page_size=2", timeout=60,
+        ).json()
+        assert page1["page"] == 1 and page1["page_size"] == 2
+        assert page1["total"] == base_total + 3
+        assert len(page1["followups"]) == 2
+        first_ids = [l["id"] for l in page1["followups"]]
+        assert a["id"] in first_ids
+        assert b["id"] in first_ids
+        assert c["id"] not in first_ids
+
+        page2 = admin.get(
+            f"{BASE_URL}/api/followups?bucket=overdue&page=2&page_size=2", timeout=60,
+        ).json()
+        assert page2["page"] == 2 and page2["total"] == base_total + 3
+        assert len(page2["followups"]) <= 2
+        assert c["id"] in [l["id"] for l in page2["followups"]]
+
+    def test_followups_bucket_and_clamp(self, admin):
+        from datetime import datetime, timezone, timedelta
+
+        overdue = self._mk_followup_lead(admin, "TEST_FU_Overdue", "2000-03-01T10:00:00+00:00")
+        upcoming = self._mk_followup_lead(admin, "TEST_FU_Upcoming", "2099-12-01T10:00:00+00:00")
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).date()
+        today_iso = datetime(today.year, today.month, today.day, 12, 0, tzinfo=ist).astimezone(timezone.utc).isoformat()
+        due_today = self._mk_followup_lead(admin, "TEST_FU_Today", today_iso)
+
+        ov = admin.get(f"{BASE_URL}/api/followups?bucket=overdue&page_size=25", timeout=60).json()
+        ov_ids = [l["id"] for l in ov["followups"]]
+        assert overdue["id"] in ov_ids
+        assert upcoming["id"] not in ov_ids
+        assert due_today["id"] not in ov_ids
+
+        td = admin.get(f"{BASE_URL}/api/followups?bucket=today&page_size=100", timeout=60).json()
+        td_ids = [l["id"] for l in td["followups"]]
+        assert due_today["id"] in td_ids
+        assert overdue["id"] not in td_ids
+        assert upcoming["id"] not in td_ids
+
+        up = admin.get(f"{BASE_URL}/api/followups?bucket=upcoming&page_size=25", timeout=60).json()
+        assert overdue["id"] not in [l["id"] for l in up["followups"]]
+        last = max(1, (up["total"] + 24) // 25)
+        last_page = admin.get(
+            f"{BASE_URL}/api/followups?bucket=upcoming&page={last}&page_size=25",
+            timeout=60,
+        ).json()
+        assert upcoming["id"] in [l["id"] for l in last_page["followups"]]
+
+        clamped = admin.get(f"{BASE_URL}/api/followups?page_size=500", timeout=60).json()
+        assert clamped["page_size"] == 100
+        assert len(clamped["followups"]) <= 100
+
+        empty = admin.get(f"{BASE_URL}/api/followups?page=99999&page_size=25", timeout=60).json()
+        assert empty["followups"] == []
+        assert empty["page"] == 99999
+        assert empty["total"] >= 0
+
+        bogus = admin.get(f"{BASE_URL}/api/followups?bucket=nope&page_size=1", timeout=60).json()
+        all_r = admin.get(f"{BASE_URL}/api/followups?page_size=1", timeout=60).json()
+        assert bogus["total"] == all_r["total"]
+
+    def test_followups_own_scope_hides_other_assignee(self, admin, agent):
+        other = self._mk_followup_lead(admin, "TEST_FU_OtherAgent", "2000-04-01T10:00:00+00:00")
+        mine = self._mk_followup_lead(
+            admin, "TEST_FU_OwnAgent", "1999-06-01T10:00:00+00:00", agent_id=agent.user["id"],
+        )
+        scoped = agent.get(f"{BASE_URL}/api/followups?bucket=overdue&page_size=100", timeout=60).json()
+        ids = [l["id"] for l in scoped["followups"]]
+        assert mine["id"] in ids
+        assert other["id"] not in ids
+        assert all(l.get("assigned_to") == agent.user["id"] for l in scoped["followups"])
+
+    def test_followups_excludes_converted_client(self, admin):
+        lead = self._mk_followup_lead(admin, "TEST_FU_Converted", "2000-05-01T10:00:00+00:00")
+        r = admin.post(f"{BASE_URL}/api/clients/convert", json={"lead_id": lead["id"]}, timeout=30)
+        assert r.status_code == 200, r.text
+        listed = admin.get(f"{BASE_URL}/api/followups?bucket=overdue&page_size=25", timeout=60).json()
+        assert lead["id"] not in [l["id"] for l in listed["followups"]]
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is True
+        assert got.get("follow_up_at") in (None, "")
+
     @classmethod
     def teardown_class(cls):
         from conftest import client_for
         c = client_for("admin")
         for lid in cls.created:
             c.delete(f"{BASE_URL}/api/leads/{lid}", timeout=30)
+        if cls.jobs:
+            import asyncio
+            import os
+            from motor.motor_asyncio import AsyncIOMotorClient
+            from pathlib import Path
+            from dotenv import dotenv_values
+            env = dotenv_values(Path(__file__).resolve().parents[1] / ".env")
+            mongo = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+            dbname = os.environ.get("DB_NAME") or env.get("DB_NAME")
+
+            async def wipe():
+                client = AsyncIOMotorClient(mongo)
+                await client[dbname].lead_import_jobs.delete_many({"id": {"$in": cls.jobs}})
+                client.close()
+
+            asyncio.run(wipe())
 
 
 # ---------------- Dispositions ----------------
@@ -1013,8 +1293,6 @@ class TestTodayCallsACW:
             if st == "Won":
                 continue
             assert lead["id"] not in [l["id"] for l in items]
-        fus = admin.get(f"{BASE_URL}/api/followups", timeout=60).json()["followups"]
-        assert lead["id"] not in [l["id"] for l in fus]
         admin.delete(f"{BASE_URL}/api/dispositions/{disp['id']}", timeout=30)
 
     def test_log_call_clears_follow_up_when_blank(self, admin, agent):
@@ -1131,8 +1409,6 @@ class TestTodayCallsACW:
         got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
         assert got.get("follow_up_at") in (None, "")
         assert got.get("is_client") is True
-        fus = admin.get(f"{BASE_URL}/api/followups", timeout=60).json()["followups"]
-        assert lead["id"] not in [l["id"] for l in fus]
 
     def test_call_history_search_and_export(self, admin):
         h = admin.get(f"{BASE_URL}/api/call-history?page_size=5", timeout=60)

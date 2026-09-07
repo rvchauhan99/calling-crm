@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { useAuth } from "@/context/AuthContext"
 import api from "@/lib/api"
 import Leads from "@/pages/Leads"
@@ -14,6 +15,10 @@ jest.mock("@/components/ui/searchable-select", () => ({
 
 jest.mock("@/components/leads/AutoAssignDialog", () => ({
   AutoAssignDialog: () => null,
+}))
+
+jest.mock("@/components/leads/LeadImportDialog", () => ({
+  LeadImportDialog: ({ open }) => (open ? <div data-testid="lead-import-dialog" /> : null),
 }))
 
 jest.mock("@/components/leads/PhoneField", () => ({
@@ -162,5 +167,58 @@ describe("Leads role visibility", () => {
     expect(screen.getByTestId("lead-last-remarks-lead-1")).toHaveTextContent(
       "Interested in solar package",
     )
+  })
+
+  it("opens the import dialog from the listing Import CSV button", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:import",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("import-btn")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("lead-import-dialog")).not.toBeInTheDocument()
+
+    await userEvent.click(screen.getByTestId("import-btn"))
+    expect(screen.getByTestId("lead-import-dialog")).toBeInTheDocument()
+  })
+
+  it("sends assigned_to with assignment_status=assigned on the assigned tab", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+    __setMockSearchParams(new URLSearchParams("tab=assigned&assigned_to=agent-joslin"))
+
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/leads?")) {
+        return Promise.resolve({ data: mockLeadsResponse })
+      }
+      if (url === "/leads/tab-counts") {
+        return Promise.resolve({ data: { unassigned: 5, assigned: 10 } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { stages: ["New"], dispositions: [] } })
+      }
+      if (url === "/leads/assignable-callers") {
+        return Promise.resolve({ data: { users: [{ id: "agent-joslin", name: "Joslin" }] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      const leadsCall = api.get.mock.calls.find(([url]) => url.startsWith("/leads?"))
+      expect(leadsCall).toBeTruthy()
+      expect(leadsCall[0]).toContain("assigned_to=agent-joslin")
+      expect(leadsCall[0]).toContain("assignment_status=assigned")
+      expect(screen.getByText("Agent: Joslin")).toBeInTheDocument()
+    })
   })
 })
