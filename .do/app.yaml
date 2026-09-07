@@ -1,0 +1,32 @@
+name: calling-crm-api
+region: blr
+services:
+  - name: api
+    source_dir: backend
+    github:
+      repo: rvchauhan99/calling-crm
+      branch: main
+      deploy_on_push: true
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    run_command: python server.py
+    health_check:
+      http_path: /api/health
+      initial_delay_seconds: 20
+      period_seconds: 10
+      timeout_seconds: 5
+      failure_threshold: 12
+    envs:
+      - key: PORT
+        value: "8080"
+        scope: RUN_TIME
+      - key: COOKIE_SECURE
+        value: "true"
+        scope: RUN_TIME
+      - key: COMPANY_ID
+        value: "default"
+        scope: RUN_TIME
+      - key: FRONTEND_URL
+        value: "https://baazexcalling.vercel.app"
+        scope: RUN_TIME

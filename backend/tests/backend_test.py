@@ -20,6 +20,18 @@ class TestHealthAuth:
         assert r.status_code == 200
         assert r.json()["status"] == "ok"
 
+    def test_listen_port_app_platform(self, monkeypatch):
+        import sys
+        from pathlib import Path
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from bind_port import listen_port
+        monkeypatch.setenv("PORT", "8080")
+        assert listen_port() == 8080
+        monkeypatch.delenv("PORT", raising=False)
+        assert listen_port() == 8000
+        monkeypatch.setenv("PORT", "not-a-port")
+        assert listen_port() == 8000
+
     def test_admin_login_shape(self, anon):
         r = anon.post(f"{BASE_URL}/api/auth/login",
                       json={"email": CREDS["admin"][0], "password": CREDS["admin"][1]}, timeout=30)

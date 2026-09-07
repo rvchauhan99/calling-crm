@@ -16,6 +16,7 @@ import routes_sheet_sources
 from seed import seed
 from sheet_sync import sync_source
 from lead_import_jobs import start_lead_import_worker, stop_lead_import_worker
+from bind_port import listen_port
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -118,3 +119,10 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = listen_port()
+    logger.info("Listening on 0.0.0.0:%s", port)
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
