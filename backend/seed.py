@@ -15,15 +15,17 @@ MENU_CATALOG = [
     ("pipeline", "Pipeline", "Kanban", "/pipeline", "Sales", 5, ["view", "edit"]),
     ("followups", "Follow-ups", "CalendarCheck", "/followups", "Sales", 6, ["view", "edit"]),
     ("dispositions", "Responses", "ListChecks", "/dispositions", "Config", 7, ["view", "create", "edit", "delete"]),
-    ("sheet_sources", "Sheet Sources", "Table", "/sheet-sources", "Config", 8,
+    ("lead_sources", "Lead Sources", "ShareNetwork", "/lead-sources", "Config", 8,
+     ["view", "create", "edit", "delete"]),
+    ("sheet_sources", "Sheet Sources", "Table", "/sheet-sources", "Config", 9,
      ["view", "create", "edit", "delete", "sync"]),
-    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 9, ["view", "create", "edit", "convert"]),
-    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 10, ["view", "post", "reverse", "export"]),
-    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 11, ["view", "export"]),
-    ("users", "Users", "IdentificationBadge", "/users", "Admin", 12, ["view", "create", "edit", "delete"]),
-    ("teams", "Teams", "UsersThree", "/teams", "Admin", 13, ["view", "create", "edit", "delete"]),
-    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 14, ["view", "create", "edit", "delete"]),
-    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 15, ["view"]),
+    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 10, ["view", "create", "edit", "convert"]),
+    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 11, ["view", "post", "reverse", "export"]),
+    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 12, ["view", "export"]),
+    ("users", "Users", "IdentificationBadge", "/users", "Admin", 13, ["view", "create", "edit", "delete"]),
+    ("teams", "Teams", "UsersThree", "/teams", "Admin", 14, ["view", "create", "edit", "delete"]),
+    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 15, ["view", "create", "edit", "delete"]),
+    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 16, ["view"]),
 ]
 
 
@@ -57,11 +59,13 @@ ROLE_DEFS = {
             "dashboard": ["view"], "leads": ["view", "edit", "assign", "export"],
             "today_calls": ["view", "log"], "call_history": ["view", "export"],
             "pipeline": ["view", "edit"], "followups": ["view", "edit"],
-            "dispositions": ["view"], "clients": ["view", "convert"],
+            "dispositions": ["view"], "lead_sources": ["view"],
+            "clients": ["view", "convert"],
             "ledger": ["view"], "reports": ["view", "export"], "teams": ["view"],
         }),
         "menus": ["dashboard", "leads", "today_calls", "call_history", "pipeline",
-                  "followups", "dispositions", "clients", "ledger", "reports", "teams"],
+                  "followups", "dispositions", "lead_sources", "clients", "ledger",
+                  "reports", "teams"],
     },
     "Agent": {
         "description": "Caller. Works own assigned leads via Today Calls.",
@@ -173,6 +177,8 @@ async def ensure_indexes():
     )
     await db.sheet_sources.create_index([("companyId", 1), ("id", 1)], unique=True)
     await db.sheet_sync_runs.create_index([("companyId", 1), ("sheet_source_id", 1), ("created_at", -1)])
+    from lead_sources import ensure_lead_source_indexes
+    await ensure_lead_source_indexes()
     await db.ledger.create_index("idempotency_key", unique=True, sparse=True)
     await db.ledger.create_index([("client_id", 1), ("created_at", 1)])
     await db.calls.create_index("agent_id")
@@ -294,6 +300,8 @@ async def seed_sample_sheet_source():
 
 async def seed():
     await ensure_indexes()
+    from lead_sources import ensure_lead_sources
+    await ensure_lead_sources()
 
     # Menus
     for key, label, icon, path, group, order, actions in MENU_CATALOG:

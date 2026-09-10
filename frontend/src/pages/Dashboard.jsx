@@ -18,8 +18,10 @@ import {
   CartesianGrid, Tooltip, ResponsiveContainer, Legend, AreaChart, Area,
 } from "recharts"
 
+const DEFAULT_PRESET = "today"
+
 const defaultFilters = () => ({
-  from: monthStartISO(),
+  from: todayISO(),
   to: todayISO(),
   status: "",
   source: "",
@@ -63,7 +65,7 @@ export default function Dashboard() {
   const isOwnScope = dataScope === "OWN"
 
   const [filters, setFilters] = useState(() => filtersFromParams(params))
-  const [activePreset, setActivePreset] = useState(() => params.get("preset") || "month")
+  const [activePreset, setActivePreset] = useState(() => params.get("preset") || DEFAULT_PRESET)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [options, setOptions] = useState(null)
   const [data, setData] = useState(null)
@@ -75,8 +77,8 @@ export default function Dashboard() {
     const d = defaultFilters()
     Object.entries(next).forEach(([k, v]) => {
       if (!v) return
-      if (k === "from" && v === d.from && (presetId === "month" || !presetId)) return
-      if (k === "to" && v === d.to && (presetId === "month" || !presetId)) {
+      if (k === "from" && v === d.from && (presetId === DEFAULT_PRESET || !presetId)) return
+      if (k === "to" && v === d.to && (presetId === DEFAULT_PRESET || !presetId)) {
         // still write dates when non-default preset or other filters active
       }
       p.set(k, v)
@@ -121,7 +123,7 @@ export default function Dashboard() {
   useEffect(() => {
     const initial = filtersFromParams(params)
     setFilters(initial)
-    setActivePreset(params.get("preset") || "month")
+    setActivePreset(params.get("preset") || DEFAULT_PRESET)
     loadSummary(initial).catch(() => {})
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -150,8 +152,8 @@ export default function Dashboard() {
   const handleReset = () => {
     const next = defaultFilters()
     setFilters(next)
-    setActivePreset("month")
-    syncUrl(next, "month")
+    setActivePreset(DEFAULT_PRESET)
+    syncUrl(next, DEFAULT_PRESET)
     loadSummary(next)
   }
 
@@ -183,9 +185,9 @@ export default function Dashboard() {
     let next = { ...filters }
     let preset = activePreset
     if (key === "date") {
-      next = { ...next, from: monthStartISO(), to: todayISO() }
-      preset = "month"
-      setActivePreset("month")
+      next = { ...next, from: todayISO(), to: todayISO() }
+      preset = DEFAULT_PRESET
+      setActivePreset(DEFAULT_PRESET)
     } else {
       next = { ...next, [key]: "" }
     }

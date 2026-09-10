@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from core import COMPANY_ID, audit, db, new_id, now_iso, require
-from lead_constants import LEAD_SOURCES
+from lead_sources import is_allowed_source
 from sheet_sync import (
     DEFAULT_POLL_SECONDS,
     MIN_POLL_SECONDS,
@@ -54,7 +54,7 @@ class PreviewDraftIn(BaseModel):
     csv_text: Optional[str] = None
 
 
-def _validate_body(body: SheetSourceIn) -> dict:
+async def _validate_body(body: SheetSourceIn) -> dict:
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
@@ -66,7 +66,7 @@ def _validate_body(body: SheetSourceIn) -> dict:
     if preset not in ("meta_lead_ads", "generic"):
         raise HTTPException(status_code=400, detail="Invalid preset")
     lead_source = (body.source or "Facebook Ads").strip()
-    if lead_source not in LEAD_SOURCES:
+    if not await is_allowed_source(lead_source, allow_non_creatable=True):
         raise HTTPException(status_code=400, detail="Invalid source")
     poll = int(body.poll_seconds or DEFAULT_POLL_SECONDS)
     if poll < MIN_POLL_SECONDS:
@@ -105,7 +105,7 @@ async def create_sheet_source(
     body: SheetSourceIn,
     principal: dict = Depends(require("sheet_sources:create")),
 ):
-    data = _validate_body(body)
+    data = await _validate_body(body)
     sid = new_id()
     doc = {
         "id": sid,
@@ -186,7 +186,7 @@ async def update_sheet_source(
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Sheet source not found")
-    data = _validate_body(body)
+    data = await _validate_body(body)
     data["updated_at"] = now_iso()
     await db.sheet_sources.update_one(
         {"id": sid, "companyId": COMPANY_ID}, {"$set": data}

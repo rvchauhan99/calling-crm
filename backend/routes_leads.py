@@ -13,7 +13,12 @@ from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit)
-from lead_constants import LEAD_SOURCES, LEAD_SOURCES_CREATABLE
+from lead_sources import (
+    list_lead_sources,
+    source_names,
+    is_allowed_source,
+    find_source_by_name,
+)
 from datetime import datetime, timedelta, timezone, time
 from routes_reports import IST, ist_today, ist_date, parse_date, date_bounds_iso
 
@@ -91,6 +96,90 @@ async def delete_disposition(did: str, principal: dict = Depends(require("dispos
     return {"ok": True}
 
 
+# ---------------- Lead sources ----------------
+class LeadSourceIn(BaseModel):
+    name: str
+    order: int = 1
+    active: bool = True
+    creatable: bool = True
+
+
+@router.get("/lead-sources")
+async def get_lead_sources(principal: dict = Depends(get_principal)):
+    docs = await list_lead_sources()
+    return {"lead_sources": docs}
+
+
+@router.post("/lead-sources")
+async def create_lead_source(body: LeadSourceIn, principal: dict = Depends(require("lead_sources:create"))):
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    existing = await find_source_by_name(name)
+    if existing:
+        raise HTTPException(status_code=400, detail="Lead source already exists")
+    sid = new_id()
+    doc = {
+        "id": sid,
+        "companyId": COMPANY_ID,
+        "name": name,
+        "order": int(body.order or 1),
+        "active": bool(body.active),
+        "creatable": bool(body.creatable),
+        "is_system": False,
+        "created_at": now_iso(),
+    }
+    await db.lead_sources.insert_one(dict(doc))
+    await audit(principal, "create", "lead_source", sid, {"name": name})
+    return {"lead_source": doc}
+
+
+@router.put("/lead-sources/{sid}")
+async def update_lead_source(sid: str, body: LeadSourceIn, principal: dict = Depends(require("lead_sources:edit"))):
+    current = await db.lead_sources.find_one({"id": sid, "companyId": COMPANY_ID}, {"_id": 0})
+    if not current:
+        raise HTTPException(status_code=404, detail="Not found")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name is required")
+    dup = await db.lead_sources.find_one(
+        {"companyId": COMPANY_ID, "name": name, "id": {"$ne": sid}},
+        {"_id": 1},
+    )
+    if dup:
+        raise HTTPException(status_code=400, detail="Lead source already exists")
+    fields = {
+        "name": name,
+        "order": int(body.order or 1),
+        "active": bool(body.active),
+    }
+    # System Import stays non-creatable; other rows may toggle creatable
+    if current.get("is_system") and current.get("name") == "Import":
+        fields["creatable"] = False
+    else:
+        fields["creatable"] = bool(body.creatable)
+    res = await db.lead_sources.update_one(
+        {"id": sid, "companyId": COMPANY_ID},
+        {"$set": fields},
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    await audit(principal, "update", "lead_source", sid)
+    return {"ok": True}
+
+
+@router.delete("/lead-sources/{sid}")
+async def delete_lead_source(sid: str, principal: dict = Depends(require("lead_sources:delete"))):
+    current = await db.lead_sources.find_one({"id": sid, "companyId": COMPANY_ID}, {"_id": 0})
+    if not current:
+        raise HTTPException(status_code=404, detail="Not found")
+    if current.get("is_system"):
+        raise HTTPException(status_code=400, detail="System lead sources cannot be deleted")
+    await db.lead_sources.delete_one({"id": sid, "companyId": COMPANY_ID})
+    await audit(principal, "delete", "lead_source", sid)
+    return {"ok": True}
+
+
 # ---------------- Leads ----------------
 class LeadIn(BaseModel):
     name: str
@@ -132,15 +221,14 @@ CSV_TEMPLATE = "name,phone,email,city,source\n" + "\n".join(
 ) + "\n"
 
 
-def _validate_lead_source(source: str, *, allow_import: bool = False) -> str:
-    allowed = LEAD_SOURCES if allow_import else LEAD_SOURCES_CREATABLE
+async def _validate_lead_source(source: str, *, allow_import: bool = False) -> str:
     s = (source or "Manual").strip()
-    if s not in allowed:
+    if not await is_allowed_source(s, allow_non_creatable=allow_import):
         raise HTTPException(status_code=400, detail="Invalid source")
     return s
 
 
-def _parse_lead_input(body: LeadIn, *, allow_import_source: bool = False) -> dict:
+async def _parse_lead_input(body: LeadIn, *, allow_import_source: bool = False) -> dict:
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
@@ -152,7 +240,7 @@ def _parse_lead_input(body: LeadIn, *, allow_import_source: bool = False) -> dic
         email = validate_email_optional(body.email)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    source = _validate_lead_source(body.source, allow_import=allow_import_source)
+    source = await _validate_lead_source(body.source, allow_import=allow_import_source)
     return {"name": name, "phone": phone, "email": email, "source": source, "city": (body.city or "").strip()}
 
 
@@ -306,7 +394,7 @@ async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
 
 @router.post("/leads")
 async def create_lead(body: LeadIn, principal: dict = Depends(require("leads:create"))):
-    parsed = _parse_lead_input(body)
+    parsed = await _parse_lead_input(body)
     if await db.leads.find_one({"companyId": COMPANY_ID, "phone": parsed["phone"]}):
         raise HTTPException(status_code=400, detail="A lead with this phone already exists")
     assigned = body.assigned_to
@@ -364,10 +452,12 @@ async def leads_filter_options(principal: dict = Depends(require("leads:view")))
     dispositions = await db.dispositions.find(
         {"companyId": COMPANY_ID, "active": True}, {"_id": 0, "id": 1, "name": 1}
     ).sort("order", 1).to_list(100)
+    sources = await source_names(active_only=True, creatable_only=False)
+    sources_creatable = await source_names(active_only=True, creatable_only=True)
     return {
         "stages": PIPELINE_STAGES,
-        "sources": LEAD_SOURCES,
-        "sources_creatable": LEAD_SOURCES_CREATABLE,
+        "sources": sources,
+        "sources_creatable": sources_creatable,
         "dispositions": dispositions,
     }
 
@@ -450,7 +540,7 @@ async def lead_360(lid: str, principal: dict = Depends(require("leads:view"))):
 
 @router.put("/leads/{lid}")
 async def update_lead(lid: str, body: LeadIn, principal: dict = Depends(require("leads:edit"))):
-    parsed = _parse_lead_input(body)
+    parsed = await _parse_lead_input(body)
     dup = await db.leads.find_one(
         {"companyId": COMPANY_ID, "phone": parsed["phone"], "id": {"$ne": lid}})
     if dup:

@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc)
-from lead_constants import LEAD_SOURCES
+from lead_sources import source_names
+from caller_sales import sales_disp_counts
 
 router = APIRouter(prefix="/api", tags=["reports"])
 
@@ -91,7 +92,7 @@ async def dashboard_filter_options(principal: dict = Depends(require("dashboard:
         agents = await db.users.find(q, {"_id": 0, "id": 1, "name": 1}).to_list(500)
     return {
         "stages": PIPELINE_STAGES,
-        "sources": LEAD_SOURCES,
+        "sources": await source_names(active_only=True, creatable_only=False),
         "dispositions": dispositions,
         "agents": agents,
         "statuses": ["active", "inactive", "converted"],
@@ -516,13 +517,22 @@ async def caller_report(
             if c.get("disposition_name") == "Converted"
             or (c.get("disposition_name") and disp_meta.get(c["disposition_name"], {}).get("converts_to_client"))
         )
+        sales = sales_disp_counts(disp_counts)
+        interested = sales["interested"]
+        registered = sales["registered"]
+        deposite = sales["deposite"]
+        conversion_ratio = round((deposite / calls * 100) if calls else 0, 1)
         lq = {"companyId": COMPANY_ID, "assigned_to": a["id"], **date_q}
         leads = await db.leads.count_documents(lq)
         converted = await db.leads.count_documents({**lq, "is_client": True})
         rows.append({
             "agent_id": a["id"],
             "name": a["name"],
+            "interested": interested,
+            "registered": registered,
+            "deposite": deposite,
             "calls": calls,
+            "conversion_ratio": conversion_ratio,
             "connected": connected,
             "connect_rate": round((connected / calls * 100) if calls else 0, 1),
             "leads": leads,
@@ -537,12 +547,16 @@ async def caller_report(
     if principal.get("data_scope") != "ALL" and "agent_id" in scope:
         allowed = scope["agent_id"].get("$in") if isinstance(scope["agent_id"], dict) else [scope["agent_id"]]
         rows = [r for r in rows if r["agent_id"] in allowed]
-    rows.sort(key=lambda x: (-x["conversions"], -x["calls"], -x["leads"]))
+    rows.sort(key=lambda x: (-x["deposite"], -x["calls"], -x["interested"]))
     total_calls = sum(r["calls"] for r in rows)
     total_connected = sum(r["connected"] for r in rows)
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
     total_converted_responses = sum(r["converted_responses"] for r in rows)
+    total_interested = sum(r["interested"] for r in rows)
+    total_registered = sum(r["registered"] for r in rows)
+    total_deposite = sum(r["deposite"] for r in rows)
+    conversion_ratio = round((total_deposite / total_calls * 100) if total_calls else 0, 1)
     # Company-level disposition mix for caller report
     all_disp = {}
     for r in rows:
@@ -554,6 +568,10 @@ async def caller_report(
     ]
     summary = {
         "total_calls": total_calls,
+        "total_interested": total_interested,
+        "total_registered": total_registered,
+        "total_deposite": total_deposite,
+        "conversion_ratio": conversion_ratio,
         "total_connected": total_connected,
         "connect_rate": round((total_connected / total_calls * 100) if total_calls else 0, 1),
         "total_leads": total_leads,
@@ -744,8 +762,7 @@ async def export_report(
         ))["rows"]
         return _csv_response(
             data,
-            ["name", "calls", "connected", "connect_rate", "leads", "conversions",
-             "conversion_rate", "top_disposition", "converted_responses"],
+            ["name", "interested", "registered", "deposite", "calls", "conversion_ratio"],
             "caller_report.csv",
         )
     if kind == "affiliate":

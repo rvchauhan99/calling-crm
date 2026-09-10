@@ -963,6 +963,74 @@ class TestDispositions:
         assert cb[0].get("default_pipeline_stage") == "Contacted"
 
 
+# ---------------- Lead sources master ----------------
+class TestLeadSources:
+    def test_seeded_defaults(self, admin):
+        r = admin.get(f"{BASE_URL}/api/lead-sources", timeout=30)
+        assert r.status_code == 200, r.text
+        rows = r.json()["lead_sources"]
+        names = [x["name"] for x in rows]
+        for expected in (
+            "Website", "Facebook Ads", "Google Ads", "Referral",
+            "Cold List", "Webinar", "Manual", "Import",
+        ):
+            assert expected in names
+        manual = next(x for x in rows if x["name"] == "Manual")
+        imp = next(x for x in rows if x["name"] == "Import")
+        assert manual.get("is_system") is True
+        assert imp.get("is_system") is True
+        assert imp.get("creatable") is False
+
+    def test_crud(self, admin, agent):
+        name = uniq("TEST_Src_")
+        r = admin.post(f"{BASE_URL}/api/lead-sources", json={
+            "name": name, "order": 20, "active": True, "creatable": True}, timeout=30)
+        assert r.status_code == 200, r.text
+        row = r.json()["lead_source"]
+        assert row["name"] == name
+        lst = admin.get(f"{BASE_URL}/api/lead-sources", timeout=30).json()["lead_sources"]
+        assert any(x["id"] == row["id"] for x in lst)
+        u = admin.put(f"{BASE_URL}/api/lead-sources/{row['id']}", json={
+            "name": name + "_Upd", "order": 21, "active": True, "creatable": True}, timeout=30)
+        assert u.status_code == 200
+        lst = admin.get(f"{BASE_URL}/api/lead-sources", timeout=30).json()["lead_sources"]
+        upd = next(x for x in lst if x["id"] == row["id"])
+        assert upd["name"] == name + "_Upd"
+        assert agent.post(f"{BASE_URL}/api/lead-sources", json={"name": "x"}, timeout=30).status_code == 403
+        assert admin.delete(f"{BASE_URL}/api/lead-sources/{row['id']}", timeout=30).status_code == 200
+        lst = admin.get(f"{BASE_URL}/api/lead-sources", timeout=30).json()["lead_sources"]
+        assert not any(x["id"] == row["id"] for x in lst)
+
+    def test_reject_delete_system(self, admin):
+        rows = admin.get(f"{BASE_URL}/api/lead-sources", timeout=30).json()["lead_sources"]
+        system = next(x for x in rows if x.get("is_system"))
+        r = admin.delete(f"{BASE_URL}/api/lead-sources/{system['id']}", timeout=30)
+        assert r.status_code == 400
+        assert "System" in r.json()["detail"]
+
+    def test_duplicate_name(self, admin):
+        r = admin.post(f"{BASE_URL}/api/lead-sources", json={
+            "name": "Website", "order": 1, "active": True, "creatable": True}, timeout=30)
+        assert r.status_code == 400
+
+    def test_create_lead_rejects_unknown_source(self, admin):
+        phone_local = "97" + uuid.uuid4().int.__str__()[:8]
+        r = admin.post(f"{BASE_URL}/api/leads",
+                       json={"name": "Bad Src", "phone": phone_local, "source": "NotARealSource"},
+                       timeout=30)
+        assert r.status_code == 400
+        assert "Invalid source" in r.json()["detail"]
+
+    def test_filter_options_from_db(self, admin):
+        r = admin.get(f"{BASE_URL}/api/leads/filter-options", timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "Manual" in body["sources"]
+        assert "Import" in body["sources"]
+        assert "Import" not in body["sources_creatable"]
+        assert "Manual" in body["sources_creatable"]
+
+
 # ---------------- Today calls + ACW gate ----------------
 class TestTodayCallsACW:
     created = []
@@ -1700,13 +1768,25 @@ class TestReports:
         assert r.status_code == 200
         body = r.json()
         s = body["summary"]
-        for key in ["total_calls", "total_connected", "connect_rate",
+        for key in ["total_calls", "total_interested", "total_registered", "total_deposite",
+                    "conversion_ratio", "total_connected", "connect_rate",
                     "total_leads", "total_conversions", "conversion_rate",
                     "responses_logged", "converted_responses", "converted_response_share"]:
             assert key in s, key
+        assert all("interested" in row for row in body["rows"])
+        assert all("registered" in row for row in body["rows"])
+        assert all("deposite" in row for row in body["rows"])
+        assert all("conversion_ratio" in row for row in body["rows"])
         assert all("connect_rate" in row for row in body["rows"])
         assert all("top_disposition" in row for row in body["rows"])
         assert all("converted_responses" in row for row in body["rows"])
+        for row in body["rows"]:
+            expected = round((row["deposite"] / row["calls"] * 100) if row["calls"] else 0, 1)
+            assert row["conversion_ratio"] == expected
+        expected_summary = round(
+            (s["total_deposite"] / s["total_calls"] * 100) if s["total_calls"] else 0, 1
+        )
+        assert s["conversion_ratio"] == expected_summary
         assert "disposition_breakdown" in body
         assert isinstance(body["disposition_breakdown"], list)
 
@@ -1748,7 +1828,7 @@ class TestReports:
         assert r.status_code == 403
 
     def test_reports_export(self, admin):
-        for kind, header in [("caller", "name,calls"), ("affiliate", "name,clients"),
+        for kind, header in [("caller", "name,interested"), ("affiliate", "name,clients"),
                              ("company", "source,leads")]:
             r = admin.get(
                 f"{BASE_URL}/api/reports/export?kind={kind}&from=2020-01-01&to=2099-12-31",
@@ -1759,7 +1839,8 @@ class TestReports:
         caller_csv = admin.get(
             f"{BASE_URL}/api/reports/export?kind=caller", timeout=120
         ).text.splitlines()[0]
-        assert "connect_rate" in caller_csv
+        assert "conversion_ratio" in caller_csv
+        assert "deposite" in caller_csv
         aff_csv = admin.get(
             f"{BASE_URL}/api/reports/export?kind=affiliate", timeout=120
         ).text.splitlines()[0]

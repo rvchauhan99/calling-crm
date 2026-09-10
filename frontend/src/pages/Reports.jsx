@@ -29,7 +29,7 @@ const PRESETS = [
 ]
 
 const INITIAL_FILTERS = {
-  from: monthStartISO(),
+  from: todayISO(),
   to: todayISO(),
   assigned_to: "",
   source: "",
@@ -43,7 +43,7 @@ export default function Reports() {
 
   const [tab, setTab] = useState(defaultTab)
   const [filters, setFilters] = useState(INITIAL_FILTERS)
-  const [activePreset, setActivePreset] = useState("month")
+  const [activePreset, setActivePreset] = useState("today")
   const [agents, setAgents] = useState([])
   const [sources, setSources] = useState([])
   const [payload, setPayload] = useState(null)
@@ -94,7 +94,7 @@ export default function Reports() {
 
   const handleReset = () => {
     setFilters(INITIAL_FILTERS)
-    setActivePreset("month")
+    setActivePreset("today")
     load(tab, INITIAL_FILTERS)
   }
 
@@ -138,8 +138,8 @@ export default function Reports() {
   const removeChip = (key) => {
     let next = { ...filters }
     if (key === "date") {
-      next = { ...next, from: monthStartISO(), to: todayISO() }
-      setActivePreset("month")
+      next = { ...next, from: todayISO(), to: todayISO() }
+      setActivePreset("today")
     } else {
       next = { ...next, [key]: "" }
     }
@@ -259,11 +259,12 @@ export default function Reports() {
         ) : (
           <>
             <TabsContent value="caller" className="mt-3 space-y-3">
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="caller-kpis">
-                <KpiCard testId="kpi-calls" label="Calls" value={summary.total_calls ?? 0} hint={`${summary.total_connected ?? 0} connected`} />
-                <KpiCard testId="kpi-connect" label="Connect rate" value={`${summary.connect_rate ?? 0}%`} accent="blue" />
-                <KpiCard testId="kpi-converted-resp" label="Converted responses" value={summary.converted_responses ?? 0} hint={`${summary.converted_response_share ?? 0}% of calls`} accent="amber" />
-                <KpiCard testId="kpi-conv" label="Conversion" value={`${summary.conversion_rate ?? 0}%`} hint={`${summary.total_conversions ?? 0} converted`} />
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-5" data-testid="caller-kpis">
+                <KpiCard testId="kpi-calls" label="Total Calls" value={summary.total_calls ?? 0} />
+                <KpiCard testId="kpi-interested" label="Interested" value={summary.total_interested ?? 0} accent="blue" />
+                <KpiCard testId="kpi-registered" label="Registered" value={summary.total_registered ?? 0} />
+                <KpiCard testId="kpi-deposite" label="Deposite" value={summary.total_deposite ?? 0} accent="amber" />
+                <KpiCard testId="kpi-conv" label="Conv %" value={`${summary.conversion_ratio ?? 0}%`} hint="Deposite ÷ calls" />
               </div>
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                 <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm" data-testid="caller-responses-panel">
@@ -284,19 +285,19 @@ export default function Reports() {
                     )}
                   </div>
                 </div>
-                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-                  <PanelHeader title="Connect rate by agent" />
+                <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm" data-testid="caller-conversion-panel">
+                  <PanelHeader title="Conversion by agent" hint="Deposite ÷ Total Calls" />
                   <div className="h-56">
                     {rows.length === 0 ? (
                       <EmptyChart />
                     ) : (
                       <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={[...rows].sort((a, b) => b.connect_rate - a.connect_rate).slice(0, 8)} layout="vertical">
+                        <BarChart data={[...rows].sort((a, b) => (b.conversion_ratio || 0) - (a.conversion_ratio || 0)).slice(0, 8)} layout="vertical">
                           <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
                           <XAxis type="number" domain={[0, 100]} stroke="#94a3b8" fontSize={11} tickLine={false} />
                           <YAxis type="category" dataKey="name" width={80} stroke="#94a3b8" fontSize={10} tickLine={false} />
                           <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e2e8f0", fontSize: 12 }} />
-                          <Bar dataKey="connect_rate" name="Connect %" fill="#38BDF8" radius={[0, 4, 4, 0]} />
+                          <Bar dataKey="conversion_ratio" name="Conv %" fill="#38BDF8" radius={[0, 4, 4, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
                     )}
@@ -308,16 +309,22 @@ export default function Reports() {
                 testid="caller-table"
                 onRowClick={() => navigate("/leads?tab=assigned")}
                 cols={[
-                  ["name", "Caller"],
-                  ["calls", "Calls"],
-                  ["connected", "Connected"],
-                  ["connect_rate", "Connect %"],
-                  ["top_disposition", "Top response"],
-                  ["converted_responses", "Conv. responses"],
-                  ["conversions", "Conversions"],
-                  ["conversion_rate", "Conv %"],
+                  ["name", "Agent"],
+                  ["interested", "Interested"],
+                  ["registered", "Registered"],
+                  ["deposite", "Deposite"],
+                  ["calls", "Total Calls"],
+                  ["conversion_ratio", "conversionRatios"],
                 ]}
-                rateKeys={["connect_rate", "conversion_rate"]}
+                rateKeys={["conversion_ratio"]}
+                totals={{
+                  name: "TOTAL",
+                  interested: summary.total_interested ?? 0,
+                  registered: summary.total_registered ?? 0,
+                  deposite: summary.total_deposite ?? 0,
+                  calls: summary.total_calls ?? 0,
+                  conversion_ratio: summary.conversion_ratio ?? 0,
+                }}
               />
             </TabsContent>
 
@@ -448,13 +455,15 @@ function EmptyChart() {
   return <div className="flex h-full items-center justify-center text-sm text-slate-400">No data in range</div>
 }
 
-function ReportTable({ rows, cols, money = [], rateKeys = [], testid, onRowClick }) {
+function ReportTable({ rows, cols, money = [], rateKeys = [], testid, onRowClick, totals }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white shadow-sm" data-testid={testid}>
       <Table>
         <TableHeader>
-          <TableRow className="bg-slate-50">
-            {cols.map(([k, l]) => <TableHead key={k}>{l}</TableHead>)}
+          <TableRow className="bg-sky-50">
+            {cols.map(([k, l]) => (
+              <TableHead key={k} data-testid={`${testid}-head-${k}`}>{l}</TableHead>
+            ))}
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -481,6 +490,19 @@ function ReportTable({ rows, cols, money = [], rateKeys = [], testid, onRowClick
               ))}
             </TableRow>
           ))}
+          {totals && rows.length > 0 && (
+            <TableRow className="bg-slate-50 font-semibold" data-testid={`${testid}-totals`}>
+              {cols.map(([k]) => (
+                <TableCell key={k} className={k === cols[0][0] ? "font-semibold text-slate-900" : "tabular text-slate-800"}>
+                  {rateKeys.includes(k) ? (
+                    <StatusPill color="sky">{totals[k]}%</StatusPill>
+                  ) : (
+                    totals[k]
+                  )}
+                </TableCell>
+              ))}
+            </TableRow>
+          )}
         </TableBody>
       </Table>
     </div>

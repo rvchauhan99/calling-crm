@@ -1,5 +1,5 @@
 ---
-description: Strict verification and testing required before any task is marked complete
+description: Strict verification — local pytest required; start services; browser mandatory for UI
 alwaysApply: true
 ---
 
@@ -13,28 +13,34 @@ A task is **not complete** until all five steps pass:
 4. **Verify** — run commands below; all must pass
 5. **Report** — include a **Verification** section: commands run, pass/fail counts, gaps
 
-Never skip verification because the server "might not be running" — start services or fix the blocker and retry.
+Never skip verification because the server “might not be running” — **start services**, fix blockers, and retry.
+
+## Local Mongo pytest — always run
+
+When backend `.env` points at **local** Mongo, **run pytest without asking** (see `no-data-without-permission`).
+
+Do not report “pytest waiting on permission” for local DB.
 
 ## Verification by change type
 
 | Change | Required |
 |--------|----------|
 | `backend/**/*.py` | Add/update pytest in `backend/tests/`; run targeted then full suite |
-| `frontend/src/**` | Add RTL test under `frontend/src/__tests__/` (use `data-testid`); run `yarn build` + `CI=true yarn test --watchAll=false` |
-| Backend + frontend | Both above; integration tests covering the API contract |
+| `frontend/src/**` | Add RTL test under `frontend/src/__tests__/` (use `data-testid`); run `yarn build` + `CI=true yarn test --watchAll=false`; **plus browser verification** |
+| Backend + frontend | Both above; integration tests covering the API contract; **browser** for UI surfaces |
 | Docs-only | No tests; run build if code paths referenced |
 | Config / deploy | Smoke-test `GET /api/health` |
 
 ## Commands
 
-**Backend** (Mongo + API must be running):
+**Backend** (Mongo + API must be running — start them if needed):
 
 ```bash
 cd backend && source .venv/bin/activate
-# separate terminal: uvicorn server:app --reload --host 0.0.0.0 --port 8000
+# separate terminal: npm run dev   # or uvicorn server:app --reload --host 0.0.0.0 --port 8000
 export REACT_APP_BACKEND_URL=http://localhost:8000
-pytest tests/backend_test.py -v --tb=short   # module under change
-pytest -q                                      # full suite before done
+pytest tests/backend_test.py -v --tb=short
+pytest -q
 ```
 
 **Frontend**:
@@ -44,7 +50,7 @@ cd frontend && yarn build
 CI=true yarn test --watchAll=false
 ```
 
-Remove `--passWithNoTests` once frontend tests exist. New UI work **must** include at least one RTL test.
+**Browser** (UI changes — non-negotiable): start frontend + API if down, then use browser-mcp (or cursor-ide-browser). See user rule `browser-testing-after-tasks`.
 
 ## Test quality bar
 
@@ -56,11 +62,10 @@ Every new test suite or test case must cover:
 - **Regression anchor** — assert specific fields/status codes, not just `200 OK`
 - **Cleanup** — follow `TestLeads.created` teardown pattern for mutating tests
 
-Reference: `backend/tests/backend_test.py` (`test_assignment_status_filter`, `test_auto_assign_max_leads_cap`, `test_import_template`).
-
 ## Agent enforcement
 
 - Do **not** mark todos complete or say "done" until verify passes
 - Tests fail → fix and re-run; never hand off broken state
 - Zero test coverage on new behavior → write tests **in the same task**
-- Final response **must** include a **Verification** section
+- Final response **must** include **Verification** (and **Browser verification** when UI changed)
+- “Servers not up” is **not** a valid skip — start them and continue

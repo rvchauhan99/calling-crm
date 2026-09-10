@@ -1,41 +1,50 @@
 ---
-description: Never write database or dummy test data without an explicit yes from the user
+description: Data-write gates — local Mongo pytest/verify allowed; ask only for remote/Atlas or bulk seed
 alwaysApply: true
 ---
 
-# Ask before any data write — Calling CRM
+# Data writes — Calling CRM
 
-Do **not** insert, update, delete, seed, import, or create dummy/test records unless the user has **explicitly said yes** in this conversation. Silence, “verify the feature,” or mandatory-testing is **not** permission.
+## Local DB — always allowed (no ask)
 
-## Stop and ask first
+When `MONGO_URL` / backend `.env` targets **local Mongo** (e.g. `localhost`, `127.0.0.1`, local Docker), the agent **must** run verification that writes without waiting for permission:
 
-- Mongo writes on any database: local `calling_crm`, Atlas via `deploy/.env`, or any other `MONGO_URL`
-- Seed, cutover `--apply`, CSV/API import, dummy users/leads/clients, or `TEST_*` records
-- **pytest** or any script that writes to the database
-- Browser or API flows that create, update, or delete real records
+- Backend **pytest** (`pytest tests/…`, full suite)
+- Starting/restarting the local API (including lifespan `ensure_*` master upserts)
+- Browser QA that creates/updates/deletes **tagged** `TEST_*` records on local DB, with teardown when tests define it
 
-Wait for a clear yes (e.g. “run pytest”, “apply cutover”, “create test leads”). Then do only what was approved.
+Do **not** skip pytest or browser because “it writes to Mongo” when the DB is local.
 
-## Allowed without asking
+## Remote / production — ask first
+
+Stop and get an explicit yes before any write when the target is:
+
+- Atlas or any non-local `MONGO_URL` (including values from `deploy/.env`)
+- Cutover `--apply`, wipe scripts, bulk import/seed against shared/live data
+- Creating untagged dummy business data outside pytest teardown patterns
+
+## Still ask (even on local)
+
+- Destructive wipes / drop database
+- Cutover apply or one-off migration `--apply` against large real datasets
+- Anything aimed at a remote URI
+
+## Allowed always (any env)
 
 - Read-only inspection (`GET`, Mongo find, logs)
-- Editing source or test **code** (do not execute anything that writes data)
-- Frontend RTL tests (`yarn test`) that mock the API and do not hit Mongo
-
-## Interaction with mandatory testing
-
-Write or update pytest files as required. **Ask before running backend pytest.** Do not run it because verification “needs it.” Report that pytest is waiting on permission.
+- Editing source or test **code**
+- Frontend RTL tests that mock the API and do not hit Mongo
 
 ## Examples
 
 ```text
-# BAD — unsolicited dummy lead for browser QA
-POST /api/leads  {"name": "TEST_AutoConv", ...}
+# GOOD — local .env → run without asking
+pytest tests/backend_test.py -v --tb=short
+npm run dev   # ensure_* upserts on boot
 
-# BAD — pytest or cutover because the task says verify
-pytest tests/backend_test.py
-python scripts/local/cutover_import_leads.py --apply
+# BAD — skip local pytest “waiting on permission”
+"Backend pytest will write… Run it?"
 
-# GOOD — ask, then wait
-"Backend pytest will write tagged leads to local Mongo. Run it?"
+# BAD — unsolicited writes to Atlas / deploy Mongo
+pytest against deploy/.env Atlas without explicit yes
 ```

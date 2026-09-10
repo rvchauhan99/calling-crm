@@ -41,11 +41,17 @@ jest.mock("recharts", () => ({
   Legend: () => null,
 }))
 
+const today = new Date().toISOString().slice(0, 10)
+
 const callerPayload = {
   rows: [{
     agent_id: "a1",
     name: "Rohan",
+    interested: 6,
+    registered: 2,
+    deposite: 1,
     calls: 10,
+    conversion_ratio: 10,
     connected: 6,
     connect_rate: 60,
     leads: 5,
@@ -57,6 +63,10 @@ const callerPayload = {
   }],
   summary: {
     total_calls: 10,
+    total_interested: 6,
+    total_registered: 2,
+    total_deposite: 1,
+    conversion_ratio: 10,
     total_connected: 6,
     connect_rate: 60,
     total_leads: 5,
@@ -70,8 +80,8 @@ const callerPayload = {
     { name: "Interested", count: 6, pct: 60 },
     { name: "Call Back", count: 4, pct: 40 },
   ],
-  from: "2026-09-01",
-  to: "2026-09-04",
+  from: today,
+  to: today,
 }
 
 const affiliatePayload = {
@@ -126,8 +136,38 @@ describe("Reports page", () => {
       expect(screen.getByTestId("caller-kpis")).toBeInTheDocument()
     })
     expect(screen.getByTestId("kpi-calls")).toBeInTheDocument()
+    expect(screen.getByTestId("kpi-interested")).toBeInTheDocument()
+    expect(screen.getByTestId("kpi-deposite")).toBeInTheDocument()
     expect(screen.getByTestId("tab-caller")).toBeInTheDocument()
     expect(screen.getByTestId("tab-company")).toBeInTheDocument()
+  })
+
+  it("defaults to Today preset and sales table columns", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      user: { id: "admin", user_type: "admin" },
+    })
+
+    render(<Reports />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("caller-table")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("preset-today").className).toMatch(/bg-sky-500/)
+    expect(screen.getByTestId("caller-table-head-name")).toHaveTextContent("Agent")
+    expect(screen.getByTestId("caller-table-head-interested")).toHaveTextContent("Interested")
+    expect(screen.getByTestId("caller-table-head-registered")).toHaveTextContent("Registered")
+    expect(screen.getByTestId("caller-table-head-deposite")).toHaveTextContent("Deposite")
+    expect(screen.getByTestId("caller-table-head-calls")).toHaveTextContent("Total Calls")
+    expect(screen.getByTestId("caller-table-head-conversion_ratio")).toHaveTextContent("conversionRatios")
+    expect(screen.getByTestId("caller-table-totals")).toHaveTextContent("TOTAL")
+
+    const initialCallerCall = api.get.mock.calls.find(
+      (c) => typeof c[0] === "string" && c[0].startsWith("/reports/caller?"),
+    )
+    expect(initialCallerCall).toBeTruthy()
+    expect(initialCallerCall[0]).toContain(`from=${today}`)
+    expect(initialCallerCall[0]).toContain(`to=${today}`)
   })
 
   it("shows only Affiliate tab for affiliate users", async () => {

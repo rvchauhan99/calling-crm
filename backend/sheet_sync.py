@@ -20,8 +20,7 @@ from core import (
     now_utc,
     validate_email_optional,
 )
-from lead_constants import LEAD_SOURCES
-
+from lead_sources import source_names
 logger = logging.getLogger(__name__)
 
 SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
@@ -482,7 +481,8 @@ async def sync_source(
             preset = source.get("preset") or "generic"
             cmap = source.get("column_map") or default_column_map(preset)
             lead_source = source.get("source") or "Facebook Ads"
-            if lead_source not in LEAD_SOURCES:
+            allowed = set(await source_names(active_only=True, creatable_only=False))
+            if lead_source not in allowed:
                 lead_source = "Import"
 
             for row in rows:

@@ -2,6 +2,8 @@ import { render, screen, waitFor, act } from "@testing-library/react"
 import { useAuth } from "@/context/AuthContext"
 import api from "@/lib/api"
 import Dashboard from "@/pages/Dashboard"
+import { todayISO } from "@/components/dashboard/atoms"
+import { __setMockSearchParams } from "../__mocks__/react-router-dom"
 
 const mockNavigate = jest.fn()
 
@@ -92,6 +94,7 @@ const summary = {
 describe("Dashboard analysis", () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    __setMockSearchParams(new URLSearchParams())
     api.get.mockImplementation((url) => {
       if (url.startsWith("/dashboard?")) return Promise.resolve({ data: summary })
       if (url === "/dashboard") return Promise.resolve({ data: summary })
@@ -107,6 +110,30 @@ describe("Dashboard analysis", () => {
         })
       }
       return Promise.resolve({ data: {} })
+    })
+  })
+
+  it("defaults date preset to Today and loads today range", async () => {
+    useAuth.mockReturnValue({
+      user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
+    })
+
+    render(<Dashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("preset-today")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("preset-today").className).toMatch(/bg-sky-500/)
+    expect(screen.getByTestId("preset-month").className).not.toMatch(/bg-sky-500/)
+
+    const today = todayISO()
+    await waitFor(() => {
+      const dashCalls = api.get.mock.calls.filter(([url]) => String(url).startsWith("/dashboard?"))
+      expect(dashCalls.length).toBeGreaterThan(0)
+      const url = dashCalls[0][0]
+      expect(url).toContain(`from=${today}`)
+      expect(url).toContain(`to=${today}`)
     })
   })
 

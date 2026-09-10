@@ -19,6 +19,7 @@ import Pipeline from "@/pages/Pipeline";
 import Followups from "@/pages/Followups";
 import Audit from "@/pages/Audit";
 import SheetSources from "@/pages/SheetSources";
+import LeadSources from "@/pages/LeadSources";
 import "@/App.css";
 
 function Protected({ children }) {
@@ -57,6 +58,7 @@ function AppRoutes() {
         <Route path="/pipeline" element={g("/pipeline", <Pipeline />)} />
         <Route path="/followups" element={g("/followups", <Followups />)} />
         <Route path="/dispositions" element={g("/dispositions", <Dispositions />)} />
+        <Route path="/lead-sources" element={g("/lead-sources", <LeadSources />)} />
         <Route path="/sheet-sources" element={g("/sheet-sources", <SheetSources />)} />
         <Route path="/clients" element={g("/clients", <Clients />)} />
         <Route path="/ledger" element={g("/ledger", <Ledger />)} />

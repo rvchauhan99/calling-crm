@@ -15,7 +15,6 @@ import {
 } from "@/components/ui/table"
 import { toast } from "sonner"
 import { Plus, Table as TableIcon, Pencil, Trash2, RefreshCw, Eye, Columns3 } from "lucide-react"
-import { LEAD_SOURCES } from "@/constants/leadSources"
 import {
   COLUMN_MAP_FIELDS,
   defaultColumnMap,
@@ -46,6 +45,7 @@ const noneOption = { value: "", label: "(none)" }
 export default function SheetSources() {
   const { can } = useAuth()
   const [list, setList] = useState(null)
+  const [crmSources, setCrmSources] = useState(["Facebook Ads"])
   const [show, setShow] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(empty)
@@ -61,6 +61,17 @@ export default function SheetSources() {
     setList(data.sheet_sources)
   }, [])
   useEffect(() => { load().catch(() => {}) }, [load])
+  useEffect(() => {
+    api.get("/lead-sources")
+      .then((r) => {
+        const names = (r.data.lead_sources || [])
+          .filter((s) => s.active !== false)
+          .map((s) => s.name)
+          .filter(Boolean)
+        if (names.length) setCrmSources(names)
+      })
+      .catch(() => {})
+  }, [])
 
   const openNew = () => {
     setEditing(null)
@@ -405,7 +416,7 @@ export default function SheetSources() {
                 <SearchableSelect
                   value={form.source}
                   onChange={(v) => setForm({ ...form, source: v })}
-                  options={LEAD_SOURCES.map((s) => ({ value: s, label: s }))}
+                  options={crmSources.map((s) => ({ value: s, label: s }))}
                   placeholder="CRM source"
                   searchPlaceholder="Search source…"
                   label="CRM lead source"

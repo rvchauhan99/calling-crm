@@ -69,7 +69,19 @@ describe("SheetSources column mapping", () => {
       dataScope: "ALL",
       user: { id: "admin-1", user_type: "admin" },
     })
-    api.get.mockResolvedValue({ data: { sheet_sources: [mockSource] } })
+    api.get.mockImplementation((url) => {
+      if (url === "/lead-sources") {
+        return Promise.resolve({
+          data: {
+            lead_sources: [
+              { id: "ls1", name: "Facebook Ads", active: true, creatable: true },
+              { id: "ls2", name: "Import", active: true, creatable: false },
+            ],
+          },
+        })
+      }
+      return Promise.resolve({ data: { sheet_sources: [mockSource] } })
+    })
   })
 
   it("renders list and opens dialog with Meta default map", async () => {

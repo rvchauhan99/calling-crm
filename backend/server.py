@@ -75,6 +75,12 @@ async def _sheet_poll_loop():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     global _sheet_poll_task, _lead_import_worker_task
+    try:
+        from lead_sources import ensure_lead_sources
+        await ensure_lead_sources()
+        logger.info("Lead sources master ensured")
+    except Exception as e:
+        logger.exception("ensure_lead_sources failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()

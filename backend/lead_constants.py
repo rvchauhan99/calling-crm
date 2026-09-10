@@ -1,6 +1,9 @@
-"""Shared lead domain constants."""
+"""Default lead-source catalog used only for ensure-on-boot seeding.
 
-LEAD_SOURCES = [
+Runtime validation reads from the lead_sources Mongo collection.
+"""
+
+DEFAULT_LEAD_SOURCES = [
     "Website",
     "Facebook Ads",
     "Google Ads",
@@ -11,5 +14,9 @@ LEAD_SOURCES = [
     "Import",
 ]
 
-# Sources selectable when creating/editing a lead manually (not Import)
-LEAD_SOURCES_CREATABLE = [s for s in LEAD_SOURCES if s != "Import"]
+SYSTEM_LEAD_SOURCES = {"Manual", "Import"}
+NON_CREATABLE_LEAD_SOURCES = {"Import"}
+
+# Backward-compatible aliases (demo seed / tests may still import these names)
+LEAD_SOURCES = DEFAULT_LEAD_SOURCES
+LEAD_SOURCES_CREATABLE = [s for s in DEFAULT_LEAD_SOURCES if s not in NON_CREATABLE_LEAD_SOURCES]

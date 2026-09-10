@@ -1,5 +1,6 @@
+import { useEffect, useState } from "react"
 import { SearchableSelect } from "@/components/ui/searchable-select"
-import { LEAD_SOURCES, LEAD_SOURCES_CREATABLE } from "@/constants/leadSources"
+import api from "@/lib/api"
 
 export function SourceSelect({
   value,
@@ -11,7 +12,26 @@ export function SourceSelect({
   testId = "lead-field-source",
   className = "mt-1",
 }) {
-  const sourceList = includeImport ? LEAD_SOURCES : LEAD_SOURCES_CREATABLE
+  const [sourceList, setSourceList] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    api.get("/lead-sources")
+      .then((r) => {
+        if (cancelled) return
+        const rows = (r.data.lead_sources || []).filter((s) => s.active !== false)
+        const names = rows
+          .filter((s) => includeImport || s.creatable !== false)
+          .map((s) => s.name)
+          .filter(Boolean)
+        setSourceList(names)
+      })
+      .catch(() => {
+        if (!cancelled) setSourceList([])
+      })
+    return () => { cancelled = true }
+  }, [includeImport])
+
   const options = [
     ...(includeAll ? [{ value: "all", label: "All sources" }] : []),
     ...sourceList.map((s) => ({ value: s, label: s })),

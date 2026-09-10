@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
 from core import COMPANY_ID, db, new_id, now_iso, normalize_and_validate_phone
-from lead_constants import LEAD_SOURCES
+from lead_sources import source_names
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_IMPORT_ROWS = 50_000
@@ -191,6 +191,7 @@ async def run_lead_import(raw: bytes, on_progress: ProgressCallback = None) -> I
 
     candidates = []
     seen_phones = set()
+    allowed_sources = set(await source_names(active_only=True, creatable_only=False))
 
     for excel_row, row_data in rows:
         if _is_empty_row(row_data):
@@ -215,7 +216,7 @@ async def run_lead_import(raw: bytes, on_progress: ProgressCallback = None) -> I
             result.error_rows.append(ImportErrorRow(excel_row, str(exc), row_data))
             continue
         source = _cell(row_data, header_lookup, SOURCE_ALIASES) or "Import"
-        if source not in LEAD_SOURCES:
+        if source not in allowed_sources:
             progress.invalid += 1
             progress.processed += 1
             result.invalid += 1
