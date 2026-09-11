@@ -14,8 +14,10 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select"
 import { toast } from "sonner"
 import {
-  PhoneCall, PhoneOutgoing, AlertTriangle, CheckCircle2, Search,
+  PhoneCall, PhoneOutgoing, AlertTriangle, CheckCircle2, Search, Phone,
 } from "lucide-react"
+import { SoftphoneDock } from "@/components/softphone/SoftphoneDock"
+import { useTelephonyEnabled } from "@/hooks/useTelephonyEnabled"
 import { cn } from "@/lib/utils"
 import {
   QUEUE_BUCKETS,
@@ -47,6 +49,7 @@ const DISPLAY_SECTIONS = [
 ]
 
 export default function TodayCalls() {
+  const { enabled: telephonyEnabled } = useTelephonyEnabled()
   const [data, setData] = useState(null)
   const [dispositions, setDispositions] = useState([])
   const [active, setActive] = useState(null)
@@ -61,6 +64,7 @@ export default function TodayCalls() {
   const [dispositionFilter, setDispositionFilter] = useState("")
   const [sortBy, setSortBy] = useState("urgency")
   const [highlightAcw, setHighlightAcw] = useState(false)
+  const [softLead, setSoftLead] = useState(null)
   const acwFocusPending = useRef(false)
 
   const load = useCallback(async () => {
@@ -501,6 +505,18 @@ export default function TodayCalls() {
                               />
                             </div>
                             <div className="flex shrink-0 flex-col gap-1">
+                              {telephonyEnabled && (
+                                <Button
+                                  size="sm"
+                                  className="h-7 bg-emerald-600 px-2 hover:bg-emerald-700"
+                                  onClick={() => setSoftLead(l)}
+                                  data-testid={`dial-call-btn-${l.id}`}
+                                  aria-label={`Call ${l.name}`}
+                                >
+                                  <Phone size={13} className="mr-1" />
+                                  Call
+                                </Button>
+                              )}
                               <Button
                                 size="sm"
                                 className="h-7 bg-sky-500 px-2 hover:bg-sky-600"
@@ -691,6 +707,30 @@ export default function TodayCalls() {
         leadId={lead360Id}
         onClose={() => setLead360Id(null)}
         onLogged={() => load()}
+      />
+
+      <SoftphoneDock
+        open={telephonyEnabled && !!softLead}
+        leadId={softLead?.id}
+        leadPhone={softLead?.phone}
+        leadName={softLead?.name}
+        onClose={() => setSoftLead(null)}
+        onEnded={({ duration }) => {
+          const lead = softLead
+          setSoftLead(null)
+          if (lead) {
+            setActive(lead)
+            setForm({
+              disposition_id: "",
+              notes: "",
+              follow_up_at: "",
+              pipeline_stage: lead.pipeline_stage || "New",
+              duration: duration || 0,
+              deposit_amount: "",
+            })
+          }
+          load()
+        }}
       />
     </div>
   )

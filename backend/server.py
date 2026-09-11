@@ -13,6 +13,7 @@ from starlette.middleware.cors import CORSMiddleware
 from core import client, db, COMPANY_ID
 import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
+import routes_telephony
 from seed import seed
 from sheet_sync import sync_source
 from lead_import_jobs import start_lead_import_worker, stop_lead_import_worker
@@ -81,6 +82,12 @@ async def lifespan(_app: FastAPI):
         logger.info("Lead sources master ensured")
     except Exception as e:
         logger.exception("ensure_lead_sources failed: %s", e)
+    try:
+        from seed import ensure_telephony_menus
+        await ensure_telephony_menus()
+        logger.info("Telephony menus ensured")
+    except Exception as e:
+        logger.exception("ensure_telephony_menus failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()
@@ -117,6 +124,7 @@ app.include_router(routes_leads.router)
 app.include_router(routes_clients.router)
 app.include_router(routes_reports.router)
 app.include_router(routes_sheet_sources.router)
+app.include_router(routes_telephony.router)
 
 
 def _health_ok():

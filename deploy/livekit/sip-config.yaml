@@ -1,0 +1,10 @@
+# LiveKit SIP bridge — talks to Plivo (or other India SIP trunks)
+api_key: APIdevkey
+api_secret: replace_with_long_random_secret
+ws_url: ws://livekit:7880
+redis:
+  address: redis:6379
+sip_port: 5060
+rtp_port: 10000
+logging:
+  level: info

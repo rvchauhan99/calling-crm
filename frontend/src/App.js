@@ -20,6 +20,7 @@ import Followups from "@/pages/Followups";
 import Audit from "@/pages/Audit";
 import SheetSources from "@/pages/SheetSources";
 import LeadSources from "@/pages/LeadSources";
+import TelephonyNumbers from "@/pages/TelephonyNumbers";
 import "@/App.css";
 
 function Protected({ children }) {
@@ -66,6 +67,7 @@ function AppRoutes() {
         <Route path="/users" element={g("/users", <Users />)} />
         <Route path="/teams" element={g("/teams", <Teams />)} />
         <Route path="/roles" element={g("/roles", <Roles />)} />
+        <Route path="/telephony-numbers" element={g("/telephony-numbers", <TelephonyNumbers />)} />
         <Route path="/audit" element={g("/audit", <Audit />)} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

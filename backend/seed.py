@@ -25,8 +25,36 @@ MENU_CATALOG = [
     ("users", "Users", "IdentificationBadge", "/users", "Admin", 13, ["view", "create", "edit", "delete"]),
     ("teams", "Teams", "UsersThree", "/teams", "Admin", 14, ["view", "create", "edit", "delete"]),
     ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 15, ["view", "create", "edit", "delete"]),
-    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 16, ["view"]),
+    ("telephony_numbers", "Phone Numbers", "Phone", "/telephony-numbers", "Admin", 16,
+     ["view", "create", "edit", "delete"]),
+    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 17, ["view"]),
 ]
+
+
+async def ensure_telephony_menus():
+    """Upsert Phone Numbers menu + Super Admin perms without full seed."""
+    for key, label, icon, path, group, order, actions in MENU_CATALOG:
+        if key != "telephony_numbers":
+            continue
+        await db.menus.update_one(
+            {"companyId": COMPANY_ID, "key": key},
+            {"$set": {
+                "key": key, "label": label, "icon": icon, "path": path,
+                "group": group, "order": order, "actions": actions,
+                "companyId": COMPANY_ID,
+            }},
+            upsert=True,
+        )
+        perms = [f"{key}:{a}" for a in actions]
+        await db.roles.update_one(
+            {"companyId": COMPANY_ID, "name": "Super Admin"},
+            {
+                "$addToSet": {
+                    "menus": key,
+                    "permissions": {"$each": perms},
+                },
+            },
+        )
 
 
 def all_permissions():

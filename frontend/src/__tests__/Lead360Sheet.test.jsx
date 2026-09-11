@@ -85,6 +85,7 @@ describe("Lead360Sheet", () => {
     expect(screen.getByTestId("lead-360-calls")).toHaveTextContent("Interested")
     expect(screen.getByTestId("lead-360-activity")).toHaveTextContent("log_call")
     expect(screen.getByTestId("lead-360-log-call")).toBeInTheDocument()
+    expect(screen.queryByTestId("lead-360-dial")).not.toBeInTheDocument()
     expect(screen.getByTestId("lead-360-last-remarks")).toHaveTextContent("Good call summary")
     expect(screen.getByTestId("lead-360-last-remarks")).toHaveTextContent("Last Remarks")
   })

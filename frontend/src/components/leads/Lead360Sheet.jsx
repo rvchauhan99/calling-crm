@@ -8,8 +8,10 @@ import {
 } from "@/components/ui/sheet"
 import { PipelineLogCallDialog } from "@/components/pipeline/PipelineLogCallDialog"
 import { LastRemarks } from "@/components/leads/LastRemarks"
+import { SoftphoneDock } from "@/components/softphone/SoftphoneDock"
+import { useTelephonyEnabled } from "@/hooks/useTelephonyEnabled"
 import { toast } from "sonner"
-import { PhoneCall } from "lucide-react"
+import { PhoneCall, Phone } from "lucide-react"
 
 const formatMeta = (meta) => {
   if (!meta || typeof meta !== "object") return ""
@@ -22,11 +24,14 @@ const formatMeta = (meta) => {
 export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
   const { can } = useAuth()
   const canLog = can("today_calls:log")
+  const { enabled: telephonyEnabled } = useTelephonyEnabled()
   const [detail, setDetail] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState("")
   const [dispositions, setDispositions] = useState([])
   const [logOpen, setLogOpen] = useState(false)
+  const [softOpen, setSoftOpen] = useState(false)
+  const [postCallDuration, setPostCallDuration] = useState(0)
   const [refreshKey, setRefreshKey] = useState(0)
 
   const load = useCallback(async (id) => {
@@ -149,10 +154,22 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
               />
 
               {canLog && (
-                <div className="mt-4">
+                <div className="mt-4 flex gap-2">
+                  {telephonyEnabled && (
+                    <Button
+                      className="flex-1 bg-emerald-600 hover:bg-emerald-700"
+                      onClick={() => setSoftOpen(true)}
+                      data-testid="lead-360-dial"
+                    >
+                      <Phone size={15} className="mr-1.5" /> Call
+                    </Button>
+                  )}
                   <Button
-                    className="w-full bg-sky-500 hover:bg-sky-600"
-                    onClick={() => setLogOpen(true)}
+                    className="flex-1 bg-sky-500 hover:bg-sky-600"
+                    onClick={() => {
+                      setPostCallDuration(0)
+                      setLogOpen(true)
+                    }}
                     data-testid="lead-360-log-call"
                   >
                     <PhoneCall size={15} className="mr-1.5" /> Log Call
@@ -192,13 +209,28 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
                 {calls.map((c) => (
                   <div key={c.id} className="rounded-md border border-slate-200 p-3 text-sm">
                     <div className="flex justify-between gap-2">
-                      <StatusPill>{c.disposition_name}</StatusPill>
+                      <StatusPill>{c.disposition_name || c.status || c.outcome || "Call"}</StatusPill>
                       <span className="shrink-0 text-xs text-slate-400">
                         {new Date(c.created_at).toLocaleString("en-IN")}
                       </span>
                     </div>
+                    {(c.direction || c.talk_sec || c.duration) && (
+                      <p className="mt-1 text-xs text-slate-500">
+                        {[c.direction, `${c.talk_sec || c.duration || 0}s`].filter(Boolean).join(" · ")}
+                      </p>
+                    )}
+                    {c.recording_url && (
+                      <audio
+                        className="mt-2 w-full"
+                        controls
+                        src={c.recording_url}
+                        data-testid={`lead-360-recording-${c.id}`}
+                      >
+                        <track kind="captions" />
+                      </audio>
+                    )}
                     {c.notes && <p className="mt-1.5 text-slate-600">{c.notes}</p>}
-                    <p className="mt-1 text-xs text-slate-400">by {c.agent_name}</p>
+                    <p className="mt-1 text-xs text-slate-400">by {c.agent_name || "system"}</p>
                   </div>
                 ))}
               </div>
@@ -236,8 +268,23 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
         lead={lead}
         dispositions={dispositions}
         mode="log"
+        initialDuration={postCallDuration}
         onClose={() => setLogOpen(false)}
         onSubmit={handleLogSubmit}
+      />
+
+      <SoftphoneDock
+        open={telephonyEnabled && softOpen}
+        leadId={lead?.id}
+        leadPhone={lead?.phone}
+        leadName={lead?.name}
+        canDial={canLog}
+        onClose={() => setSoftOpen(false)}
+        onEnded={({ duration }) => {
+          setPostCallDuration(duration || 0)
+          setSoftOpen(false)
+          setLogOpen(true)
+        }}
       />
     </>
   )

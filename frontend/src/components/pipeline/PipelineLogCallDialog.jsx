@@ -42,6 +42,7 @@ export const PipelineLogCallDialog = ({
   targetStage,
   dispositions = [],
   mode = "log",
+  initialDuration = 0,
   onClose,
   onSubmit,
 }) => {
@@ -76,9 +77,11 @@ export const PipelineLogCallDialog = ({
 
   useEffect(() => {
     if (open && lead) {
-      setForm(emptyForm(lead, targetStage || lead.pipeline_stage, mode))
+      const base = emptyForm(lead, targetStage || lead.pipeline_stage, mode)
+      if (initialDuration) base.duration = initialDuration
+      setForm(base)
     }
-  }, [open, lead, targetStage, mode])
+  }, [open, lead, targetStage, mode, initialDuration])
 
   const handleDispositionChange = (v) => {
     const disp = dispositions.find((d) => d.id === v)

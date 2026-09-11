@@ -1,0 +1,13 @@
+# LiveKit server — values overridden via environment in compose where noted
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+redis:
+  address: redis:6379
+keys:
+  APIdevkey: replace_with_long_random_secret
+logging:
+  level: info
