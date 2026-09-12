@@ -1771,6 +1771,78 @@ class TestClientsLedger:
         assert got.get("is_client") is not True
         assert got["status"] == "active"
 
+    def test_unconvert_excludes_from_dashboard_and_reports(self, admin, agent):
+        """Undone convert must not inflate Dashboard converted KPIs or Reports Deposite/converted_responses."""
+        before_dash = admin.get(f"{BASE_URL}/api/dashboard", timeout=120).json()
+        before = before_dash["kpis"]
+        before_cbr = before_dash["response_conversion"]["converted_by_response"]
+        before_caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        before_dep = before_caller["summary"]["total_deposite"]
+        before_conv_resp = before_caller["summary"]["converted_responses"]
+
+        p = "71" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_UnconvReports", "phone": p}, timeout=30).json()["lead"]
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        conv = [d for d in disps if d["name"] == "Converted"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        logged = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "notes": "TEST_report_convert", "pipeline_stage": "Won",
+            "deposit_amount": 88}, timeout=30)
+        assert logged.status_code == 200, logged.text
+        assert logged.json().get("converted") is True
+        cid = logged.json()["client_id"]
+
+        mid_dash = admin.get(f"{BASE_URL}/api/dashboard", timeout=120).json()
+        mid = mid_dash["kpis"]
+        assert mid["total_clients"] == before["total_clients"] + 1
+        assert mid["converted_leads"] == before["converted_leads"] + 1
+        assert mid["ftd_clients"] == before["ftd_clients"] + 1
+        assert mid_dash["response_conversion"]["converted_by_response"] == before_cbr + 1
+        mid_caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        mid_agent = next(
+            (r for r in mid_caller["rows"] if r["agent_id"] == agent.user["id"]), None,
+        )
+        assert mid_agent is not None, "agent must appear in caller report"
+        before_agent = next(
+            (r for r in before_caller["rows"] if r["agent_id"] == agent.user["id"]),
+            {"converted_responses": 0, "deposite": 0},
+        )
+        assert mid_agent["converted_responses"] == before_agent["converted_responses"] + 1
+
+        undo = admin.post(f"{BASE_URL}/api/clients/{cid}/unconvert", timeout=30)
+        assert undo.status_code == 200, undo.text
+
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is not True
+        assert got.get("disposition_name") in (None, "")
+        assert got.get("pipeline_stage") != "Won"
+
+        after_dash = admin.get(f"{BASE_URL}/api/dashboard", timeout=120).json()
+        ak = after_dash["kpis"]
+        assert ak["total_clients"] == before["total_clients"]
+        assert ak["converted_leads"] == before["converted_leads"]
+        assert ak["ftd_clients"] == before["ftd_clients"]
+        assert after_dash["response_conversion"]["converted_by_response"] == before_cbr
+        assert after_dash["response_conversion"]["converted_by_response"] == ak["converted_leads"]
+
+        after_caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        after_agent = next(
+            (r for r in after_caller["rows"] if r["agent_id"] == agent.user["id"]), None,
+        )
+        assert after_agent is not None
+        assert after_agent["converted_responses"] == before_agent["converted_responses"]
+        assert after_agent["deposite"] == before_agent["deposite"]
+        assert after_caller["summary"]["converted_responses"] == before_conv_resp
+        assert after_caller["summary"]["total_deposite"] == before_dep
+
+        # Raw call history still lists the call (not hard-deleted)
+        hist = admin.get(f"{BASE_URL}/api/call-history?search={p}", timeout=60).json()
+        assert any(c.get("lead_id") == lead["id"] for c in hist.get("calls", []))
+
     def test_ledger_full_flow(self, admin):
         # fresh client for deterministic balance
         p = "92" + uuid.uuid4().int.__str__()[:8]

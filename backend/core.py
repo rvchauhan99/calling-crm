@@ -217,6 +217,11 @@ def live_ledger_filter() -> dict:
     return {"deleted_at": None}
 
 
+def reportable_calls_filter() -> dict:
+    """Exclude calls voided when a conversion was undone."""
+    return {"excluded_from_reports": {"$ne": True}}
+
+
 # ---------- Audit ----------
 async def audit(actor: dict, action: str, entity: str, entity_id: str = None, meta: dict = None):
     await db.audit_logs.insert_one({

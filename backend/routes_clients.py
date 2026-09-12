@@ -9,6 +9,31 @@ from core import (
 
 router = APIRouter(prefix="/api", tags=["clients"])
 
+_CONVERT_DISP_ALIASES = frozenset({"converted", "deposit", "deposite"})
+
+
+def _norm_disp(name) -> str:
+    return (name or "").strip().lower()
+
+
+def _is_convert_disposition_name(name: str, convert_names_lower: set) -> bool:
+    n = _norm_disp(name)
+    return bool(n) and (n in _CONVERT_DISP_ALIASES or n in convert_names_lower)
+
+
+async def _convert_disposition_names() -> set:
+    """Lowercased disposition names that count as conversion (flag or alias)."""
+    names = set(_CONVERT_DISP_ALIASES)
+    async for d in db.dispositions.find(
+        {"companyId": COMPANY_ID}, {"_id": 0, "name": 1, "converts_to_client": 1},
+    ):
+        n = _norm_disp(d.get("name"))
+        if not n:
+            continue
+        if d.get("converts_to_client") or n in _CONVERT_DISP_ALIASES:
+            names.add(n)
+    return names
+
 
 class ConvertIn(BaseModel):
     lead_id: str
@@ -90,7 +115,7 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
 
 
 async def _unconvert_client(lead: dict, principal: dict, *, reason: str) -> dict:
-    """Soft-delete client + ledger and clear lead conversion flags. Idempotent if already undone."""
+    """Soft-delete client + ledger, void convert calls, restore lead. Idempotent if already undone."""
     client_id = lead.get("client_id")
     lead_id = lead.get("id")
     if not client_id and not lead.get("is_client"):
@@ -124,15 +149,51 @@ async def _unconvert_client(lead: dict, principal: dict, *, reason: str) -> dict
         elif not client:
             client_id = None
 
+    convert_names = await _convert_disposition_names()
+
     if lead_id:
+        # Prefer DB state (log_call may already have set a non-convert disposition)
+        fresh = await db.leads.find_one({"id": lead_id, "companyId": COMPANY_ID}, {"_id": 0})
+        lead_set = {
+            "is_client": False,
+            "client_id": None,
+            "status": "active",
+            "updated_at": now,
+        }
+        if fresh:
+            if fresh.get("pipeline_stage") == "Won":
+                lead_set["pipeline_stage"] = "Contacted"
+            disp_name = fresh.get("disposition_name")
+            if _is_convert_disposition_name(disp_name, convert_names):
+                lead_set["disposition_id"] = None
+                lead_set["disposition_name"] = None
+                lead_set["carry_forward"] = True
         await db.leads.update_one(
             {"id": lead_id, "companyId": COMPANY_ID},
-            {"$set": {
-                "is_client": False,
-                "client_id": None,
-                "updated_at": now,
-            }},
+            {"$set": lead_set},
         )
+
+        # Soft-exclude convert-related calls so Deposite / converted_responses drop
+        call_ids = []
+        async for c in db.calls.find(
+            {
+                "companyId": COMPANY_ID,
+                "lead_id": lead_id,
+                "excluded_from_reports": {"$ne": True},
+            },
+            {"_id": 0, "id": 1, "disposition_name": 1},
+        ):
+            if _is_convert_disposition_name(c.get("disposition_name"), convert_names):
+                call_ids.append(c["id"])
+        if call_ids:
+            await db.calls.update_many(
+                {"id": {"$in": call_ids}, "companyId": COMPANY_ID},
+                {"$set": {
+                    "excluded_from_reports": True,
+                    "excluded_at": now,
+                    "excluded_reason": reason or "unconvert",
+                }},
+            )
 
     await audit(
         principal, "unconvert", "client", client_id,
@@ -281,21 +342,6 @@ async def unconvert_client(cid: str, principal: dict = Depends(require("clients:
         raise HTTPException(status_code=400, detail="Client could not be unconverted")
 
     resolved_lead_id = lead.get("id") or lead_id
-    if resolved_lead_id:
-        lead_set = {
-            "is_client": False,
-            "client_id": None,
-            "status": "active",
-            "updated_at": now_iso(),
-        }
-        fresh = await db.leads.find_one({"id": resolved_lead_id, "companyId": COMPANY_ID}, {"_id": 0})
-        if fresh and fresh.get("pipeline_stage") == "Won":
-            lead_set["pipeline_stage"] = "Contacted"
-        await db.leads.update_one(
-            {"id": resolved_lead_id, "companyId": COMPANY_ID},
-            {"$set": lead_set},
-        )
-
     return {
         "unconverted": True,
         "client_id": cid,

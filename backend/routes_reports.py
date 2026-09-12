@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc,
-                  live_client_filter, live_ledger_filter)
+                  live_client_filter, live_ledger_filter, reportable_calls_filter)
 from lead_sources import source_names
 from caller_sales import sales_disp_counts
 
@@ -132,7 +132,7 @@ async def dashboard(
     client_scope = await client_scope_filter(principal)
 
     lq = {"companyId": COMPANY_ID, **lead_scope}
-    cq = {"companyId": COMPANY_ID, **call_scope}
+    cq = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
     clq = {"companyId": COMPANY_ID, **live_client_filter(), **client_scope}
 
     # OWN scope: force self, ignore unassigned assignment_status
@@ -186,7 +186,7 @@ async def dashboard(
 
     total_leads = len(leads)
     active_leads = sum(1 for l in leads if l.get("status") == "active")
-    converted_leads = sum(1 for l in leads if l.get("status") == "converted" or l.get("is_client"))
+    converted_leads = sum(1 for l in leads if l.get("is_client"))
     unassigned_leads = 0 if is_own else sum(1 for l in leads if not l.get("assigned_to"))
     now_iso_cmp = now_utc().isoformat()
     overdue_followups = sum(
@@ -194,7 +194,9 @@ async def dashboard(
         if l.get("follow_up_at") and l.get("status") == "active" and l["follow_up_at"] < now_iso_cmp
     )
 
-    total_calls_all = await db.calls.count_documents({"companyId": COMPANY_ID, **call_scope})
+    total_calls_all = await db.calls.count_documents(
+        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
+    )
     calls_in_range = len(calls)
     durations = [c.get("duration") or 0 for c in calls]
     avg_call_duration = round(sum(durations) / len(durations), 1) if durations else 0.0
@@ -202,7 +204,10 @@ async def dashboard(
     # calls today (IST) within scope (unfiltered by date params for KPI hint)
     calls_today = 0
     today_s = today.isoformat()
-    for c in await db.calls.find({"companyId": COMPANY_ID, **call_scope}, {"_id": 0, "created_at": 1}).to_list(100000):
+    for c in await db.calls.find(
+        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
+        {"_id": 0, "created_at": 1},
+    ).to_list(100000):
         if ist_date(c.get("created_at")) == today_s:
             calls_today += 1
 
@@ -251,18 +256,7 @@ async def dashboard(
             "pct": round((cnt / total_leads * 100) if total_leads else 0, 1),
         })
 
-    disp_meta = {
-        d["name"]: d
-        for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
-    }
-    converted_by_response = sum(
-        1 for l in leads
-        if l.get("is_client") or l.get("status") == "converted"
-        or (l.get("disposition_name") and (
-            disp_meta.get(l["disposition_name"], {}).get("converts_to_client")
-            or l.get("disposition_name") == "Converted"
-        ))
-    )
+    converted_by_response = sum(1 for l in leads if l.get("is_client"))
     with_response = sum(1 for l in leads if l.get("disposition_name"))
     carry_forward_count = sum(1 for l in leads if l.get("carry_forward") is True)
     top_response = lead_disposition_breakdown[0] if lead_disposition_breakdown else None
@@ -285,7 +279,7 @@ async def dashboard(
         if s not in source_map:
             source_map[s] = {"source": s, "leads": 0, "conversions": 0}
         source_map[s]["leads"] += 1
-        if l.get("is_client") or l.get("status") == "converted":
+        if l.get("is_client"):
             source_map[s]["conversions"] += 1
     source_breakdown = []
     for row in source_map.values():
@@ -306,7 +300,7 @@ async def dashboard(
                 "leads": 0, "calls": 0, "conversions": 0,
             }
         agent_map[aid]["leads"] += 1
-        if l.get("is_client") or l.get("status") == "converted":
+        if l.get("is_client"):
             agent_map[aid]["conversions"] += 1
     for c in calls:
         aid = c.get("agent_id")
@@ -351,7 +345,8 @@ async def dashboard(
         d = (today - timedelta(days=i)).isoformat()
         seven[d] = 0
     scoped_calls_for_week = await db.calls.find(
-        {"companyId": COMPANY_ID, **call_scope}, {"_id": 0, "created_at": 1}
+        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
+        {"_id": 0, "created_at": 1},
     ).to_list(100000)
     for c in scoped_calls_for_week:
         d = ist_date(c.get("created_at"))
@@ -365,7 +360,11 @@ async def dashboard(
     lead_ids = [l["id"] for l in leads]
     if lead_ids:
         for c in await db.calls.find(
-            {"companyId": COMPANY_ID, "lead_id": {"$in": lead_ids}},
+            {
+                "companyId": COMPANY_ID,
+                "lead_id": {"$in": lead_ids},
+                **reportable_calls_filter(),
+            },
             {"_id": 0, "lead_id": 1, "created_at": 1},
         ).to_list(100000):
             lid = c.get("lead_id")
@@ -506,7 +505,7 @@ async def caller_report(
     }
     rows = []
     for a in agents:
-        aq = {"companyId": COMPANY_ID, "agent_id": a["id"], **date_q}
+        aq = {"companyId": COMPANY_ID, "agent_id": a["id"], **reportable_calls_filter(), **date_q}
         calls_list = await db.calls.find(aq, {"_id": 0, "disposition_name": 1, "outcome": 1}).to_list(50000)
         calls = len(calls_list)
         connected = sum(1 for c in calls_list if c.get("outcome") == "connected")
@@ -673,7 +672,7 @@ async def company_report(
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
 
-    cq = {"companyId": COMPANY_ID, **date_q}
+    cq = {"companyId": COMPANY_ID, **reportable_calls_filter(), **date_q}
     if source:
         # Limit calls to leads matching source when filter set
         lead_ids = [
