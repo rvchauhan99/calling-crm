@@ -1981,6 +1981,107 @@ class TestClientsLedger:
         orig = [x for x in cl["ledger"] if x["id"] == entry["id"]][0]
         assert orig["amount"] == 103.0 and orig["balance_after"] == 103.0
 
+    def test_undone_convert_reports_cleanup_excludes_old_calls(self, admin):
+        """Boot migration voids Converted calls for soft-deleted clients (old undos)."""
+        import asyncio
+        import os
+        import sys
+        from pathlib import Path
+        from motor.motor_asyncio import AsyncIOMotorClient
+        from dotenv import dotenv_values, load_dotenv
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        load_dotenv(backend_dir / ".env")
+        env = dotenv_values(backend_dir / ".env")
+        mongo = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+        dbname = os.environ.get("DB_NAME") or env.get("DB_NAME")
+        company = os.environ.get("COMPANY_ID") or env.get("COMPANY_ID") or "default"
+
+        p = "68" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_UnconvMig", "phone": p}, timeout=30).json()["lead"]
+        lid = lead["id"]
+        call_id = str(uuid.uuid4())
+        client_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        async def seed_cleanup_and_read():
+            c = AsyncIOMotorClient(mongo)
+            local_db = c[dbname]
+            await local_db.leads.update_one(
+                {"id": lid},
+                {"$set": {
+                    "is_client": False,
+                    "client_id": None,
+                    "status": "active",
+                    "disposition_name": "Converted",
+                    "disposition_id": "fake-converted-disp",
+                    "pipeline_stage": "Won",
+                    "updated_at": now,
+                }},
+            )
+            await local_db.clients.insert_one({
+                "id": client_id,
+                "companyId": company,
+                "lead_id": lid,
+                "name": "TEST_UnconvMig",
+                "phone": "+91" + p,
+                "status": "inactive",
+                "balance": 0.0,
+                "ftd_at": None,
+                "deleted_at": now,
+                "deleted_by": "system",
+                "deleted_reason": "test:old_undo",
+                "created_at": now,
+            })
+            await local_db.calls.insert_one({
+                "id": call_id,
+                "companyId": company,
+                "lead_id": lid,
+                "lead_name": "TEST_UnconvMig",
+                "lead_phone": "+91" + p,
+                "agent_id": "test-agent",
+                "agent_name": "Test Agent",
+                "disposition_id": "fake-converted-disp",
+                "disposition_name": "Converted",
+                "outcome": "connected",
+                "notes": "TEST_old_undo_call",
+                "duration": 10,
+                "follow_up_at": None,
+                "created_at": now,
+            })
+
+            sys.path.insert(0, str(backend_dir))
+            import routes_clients as rc
+            import unconvert_reports_cleanup as mig
+            prev_rc_db, prev_mig_db = rc.db, mig.db
+            rc.db = local_db
+            mig.db = local_db
+            try:
+                first = await mig.ensure_exclude_undone_convert_calls()
+                second = await mig.ensure_exclude_undone_convert_calls()
+                call_doc = await local_db.calls.find_one({"id": call_id}, {"_id": 0})
+                lead_doc = await local_db.leads.find_one({"id": lid}, {"_id": 0})
+            finally:
+                rc.db = prev_rc_db
+                mig.db = prev_mig_db
+                c.close()
+            return first, second, call_doc, lead_doc
+
+        first, second, call_doc, lead_doc = asyncio.run(seed_cleanup_and_read())
+        assert first["clients_scanned"] >= 1
+        assert first["calls_excluded"] >= 1
+        assert first["leads_cleared"] >= 1
+        assert second["calls_excluded"] == 0
+
+        assert call_doc.get("excluded_from_reports") is True
+        assert call_doc.get("excluded_reason") == "migration:undone_client_backfill"
+        assert lead_doc.get("disposition_name") in (None, "")
+        assert lead_doc.get("pipeline_stage") != "Won"
+
+        caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120)
+        assert caller.status_code == 200
+
     def test_ledger_list_and_export(self, admin):
         r = admin.get(f"{BASE_URL}/api/ledger?page_size=5", timeout=120)
         assert r.status_code == 200

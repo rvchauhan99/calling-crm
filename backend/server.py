@@ -100,6 +100,12 @@ async def lifespan(_app: FastAPI):
         logger.info("Ledger reversal cleanup done: %s", result)
     except Exception as e:
         logger.exception("ensure_cleanup_ledger_reversals failed: %s", e)
+    try:
+        from unconvert_reports_cleanup import ensure_exclude_undone_convert_calls
+        result = await ensure_exclude_undone_convert_calls()
+        logger.info("Undone-convert reports cleanup done: %s", result)
+    except Exception as e:
+        logger.exception("ensure_exclude_undone_convert_calls failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()
