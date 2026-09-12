@@ -20,7 +20,7 @@ MENU_CATALOG = [
     ("sheet_sources", "Sheet Sources", "Table", "/sheet-sources", "Config", 9,
      ["view", "create", "edit", "delete", "sync"]),
     ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 10, ["view", "create", "edit", "convert"]),
-    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 11, ["view", "post", "reverse", "export"]),
+    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 11, ["view", "post", "export"]),
     ("reports", "Reports", "ChartBar", "/reports", "Analytics", 12, ["view", "export"]),
     ("users", "Users", "IdentificationBadge", "/users", "Admin", 13, ["view", "create", "edit", "delete"]),
     ("teams", "Teams", "UsersThree", "/teams", "Admin", 14, ["view", "create", "edit", "delete"]),
@@ -55,6 +55,27 @@ async def ensure_telephony_menus():
                 },
             },
         )
+
+
+async def ensure_ledger_menu_without_reverse():
+    """Drop retired ledger:reverse from menu catalog and all roles."""
+    for key, label, icon, path, group, order, actions in MENU_CATALOG:
+        if key != "ledger":
+            continue
+        await db.menus.update_one(
+            {"companyId": COMPANY_ID, "key": key},
+            {"$set": {
+                "key": key, "label": label, "icon": icon, "path": path,
+                "group": group, "order": order, "actions": actions,
+                "companyId": COMPANY_ID,
+            }},
+            upsert=True,
+        )
+        break
+    await db.roles.update_many(
+        {"companyId": COMPANY_ID},
+        {"$pull": {"permissions": "ledger:reverse"}},
+    )
 
 
 def all_permissions():

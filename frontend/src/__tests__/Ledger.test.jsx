@@ -72,3 +72,44 @@ describe("Ledger client picker", () => {
     expect(screen.getByTestId("ledger-client")).toHaveTextContent("+919111111111")
   })
 })
+
+describe("Ledger reverse removed", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/ledger?")) {
+        return Promise.resolve({
+          data: {
+            entries: [
+              {
+                id: "e1",
+                client_id: "c1",
+                client_name: "Alpha",
+                type: "credit",
+                amount: 100,
+                balance_after: 100,
+                category: "deposit",
+                description: "Initial deposit",
+                created_by_name: "Admin",
+                created_at: "2026-09-12T10:00:00.000Z",
+                reversal_of: null,
+              },
+            ],
+            total: 1,
+            page: 1,
+            page_size: 25,
+            totals: { credit: 100, debit: 0 },
+          },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+  })
+
+  it("does not render reverse controls even when can() is true", async () => {
+    render(<Ledger />)
+    await waitFor(() => expect(screen.getByTestId("ledger-row-e1")).toBeInTheDocument())
+    expect(screen.queryByTestId("reverse-e1")).not.toBeInTheDocument()
+    expect(api.post).not.toHaveBeenCalledWith(expect.stringContaining("/reverse"))
+  })
+})

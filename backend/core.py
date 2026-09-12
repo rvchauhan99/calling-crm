@@ -207,6 +207,16 @@ async def client_scope_filter(principal: dict) -> dict:
     return await scope_filter(principal, "owner_id")
 
 
+def live_client_filter() -> dict:
+    """Exclude soft-deleted clients (missing deleted_at counts as live)."""
+    return {"deleted_at": None}
+
+
+def live_ledger_filter() -> dict:
+    """Exclude soft-deleted ledger entries (missing deleted_at counts as live)."""
+    return {"deleted_at": None}
+
+
 # ---------- Audit ----------
 async def audit(actor: dict, action: str, entity: str, entity_id: str = None, meta: dict = None):
     await db.audit_logs.insert_one({

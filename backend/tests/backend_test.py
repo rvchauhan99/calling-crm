@@ -1,6 +1,7 @@
 """Backend API tests for Calling CRM (auth, RBAC, scopes, leads, calls, clients, ledger, reports, admin)."""
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 import pytest
 import requests
 
@@ -1259,6 +1260,135 @@ class TestTodayCallsACW:
         clients = admin.get(f"{BASE_URL}/api/clients?search=TEST_AutoConv", timeout=60).json()["clients"]
         assert len([c for c in clients if c.get("lead_id") == lead["id"]]) == 1
 
+    def test_non_convert_disposition_unconverts_client_and_soft_deletes_ledger(self, admin, agent):
+        """Mistaken Convert → Call Back: leave Clients list; soft-delete ledger; restore lead."""
+        p = "81" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_Unconv", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        conv = [d for d in disps if d["name"] == "Converted"][0]
+        callback = [d for d in disps if d["name"] == "Call Back"][0]
+        assert callback.get("type") == "carry_forward"
+        assert not callback.get("converts_to_client")
+
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "notes": "mistaken deposit", "pipeline_stage": "Won",
+            "deposit_amount": 103}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json().get("converted") is True
+        assert r.json().get("deposit_posted") is True
+        cid = r.json()["client_id"]
+        detail = admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()
+        assert detail["client"]["balance"] == 103
+        assert detail["client"].get("ftd_at")
+        assert len(detail["ledger"]) >= 1
+
+        fu = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        undo = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": callback["id"],
+            "notes": "undo mistaken convert", "follow_up_at": fu}, timeout=30)
+        assert undo.status_code == 200, undo.text
+        body = undo.json()
+        assert body.get("unconverted") is True
+        assert body.get("converted") is False
+
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is not True
+        assert got.get("client_id") in (None, "")
+        assert got["status"] == "active"
+        assert got.get("disposition_name") == "Call Back"
+
+        listed = admin.get(f"{BASE_URL}/api/clients?search=TEST_Unconv&status=active", timeout=60).json()
+        assert not [c for c in listed["clients"] if c.get("id") == cid or c.get("lead_id") == lead["id"]]
+        inactive = admin.get(f"{BASE_URL}/api/clients?search=TEST_Unconv&status=inactive", timeout=60).json()
+        assert not [c for c in inactive["clients"] if c.get("id") == cid]
+        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).status_code == 404
+
+        ledger = admin.get(f"{BASE_URL}/api/ledger?page_size=100", timeout=120).json()
+        assert not [e for e in ledger["entries"] if e.get("client_id") == cid]
+
+        # Lead can reappear in follow-ups after unconvert
+        fus = admin.get(f"{BASE_URL}/api/followups?page_size=100", timeout=60).json()
+        assert lead["id"] in [l["id"] for l in fus["followups"]]
+
+        # Second Call Back is a no-op (already unconverted)
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        again = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": callback["id"],
+            "notes": "second callback", "follow_up_at": fu}, timeout=30)
+        assert again.status_code == 200
+        assert again.json().get("unconverted") is False
+
+        # Agent can unconvert via log-call but still cannot post ledger
+        denied = agent.post(f"{BASE_URL}/api/ledger/post", json={
+            "client_id": cid, "type": "credit", "amount": 10,
+            "idempotency_key": uniq("TEST_unconv_deny_")}, timeout=30)
+        assert denied.status_code == 403
+
+    def test_unconvert_without_deposit(self, admin, agent):
+        p = "80" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_UnconvNoDep", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        conv = [d for d in disps if d["name"] == "Converted"][0]
+        callback = [d for d in disps if d["name"] == "Call Back"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"]}, timeout=30)
+        assert r.status_code == 200
+        cid = r.json()["client_id"]
+        fu = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        undo = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": callback["id"],
+            "follow_up_at": fu}, timeout=30)
+        assert undo.status_code == 200
+        assert undo.json().get("unconverted") is True
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is not True
+        assert got["status"] == "active"
+        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).status_code == 404
+
+    def test_reconvert_after_unconvert_creates_new_client(self, admin, agent):
+        p = "79" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_Reconv", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        conv = [d for d in disps if d["name"] == "Converted"][0]
+        callback = [d for d in disps if d["name"] == "Call Back"][0]
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        first = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "deposit_amount": 50}, timeout=30).json()
+        cid1 = first["client_id"]
+        fu = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": callback["id"], "follow_up_at": fu}, timeout=30)
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        second = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": conv["id"],
+            "deposit_amount": 75}, timeout=30)
+        assert second.status_code == 200, second.text
+        assert second.json().get("converted") is True
+        cid2 = second.json()["client_id"]
+        assert cid2 != cid1
+        detail = admin.get(f"{BASE_URL}/api/clients/{cid2}", timeout=30).json()
+        assert detail["client"]["balance"] == 75
+        assert admin.get(f"{BASE_URL}/api/clients/{cid1}", timeout=30).status_code == 404
+
     def test_convert_with_optional_deposit(self, admin, agent):
         p = "85" + uuid.uuid4().int.__str__()[:8]
         lead = admin.post(f"{BASE_URL}/api/leads",
@@ -1587,6 +1717,60 @@ class TestClientsLedger:
         for lead in r.json()["leads"]:
             assert "id" in lead and "name" in lead and "phone" in lead
 
+    def test_manual_unconvert_soft_deletes_client_and_ledger(self, admin, agent):
+        p = "78" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_ManualUnconv", "phone": p}, timeout=30).json()["lead"]
+        conv = admin.post(f"{BASE_URL}/api/clients/convert",
+                          json={"lead_id": lead["id"], "deposit_amount": 103}, timeout=30)
+        assert conv.status_code == 200, conv.text
+        cid = conv.json()["client"]["id"]
+        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()["client"]["balance"] == 103
+
+        # Agent lacks clients:edit
+        denied = agent.post(f"{BASE_URL}/api/clients/{cid}/unconvert", timeout=30)
+        assert denied.status_code == 403
+
+        r = admin.post(f"{BASE_URL}/api/clients/{cid}/unconvert", timeout=30)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body.get("unconverted") is True
+        assert body.get("client_id") == cid
+        assert body.get("lead_id") == lead["id"]
+
+        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).status_code == 404
+        active = admin.get(f"{BASE_URL}/api/clients?search=TEST_ManualUnconv&status=active", timeout=60).json()
+        assert not [c for c in active["clients"] if c.get("id") == cid]
+        inactive = admin.get(f"{BASE_URL}/api/clients?search=TEST_ManualUnconv&status=inactive", timeout=60).json()
+        assert not [c for c in inactive["clients"] if c.get("id") == cid]
+
+        ledger = admin.get(f"{BASE_URL}/api/ledger?page_size=100", timeout=120).json()
+        assert not [e for e in ledger["entries"] if e.get("client_id") == cid]
+
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is not True
+        assert got.get("client_id") in (None, "")
+        assert got["status"] == "active"
+        assert got.get("pipeline_stage") != "Won"
+
+        # Already soft-deleted → 404
+        again = admin.post(f"{BASE_URL}/api/clients/{cid}/unconvert", timeout=30)
+        assert again.status_code == 404
+
+    def test_manual_unconvert_without_deposit(self, admin):
+        p = "76" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_ManualUnconvNoDep", "phone": p}, timeout=30).json()["lead"]
+        cid = admin.post(f"{BASE_URL}/api/clients/convert",
+                         json={"lead_id": lead["id"]}, timeout=30).json()["client"]["id"]
+        r = admin.post(f"{BASE_URL}/api/clients/{cid}/unconvert", timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json().get("unconverted") is True
+        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).status_code == 404
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got.get("is_client") is not True
+        assert got["status"] == "active"
+
     def test_ledger_full_flow(self, admin):
         # fresh client for deterministic balance
         p = "92" + uuid.uuid4().int.__str__()[:8]
@@ -1647,22 +1831,83 @@ class TestClientsLedger:
             "client_id": "nope", "type": "credit", "amount": 5, "idempotency_key": uniq()},
             timeout=30).status_code == 404
 
-        # reversal is additive + immutable
-        rev = admin.post(f"{BASE_URL}/api/ledger/{e['id']}/reverse", timeout=30)
-        assert rev.status_code == 200, rev.text
-        rentry = rev.json()["entry"]
-        assert rentry["type"] == "debit" and rentry["reversal_of"] == e["id"]
-        assert rentry["balance_after"] == 0.0
-        assert admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()["client"]["balance"] == 0.0
-        # original entry unchanged
-        led = admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()["ledger"]
-        orig = [x for x in led if x["id"] == e["id"]][0]
-        assert orig["amount"] == 5000.0 and orig["type"] == "credit"
-        # double reversal blocked
-        assert admin.post(f"{BASE_URL}/api/ledger/{e['id']}/reverse", timeout=30).status_code == 400
-        # reversing a reversal blocked
-        assert admin.post(f"{BASE_URL}/api/ledger/{rentry['id']}/reverse", timeout=30).status_code == 400
+        # reverse endpoint retired
+        assert admin.post(f"{BASE_URL}/api/ledger/{e['id']}/reverse", timeout=30).status_code == 404
         assert admin.post(f"{BASE_URL}/api/ledger/nope/reverse", timeout=30).status_code == 404
+
+    def test_ledger_reversal_cleanup_restores_balance(self, admin):
+        """Mistaken reversal rows are soft-deleted; deposit + client balance restored."""
+        import asyncio
+        import os
+        import sys
+        from pathlib import Path
+        from motor.motor_asyncio import AsyncIOMotorClient
+        from dotenv import dotenv_values, load_dotenv
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        load_dotenv(backend_dir / ".env")
+        env = dotenv_values(backend_dir / ".env")
+        mongo = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+        dbname = os.environ.get("DB_NAME") or env.get("DB_NAME")
+        company = os.environ.get("COMPANY_ID") or env.get("COMPANY_ID") or "default"
+
+        p = "93" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_RevCleanup", "phone": p}, timeout=30).json()["lead"]
+        cid = admin.post(f"{BASE_URL}/api/clients/convert",
+                         json={"lead_id": lead["id"]}, timeout=30).json()["client"]["id"]
+        dep = admin.post(f"{BASE_URL}/api/ledger/post", json={
+            "client_id": cid, "type": "credit", "amount": 103, "description": "TEST_Initial deposit",
+            "category": "deposit", "idempotency_key": uniq("TEST_revclean_")}, timeout=30)
+        assert dep.status_code == 200, dep.text
+        entry = dep.json()["entry"]
+        assert entry["balance_after"] == 103.0
+
+        rev_id = str(uuid.uuid4())
+
+        async def seed_and_cleanup():
+            c = AsyncIOMotorClient(mongo)
+            db = c[dbname]
+            await db.ledger.insert_one({
+                "id": rev_id,
+                "companyId": company,
+                "client_id": cid,
+                "type": "debit",
+                "amount": 103.0,
+                "balance_after": 0.0,
+                "description": f"Reversal of {entry['description']}",
+                "category": "reversal",
+                "idempotency_key": str(uuid.uuid4()),
+                "reversal_of": entry["id"],
+                "created_by": "admin",
+                "created_by_name": "Admin",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "deleted_at": None,
+                "deleted_by": None,
+                "deleted_reason": None,
+            })
+            await db.clients.update_one({"id": cid}, {"$set": {"balance": 0.0}})
+            bal = (await db.clients.find_one({"id": cid}, {"balance": 1}))["balance"]
+            c.close()
+            assert bal == 0.0
+
+            sys.path.insert(0, str(backend_dir))
+            from ledger_cleanup import ensure_cleanup_ledger_reversals
+            first = await ensure_cleanup_ledger_reversals()
+            second = await ensure_cleanup_ledger_reversals()
+            return first, second
+
+        first, second = asyncio.run(seed_and_cleanup())
+        assert first["deleted"] >= 1
+        assert first["clients_updated"] >= 1
+        assert second["deleted"] == 0
+
+        cl = admin.get(f"{BASE_URL}/api/clients/{cid}", timeout=30).json()
+        assert cl["client"]["balance"] == 103.0
+        live = [x for x in cl["ledger"] if x.get("id") == rev_id]
+        assert live == [], "reversal must not appear in live ledger"
+        orig = [x for x in cl["ledger"] if x["id"] == entry["id"]][0]
+        assert orig["amount"] == 103.0 and orig["balance_after"] == 103.0
 
     def test_ledger_list_and_export(self, admin):
         r = admin.get(f"{BASE_URL}/api/ledger?page_size=5", timeout=120)

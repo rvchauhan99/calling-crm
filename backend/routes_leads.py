@@ -12,7 +12,8 @@ from lead_import_jobs import (
 from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
-                  now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit)
+                  now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit,
+                  live_client_filter)
 from lead_sources import (
     list_lead_sources,
     source_names,
@@ -524,7 +525,7 @@ async def lead_360(lid: str, principal: dict = Depends(require("leads:view"))):
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     calls = await db.calls.find({"lead_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(200)
-    client = await db.clients.find_one({"lead_id": lid}, {"_id": 0})
+    client = await db.clients.find_one({"lead_id": lid, **live_client_filter()}, {"_id": 0})
     activity = await db.audit_logs.find(
         {
             "companyId": COMPANY_ID,
@@ -860,6 +861,7 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
 
     # Auto-convert when disposition converts_to_client (or legacy name Converted)
     converted = False
+    unconverted = False
     client_id = lead.get("client_id")
     deposit_posted = False
     ledger_entry_id = None
@@ -894,6 +896,25 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
                 )
                 deposit_posted = bool(dep.get("deposit_posted"))
                 ledger_entry_id = (dep.get("entry") or {}).get("id") if dep.get("entry") else None
+    elif lead.get("is_client") or lead.get("client_id"):
+        # Mistaken convert undo: non-convert disposition soft-deletes client + ledger
+        from routes_clients import _unconvert_client
+        result = await _unconvert_client(
+            lead, principal, reason=f"disposition:{disp.get('name') or 'unknown'}",
+        )
+        unconverted = bool(result.get("unconverted"))
+        if unconverted:
+            client_id = result.get("client_id")
+            status_fix = "active" if carry else "inactive"
+            await db.leads.update_one(
+                {"id": body.lead_id, "companyId": COMPANY_ID},
+                {"$set": {
+                    "is_client": False,
+                    "client_id": None,
+                    "status": status_fix,
+                    "updated_at": now_iso(),
+                }},
+            )
 
     # ACW pending is a reminder only: set on ACW disposition; clear only for same lead or complete-acw
     if disp.get("requires_acw"):
@@ -908,6 +929,7 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         "carry_forward": carry,
         "acw": bool(disp.get("requires_acw")),
         "converted": converted,
+        "unconverted": unconverted,
         "client_id": client_id,
         "deposit_posted": deposit_posted,
         "ledger_entry_id": ledger_entry_id,

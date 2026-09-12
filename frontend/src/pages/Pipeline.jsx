@@ -156,6 +156,8 @@ export default function Pipeline() {
         toast.success(res.deposit_posted
           ? "Lead converted to client · Deposit posted"
           : "Lead converted to client")
+      } else if (res.unconverted) {
+        toast.success("Client conversion undone · Removed from Clients")
       } else toast.success(moveTarget ? `Moved to ${stage}` : "Call logged")
       setMoveTarget(null)
       setLogLead(null)

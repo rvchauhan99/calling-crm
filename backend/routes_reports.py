@@ -5,7 +5,8 @@ from datetime import timedelta, timezone, datetime, time, date
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
-from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc)
+from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc,
+                  live_client_filter, live_ledger_filter)
 from lead_sources import source_names
 from caller_sales import sales_disp_counts
 
@@ -132,7 +133,7 @@ async def dashboard(
 
     lq = {"companyId": COMPANY_ID, **lead_scope}
     cq = {"companyId": COMPANY_ID, **call_scope}
-    clq = {"companyId": COMPANY_ID, **client_scope}
+    clq = {"companyId": COMPANY_ID, **live_client_filter(), **client_scope}
 
     # OWN scope: force self, ignore unassigned assignment_status
     if is_own:
@@ -177,7 +178,9 @@ async def dashboard(
     total_clients = await db.clients.count_documents(clq)
     ftd_clients = await db.clients.count_documents({**clq, "ftd_at": {"$ne": None}})
     client_ids = [c["id"] for c in await db.clients.find(clq, {"_id": 0, "id": 1}).to_list(5000)]
-    ledger = await db.ledger.find({"client_id": {"$in": client_ids}}, {"_id": 0}).to_list(100000)
+    ledger = await db.ledger.find(
+        {"client_id": {"$in": client_ids}, **live_ledger_filter()}, {"_id": 0},
+    ).to_list(100000)
     credit = round(sum(e["amount"] for e in ledger if e["type"] == "credit"), 2)
     debit = round(sum(e["amount"] for e in ledger if e["type"] == "debit"), 2)
 
@@ -614,7 +617,7 @@ async def affiliate_report(
     affs = await db.users.find(q, {"_id": 0}).to_list(500)
     rows = []
     for a in affs:
-        cq = {"companyId": COMPANY_ID, "affiliate_id": a["id"], **date_q}
+        cq = {"companyId": COMPANY_ID, "affiliate_id": a["id"], **live_client_filter(), **date_q}
         clients = await db.clients.find(cq, {"_id": 0}).to_list(5000)
         ftd = sum(1 for c in clients if c.get("ftd_at") and (not from_d and not to_d or in_range(c.get("ftd_at"), from_d, to_d)))
         deposits = round(sum(c.get("balance", 0) for c in clients), 2)
@@ -809,10 +812,12 @@ async def export_calls(
 
 @router.get("/ledger/export")
 async def export_ledger(principal: dict = Depends(require("ledger:export"))):
-    cfilter = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    cfilter = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     client_ids = [c["id"] for c in await db.clients.find(cfilter, {"_id": 0, "id": 1}).to_list(5000)]
     cmap = {c["id"]: c["name"] for c in await db.clients.find(cfilter, {"_id": 0}).to_list(5000)}
-    entries = await db.ledger.find({"client_id": {"$in": client_ids}}, {"_id": 0}).sort("created_at", -1).to_list(50000)
+    entries = await db.ledger.find(
+        {"client_id": {"$in": client_ids}, **live_ledger_filter()}, {"_id": 0},
+    ).sort("created_at", -1).to_list(50000)
     for e in entries:
         e["client_name"] = cmap.get(e["client_id"])
     return _csv_response(entries, ["created_at", "client_name", "type", "amount",

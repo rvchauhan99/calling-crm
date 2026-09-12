@@ -16,7 +16,7 @@ import { Plus, ShieldCheck, Pencil, Trash2, Lock } from "lucide-react";
 
 const ACTION_LABELS = {
   view: "View", create: "Create", edit: "Edit", delete: "Delete", import: "Import",
-  export: "Export", assign: "Assign", log: "Log", post: "Post", reverse: "Reverse", convert: "Convert",
+  export: "Export", assign: "Assign", log: "Log", post: "Post", convert: "Convert",
 };
 
 export default function Roles() {

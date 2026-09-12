@@ -22,7 +22,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { toast } from "sonner"
-import { UserCog, Search, Plus, UserPlus } from "lucide-react"
+import { UserCog, Search, Plus, UserPlus, Undo2 } from "lucide-react"
 import { parseDepositAmount } from "@/lib/followupBuckets"
 
 export default function Clients() {
@@ -38,6 +38,7 @@ export default function Clients() {
   const [convertLeadId, setConvertLeadId] = useState("")
   const [convertSearch, setConvertSearch] = useState("")
   const [convertDeposit, setConvertDeposit] = useState("")
+  const [unconverting, setUnconverting] = useState(false)
 
   const search = params.get("search") || ""
   const statusTab = params.get("status") === "inactive" ? "inactive" : "active"
@@ -113,6 +114,26 @@ export default function Clients() {
       load()
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail))
+    }
+  }
+
+  const handleUnconvert = async () => {
+    if (!detail?.client?.id) return
+    const ok = window.confirm(
+      "Undo conversion? This soft-deletes the client and ledger entries, clears FTD/balance, and returns the lead to the sales queue. They will leave both Active and Inactive Clients.",
+    )
+    if (!ok) return
+    setUnconverting(true)
+    try {
+      await api.post(`/clients/${detail.client.id}/unconvert`)
+      toast.success("Conversion undone · Removed from Clients")
+      setDetail(null)
+      setNote("")
+      await load()
+    } catch (e) {
+      toast.error(formatApiError(e.response?.data?.detail))
+    } finally {
+      setUnconverting(false)
     }
   }
 
@@ -223,6 +244,20 @@ export default function Clients() {
                   data-testid="client-view-lead"
                 >
                   View lead
+                </Button>
+              )}
+              {can("clients:edit") && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3 ml-2 border-amber-300 text-amber-800 hover:bg-amber-50"
+                  onClick={handleUnconvert}
+                  disabled={unconverting}
+                  data-testid="client-unconvert-btn"
+                  aria-label="Undo conversion"
+                >
+                  <Undo2 size={14} className="mr-1.5" />
+                  {unconverting ? "Undoing…" : "Undo conversion"}
                 </Button>
               )}
               <div className="mt-5 grid grid-cols-3 gap-3">

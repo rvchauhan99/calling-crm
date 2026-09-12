@@ -14,7 +14,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { toast } from "sonner";
-import { Wallet, Plus, Download, Undo2, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { Wallet, Plus, Download, ArrowUpRight, ArrowDownRight } from "lucide-react";
 
 function uuid() {
   return (crypto.randomUUID && crypto.randomUUID()) || `${Date.now()}-${Math.random()}`;
@@ -67,12 +67,6 @@ export default function Ledger() {
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   };
 
-  const reverse = async (id) => {
-    if (!window.confirm("Post a reversing entry? The original stays immutable.")) return;
-    try { await api.post(`/ledger/${id}/reverse`); toast.success("Reversed"); load(); }
-    catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
-  };
-
   const exportCsv = async () => {
     const res = await fetch(`${API}/ledger/export`, { headers: { Authorization: `Bearer ${getToken()}` } });
     const blob = await res.blob();
@@ -108,7 +102,7 @@ export default function Ledger() {
                 <TableRow className="bg-slate-50">
                   <TableHead>Date</TableHead><TableHead>Client</TableHead><TableHead>Category</TableHead><TableHead>Description</TableHead>
                   <TableHead className="text-right">Amount</TableHead><TableHead className="text-right">Balance After</TableHead>
-                  <TableHead>By</TableHead>{can("ledger:reverse") && <TableHead></TableHead>}
+                  <TableHead>By</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -121,11 +115,6 @@ export default function Ledger() {
                     <TableCell className={`text-right tabular font-medium ${e.type === "credit" ? "text-sky-600" : "text-amber-600"}`}>{e.type === "credit" ? "+" : "−"}<Money value={e.amount} /></TableCell>
                     <TableCell className="text-right tabular text-slate-600"><Money value={e.balance_after} /></TableCell>
                     <TableCell className="text-slate-500">{e.created_by_name}</TableCell>
-                    {can("ledger:reverse") && (
-                      <TableCell>
-                        {!e.reversal_of && <Button variant="ghost" size="sm" onClick={() => reverse(e.id)} data-testid={`reverse-${e.id}`}><Undo2 size={15} className="text-slate-500" /></Button>}
-                      </TableCell>
-                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -146,7 +135,7 @@ export default function Ledger() {
       <Dialog open={show} onOpenChange={setShow}>
         <DialogContent className="bg-white" data-testid="ledger-dialog">
           <DialogHeader><DialogTitle>Post Ledger Entry</DialogTitle>
-            <DialogDescription>Entries are immutable; corrections use reversals.</DialogDescription>
+            <DialogDescription>Entries are immutable; post a correcting entry if needed.</DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <SearchableSelect

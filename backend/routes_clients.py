@@ -2,7 +2,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, new_id, now_iso, audit)
+from core import (
+    db, COMPANY_ID, require, scope_filter, client_scope_filter, new_id, now_iso, audit,
+    live_client_filter, live_ledger_filter,
+)
 
 router = APIRouter(prefix="/api", tags=["clients"])
 
@@ -21,7 +24,7 @@ class NoteIn(BaseModel):
 async def list_clients(search: Optional[str] = None, status: Optional[str] = None,
                        page: int = 1, page_size: int = 25,
                        principal: dict = Depends(require("clients:view"))):
-    q = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    q = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     if status in ("active", "inactive"):
         q["status"] = status
     if search:
@@ -35,7 +38,7 @@ async def list_clients(search: Optional[str] = None, status: Optional[str] = Non
 
 @router.get("/clients/tab-counts")
 async def clients_tab_counts(principal: dict = Depends(require("clients:view"))):
-    base = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    base = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     active = await db.clients.count_documents({**base, "status": "active"})
     inactive = await db.clients.count_documents({**base, "status": "inactive"})
     return {"active": active, "inactive": inactive}
@@ -70,6 +73,7 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
         "owner_id": lead.get("assigned_to") or principal["id"],
         "affiliate_id": affiliate_id, "ftd_at": None, "balance": 0.0,
         "status": "active", "notes": [], "created_at": now_iso(),
+        "deleted_at": None, "deleted_by": None, "deleted_reason": None,
     }
     await db.clients.insert_one(dict(client))
     await db.leads.update_one(
@@ -83,6 +87,58 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
     )
     await audit(principal, "convert", "client", cid, {"lead_id": lead["id"]})
     return client
+
+
+async def _unconvert_client(lead: dict, principal: dict, *, reason: str) -> dict:
+    """Soft-delete client + ledger and clear lead conversion flags. Idempotent if already undone."""
+    client_id = lead.get("client_id")
+    lead_id = lead.get("id")
+    if not client_id and not lead.get("is_client"):
+        return {"unconverted": False, "client_id": None}
+
+    now = now_iso()
+    soft = {
+        "deleted_at": now,
+        "deleted_by": principal.get("id"),
+        "deleted_reason": reason or "unconvert",
+    }
+
+    if client_id:
+        client = await db.clients.find_one(
+            {"id": client_id, "companyId": COMPANY_ID}, {"_id": 0},
+        )
+        if client and not client.get("deleted_at"):
+            await db.ledger.update_many(
+                {"client_id": client_id, "companyId": COMPANY_ID, **live_ledger_filter()},
+                {"$set": soft},
+            )
+            await db.clients.update_one(
+                {"id": client_id, "companyId": COMPANY_ID},
+                {"$set": {
+                    **soft,
+                    "status": "inactive",
+                    "balance": 0.0,
+                    "ftd_at": None,
+                }},
+            )
+        elif not client:
+            client_id = None
+
+    if lead_id:
+        await db.leads.update_one(
+            {"id": lead_id, "companyId": COMPANY_ID},
+            {"$set": {
+                "is_client": False,
+                "client_id": None,
+                "updated_at": now,
+            }},
+        )
+
+    await audit(
+        principal, "unconvert", "client", client_id,
+        {"lead_id": lead_id, "reason": reason},
+    )
+    return {"unconverted": True, "client_id": client_id}
 
 
 async def _post_conversion_deposit(
@@ -105,11 +161,15 @@ async def _post_conversion_deposit(
     if amt == 0:
         return {"deposit_posted": False, "entry": None, "idempotent": False}
 
-    client = await db.clients.find_one({"id": client_id, "companyId": COMPANY_ID}, {"_id": 0})
+    client = await db.clients.find_one(
+        {"id": client_id, "companyId": COMPANY_ID, **live_client_filter()}, {"_id": 0},
+    )
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
 
-    existing = await db.ledger.find_one({"idempotency_key": idempotency_key}, {"_id": 0})
+    existing = await db.ledger.find_one(
+        {"idempotency_key": idempotency_key, **live_ledger_filter()}, {"_id": 0},
+    )
     if existing:
         return {"deposit_posted": True, "entry": existing, "idempotent": True}
 
@@ -129,11 +189,16 @@ async def _post_conversion_deposit(
         "created_by": principal["id"],
         "created_by_name": principal["name"],
         "created_at": now_iso(),
+        "deleted_at": None,
+        "deleted_by": None,
+        "deleted_reason": None,
     }
     try:
         await db.ledger.insert_one(dict(entry))
     except Exception:
-        dupe = await db.ledger.find_one({"idempotency_key": idempotency_key}, {"_id": 0})
+        dupe = await db.ledger.find_one(
+            {"idempotency_key": idempotency_key, **live_ledger_filter()}, {"_id": 0},
+        )
         if dupe:
             return {"deposit_posted": True, "entry": dupe, "idempotent": True}
         raise
@@ -180,17 +245,71 @@ async def convert_lead(body: ConvertIn, principal: dict = Depends(require("clien
 
 @router.get("/clients/{cid}")
 async def client_detail(cid: str, principal: dict = Depends(require("clients:view"))):
-    client = await db.clients.find_one({"id": cid, "companyId": COMPANY_ID}, {"_id": 0})
+    client = await db.clients.find_one(
+        {"id": cid, "companyId": COMPANY_ID, **live_client_filter()}, {"_id": 0},
+    )
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
-    ledger = await db.ledger.find({"client_id": cid}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    ledger = await db.ledger.find(
+        {"client_id": cid, **live_ledger_filter()}, {"_id": 0},
+    ).sort("created_at", -1).to_list(1000)
     return {"client": client, "ledger": ledger}
+
+
+@router.post("/clients/{cid}/unconvert")
+async def unconvert_client(cid: str, principal: dict = Depends(require("clients:edit"))):
+    """Manual full undo: soft-delete client + ledger and restore linked lead to sales queue."""
+    client = await db.clients.find_one(
+        {"id": cid, "companyId": COMPANY_ID, **live_client_filter()}, {"_id": 0},
+    )
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+
+    lead = None
+    lead_id = client.get("lead_id")
+    if lead_id:
+        lead = await db.leads.find_one({"id": lead_id, "companyId": COMPANY_ID}, {"_id": 0})
+    if not lead:
+        lead = await db.leads.find_one(
+            {"companyId": COMPANY_ID, "client_id": cid}, {"_id": 0},
+        )
+    if not lead:
+        lead = {"id": lead_id, "client_id": cid, "is_client": True}
+
+    result = await _unconvert_client(lead, principal, reason="manual:clients_ui")
+    if not result.get("unconverted"):
+        raise HTTPException(status_code=400, detail="Client could not be unconverted")
+
+    resolved_lead_id = lead.get("id") or lead_id
+    if resolved_lead_id:
+        lead_set = {
+            "is_client": False,
+            "client_id": None,
+            "status": "active",
+            "updated_at": now_iso(),
+        }
+        fresh = await db.leads.find_one({"id": resolved_lead_id, "companyId": COMPANY_ID}, {"_id": 0})
+        if fresh and fresh.get("pipeline_stage") == "Won":
+            lead_set["pipeline_stage"] = "Contacted"
+        await db.leads.update_one(
+            {"id": resolved_lead_id, "companyId": COMPANY_ID},
+            {"$set": lead_set},
+        )
+
+    return {
+        "unconverted": True,
+        "client_id": cid,
+        "lead_id": resolved_lead_id,
+    }
 
 
 @router.post("/clients/{cid}/notes")
 async def add_note(cid: str, body: NoteIn, principal: dict = Depends(require("clients:edit"))):
     note = {"id": new_id(), "text": body.text, "author": principal["name"], "created_at": now_iso()}
-    res = await db.clients.update_one({"id": cid, "companyId": COMPANY_ID}, {"$push": {"notes": note}})
+    res = await db.clients.update_one(
+        {"id": cid, "companyId": COMPANY_ID, **live_client_filter()},
+        {"$push": {"notes": note}},
+    )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Client not found")
     return {"note": note}
@@ -207,8 +326,10 @@ class LedgerPostIn(BaseModel):
 
 
 async def _recompute_balance(client_id: str) -> float:
-    """Balance derived from immutable entries; never mutated in place."""
-    entries = await db.ledger.find({"client_id": client_id}, {"_id": 0}).sort("created_at", 1).to_list(10000)
+    """Balance derived from live immutable entries; soft-deleted rows are ignored."""
+    entries = await db.ledger.find(
+        {"client_id": client_id, **live_ledger_filter()}, {"_id": 0},
+    ).sort("created_at", 1).to_list(10000)
     bal = 0.0
     for e in entries:
         bal += e["amount"] if e["type"] == "credit" else -e["amount"]
@@ -219,9 +340,9 @@ async def _recompute_balance(client_id: str) -> float:
 async def ledger_all(page: int = 1, page_size: int = 40,
                      principal: dict = Depends(require("ledger:view"))):
     # scope by client ownership
-    cfilter = {"companyId": COMPANY_ID, **await client_scope_filter(principal)}
+    cfilter = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     client_ids = [c["id"] for c in await db.clients.find(cfilter, {"_id": 0, "id": 1}).to_list(5000)]
-    q = {"client_id": {"$in": client_ids}}
+    q = {"client_id": {"$in": client_ids}, **live_ledger_filter()}
     total = await db.ledger.count_documents(q)
     skip = (page - 1) * page_size
     entries = await db.ledger.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
@@ -240,11 +361,15 @@ async def post_entry(body: LedgerPostIn, principal: dict = Depends(require("ledg
         raise HTTPException(status_code=400, detail="type must be credit or debit")
     if body.amount <= 0:
         raise HTTPException(status_code=400, detail="amount must be positive")
-    client = await db.clients.find_one({"id": body.client_id, "companyId": COMPANY_ID}, {"_id": 0})
+    client = await db.clients.find_one(
+        {"id": body.client_id, "companyId": COMPANY_ID, **live_client_filter()}, {"_id": 0},
+    )
     if not client:
         raise HTTPException(status_code=404, detail="Client not found")
     # idempotency
-    existing = await db.ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+    existing = await db.ledger.find_one(
+        {"idempotency_key": body.idempotency_key, **live_ledger_filter()}, {"_id": 0},
+    )
     if existing:
         return {"entry": existing, "idempotent": True}
 
@@ -258,11 +383,14 @@ async def post_entry(body: LedgerPostIn, principal: dict = Depends(require("ledg
              "description": body.description, "category": body.category,
              "idempotency_key": body.idempotency_key, "reversal_of": None,
              "created_by": principal["id"], "created_by_name": principal["name"],
-             "created_at": now_iso()}
+             "created_at": now_iso(),
+             "deleted_at": None, "deleted_by": None, "deleted_reason": None}
     try:
         await db.ledger.insert_one(dict(entry))
     except Exception:
-        dupe = await db.ledger.find_one({"idempotency_key": body.idempotency_key}, {"_id": 0})
+        dupe = await db.ledger.find_one(
+            {"idempotency_key": body.idempotency_key, **live_ledger_filter()}, {"_id": 0},
+        )
         if dupe:
             return {"entry": dupe, "idempotent": True}
         raise
@@ -275,27 +403,3 @@ async def post_entry(body: LedgerPostIn, principal: dict = Depends(require("ledg
     await audit(principal, "ledger_post", "client", body.client_id,
                 {"type": body.type, "amount": body.amount})
     return {"entry": entry, "idempotent": False}
-
-
-@router.post("/ledger/{entry_id}/reverse")
-async def reverse_entry(entry_id: str, principal: dict = Depends(require("ledger:reverse"))):
-    orig = await db.ledger.find_one({"id": entry_id, "companyId": COMPANY_ID}, {"_id": 0})
-    if not orig:
-        raise HTTPException(status_code=404, detail="Entry not found")
-    if orig.get("reversal_of"):
-        raise HTTPException(status_code=400, detail="Cannot reverse a reversal entry")
-    if await db.ledger.find_one({"reversal_of": entry_id}):
-        raise HTTPException(status_code=400, detail="Entry already reversed")
-    rev_type = "debit" if orig["type"] == "credit" else "credit"
-    prev_balance = await _recompute_balance(orig["client_id"])
-    new_balance = round(prev_balance + (orig["amount"] if rev_type == "credit" else -orig["amount"]), 2)
-    entry = {"id": new_id(), "companyId": COMPANY_ID, "client_id": orig["client_id"],
-             "type": rev_type, "amount": orig["amount"], "balance_after": new_balance,
-             "description": f"Reversal of {orig['description'] or orig['id'][:8]}",
-             "category": "reversal", "idempotency_key": new_id(), "reversal_of": entry_id,
-             "created_by": principal["id"], "created_by_name": principal["name"],
-             "created_at": now_iso()}
-    await db.ledger.insert_one(dict(entry))
-    await db.clients.update_one({"id": orig["client_id"]}, {"$set": {"balance": new_balance}})
-    await audit(principal, "ledger_reverse", "client", orig["client_id"], {"entry": entry_id})
-    return {"entry": entry}

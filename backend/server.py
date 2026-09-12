@@ -88,6 +88,18 @@ async def lifespan(_app: FastAPI):
         logger.info("Telephony menus ensured")
     except Exception as e:
         logger.exception("ensure_telephony_menus failed: %s", e)
+    try:
+        from seed import ensure_ledger_menu_without_reverse
+        await ensure_ledger_menu_without_reverse()
+        logger.info("Ledger menu reverse permission stripped")
+    except Exception as e:
+        logger.exception("ensure_ledger_menu_without_reverse failed: %s", e)
+    try:
+        from ledger_cleanup import ensure_cleanup_ledger_reversals
+        result = await ensure_cleanup_ledger_reversals()
+        logger.info("Ledger reversal cleanup done: %s", result)
+    except Exception as e:
+        logger.exception("ensure_cleanup_ledger_reversals failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()

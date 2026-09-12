@@ -124,6 +124,8 @@ export default function Followups() {
         toast.success(res.deposit_posted
           ? "Lead converted to client · Deposit posted"
           : "Lead converted to client")
+      } else if (res.unconverted) {
+        toast.success("Client conversion undone · Removed from Clients")
       } else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
       setActive(null)
       load()
