@@ -14,6 +14,30 @@ def uniq(p="TEST_"):
     return f"{p}{uuid.uuid4().hex[:8]}"
 
 
+def _non_callback_carry_forward(disps):
+    """Pick a carry-forward disposition that does not require a follow-up date."""
+    def _is_call_back(name):
+        n = (name or "").strip()
+        return n == "Call Back" or n.startswith("Call Back")
+
+    preferred = [
+        d for d in disps
+        if d.get("name") == "Interested"
+        and d.get("type") == "carry_forward"
+        and not d.get("requires_acw")
+    ]
+    if preferred:
+        return preferred[0]
+    matches = [
+        d for d in disps
+        if d.get("type") == "carry_forward"
+        and not d.get("requires_acw")
+        and not _is_call_back(d.get("name"))
+    ]
+    assert matches, "Need a non-Call-Back carry_forward disposition"
+    return matches[0]
+
+
 # ---------------- Health & Auth ----------------
 class TestHealthAuth:
     def test_health(self, anon):
@@ -712,11 +736,17 @@ class TestLeads:
         assert body["total"] == sum(body["counts"].values())
         for stage in body["stages"]:
             assert len(body["board"].get(stage) or []) <= body["page_size"]
-        counts = admin.get(f"{BASE_URL}/api/pipeline/counts", timeout=60)
-        assert counts.status_code == 200
-        cbody = counts.json()
-        assert cbody["total"] == body["total"]
-        assert cbody["counts"] == body["counts"]
+        # Counts endpoint can race other xdist workers creating leads; retry once.
+        matched = False
+        for _ in range(2):
+            counts = admin.get(f"{BASE_URL}/api/pipeline/counts", timeout=60)
+            assert counts.status_code == 200
+            cbody = counts.json()
+            p2 = admin.get(f"{BASE_URL}/api/pipeline", timeout=60).json()
+            if cbody["total"] == p2["total"] and cbody["counts"] == p2["counts"]:
+                matched = True
+                break
+        assert matched, "pipeline board/counts drifted across retries under parallel load"
         f = agent.get(f"{BASE_URL}/api/followups", timeout=60)
         assert f.status_code == 200
         body = f.json()
@@ -987,6 +1017,61 @@ class TestDispositions:
         assert converted[0].get("default_pipeline_stage") == "Won"
         assert converted[0].get("converts_to_client") is True
 
+    def test_activity_history_field_diffs(self, admin, agent):
+        name = uniq("TEST_DispAct_")
+        created = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": name, "slot": 42, "type": "carry_forward",
+            "requires_acw": False, "color": "#0EA5E9", "active": True,
+            "default_pipeline_stage": "Contacted", "converts_to_client": False,
+        }, timeout=30)
+        assert created.status_code == 200, created.text
+        d = created.json()["disposition"]
+
+        row = admin.get(f"{BASE_URL}/api/dispositions/{d['id']}/activity", timeout=30)
+        assert row.status_code == 200, row.text
+        create_logs = [x for x in row.json()["logs"] if x["action"] == "create"]
+        assert create_logs
+        assert create_logs[0]["meta"]["name"] == name
+        assert create_logs[0]["meta"]["after"]["name"] == name
+        assert create_logs[0]["meta"]["after"]["default_pipeline_stage"] == "Contacted"
+
+        upd = admin.put(f"{BASE_URL}/api/dispositions/{d['id']}", json={
+            "name": name, "slot": 42, "type": "non_carry_forward",
+            "requires_acw": True, "color": "#0EA5E9", "active": True,
+            "default_pipeline_stage": "Lost", "converts_to_client": False,
+        }, timeout=30)
+        assert upd.status_code == 200, upd.text
+
+        row = admin.get(f"{BASE_URL}/api/dispositions/{d['id']}/activity", timeout=30)
+        assert row.status_code == 200
+        update_logs = [x for x in row.json()["logs"] if x["action"] == "update"]
+        assert update_logs
+        changes = update_logs[0]["meta"]["changes"]
+        assert changes["type"]["from"] == "carry_forward"
+        assert changes["type"]["to"] == "non_carry_forward"
+        assert changes["requires_acw"]["from"] is False
+        assert changes["requires_acw"]["to"] is True
+        assert changes["default_pipeline_stage"]["from"] == "Contacted"
+        assert changes["default_pipeline_stage"]["to"] == "Lost"
+
+        all_act = admin.get(f"{BASE_URL}/api/dispositions/activity?page_size=50", timeout=30)
+        assert all_act.status_code == 200, all_act.text
+        assert all_act.json()["total"] >= 2
+        assert any(x["entity_id"] == d["id"] for x in all_act.json()["logs"])
+
+        assert agent.get(f"{BASE_URL}/api/dispositions/{d['id']}/activity", timeout=30).status_code == 403
+        assert agent.get(f"{BASE_URL}/api/dispositions/activity", timeout=30).status_code == 403
+
+        deleted = admin.delete(f"{BASE_URL}/api/dispositions/{d['id']}", timeout=30)
+        assert deleted.status_code == 200
+        # Deleted record activity remains in audit trail
+        row = admin.get(f"{BASE_URL}/api/dispositions/{d['id']}/activity", timeout=30)
+        assert row.status_code == 200
+        delete_logs = [x for x in row.json()["logs"] if x["action"] == "delete"]
+        assert delete_logs
+        assert delete_logs[0]["meta"]["before"]["name"] == name
+        assert delete_logs[0]["meta"]["before"]["type"] == "non_carry_forward"
+
     def test_seeded_call_back_acw_disabled(self, admin):
         disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         cb = [d for d in disps if d["name"] == "Call Back"]
@@ -1123,7 +1208,7 @@ class TestTodayCallsACW:
         agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
         lid = self._mk_assigned(admin, agent, "TEST_WB_CT_", "9")
         disps = agent.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
-        cf = [d for d in disps if d["type"] == "carry_forward" and not d.get("requires_acw")][0]
+        cf = _non_callback_carry_forward(disps)
         r = agent.post(f"{BASE_URL}/api/calls/log", json={
             "lead_id": lid, "disposition_id": cf["id"], "notes": "TEST_called_today",
         }, timeout=30)
@@ -1224,7 +1309,7 @@ class TestTodayCallsACW:
         if len(leads) < 2:
             pytest.fail(f"Not enough today-call leads for agent to test ACW gate: {len(leads)}")
         disps = agent.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
-        cf = [d for d in disps if d["type"] == "carry_forward" and not d["requires_acw"]][0]
+        cf = _non_callback_carry_forward(disps)
         acw = [d for d in disps if d.get("requires_acw")][0]
 
         # normal log
@@ -1264,7 +1349,7 @@ class TestTodayCallsACW:
         if len(leads) < 1:
             pytest.fail("Need at least one today-call lead")
         disps = agent.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
-        cf = [d for d in disps if d["type"] == "carry_forward" and not d.get("requires_acw")][0]
+        cf = _non_callback_carry_forward(disps)
         acw = [d for d in disps if d.get("requires_acw")][0]
         lid = leads[0]["id"]
         assert agent.post(f"{BASE_URL}/api/calls/log", json={
@@ -1610,7 +1695,7 @@ class TestTodayCallsACW:
         admin.post(f"{BASE_URL}/api/leads/assign",
                    json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
         disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
-        cf = [d for d in disps if d["type"] == "carry_forward" and not d.get("requires_acw")][0]
+        cf = _non_callback_carry_forward(disps)
         agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
 
         r1 = agent.post(f"{BASE_URL}/api/calls/log", json={
@@ -1673,6 +1758,66 @@ class TestTodayCallsACW:
         assert ok.status_code == 200, ok.text
         got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
         assert got.get("follow_up_at")
+        assert got.get("pipeline_stage") == "Contacted"
+
+    def test_mapped_disposition_rejects_mismatched_stage_body(self, admin, agent):
+        """Body New must not stick when disposition maps to Contacted."""
+        from datetime import datetime, timezone, timedelta
+        p = "85" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_MapStage_New", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        assert lead.get("pipeline_stage") == "New"
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        cb = [d for d in disps if d["name"] == "Call Back"][0]
+        assert cb.get("default_pipeline_stage") == "Contacted"
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        fut = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        bad = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cb["id"],
+            "pipeline_stage": "New", "follow_up_at": fut}, timeout=30)
+        assert bad.status_code == 400, bad.text
+        ok = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cb["id"],
+            "pipeline_stage": "Contacted", "follow_up_at": fut}, timeout=30)
+        assert ok.status_code == 200, ok.text
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got["pipeline_stage"] == "Contacted"
+        assert got["disposition_name"] == "Call Back"
+
+    def test_call_back_busy_alias_maps_and_requires_fu(self, admin, agent):
+        """Production-style Call Back / Busy → Contacted + FU required."""
+        from datetime import datetime, timezone, timedelta
+        dname = f"Call Back / Busy {uuid.uuid4().hex[:6]}"
+        r = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": dname, "slot": 99, "type": "carry_forward",
+            "requires_acw": False, "color": "#38BDF8",
+            "default_pipeline_stage": "Contacted"}, timeout=30)
+        assert r.status_code == 200, r.text
+        disp = r.json()["disposition"]
+        p = "86" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_CB_Busy", "phone": p}, timeout=30).json()["lead"]
+        TestTodayCallsACW.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        try:
+            bad = agent.post(f"{BASE_URL}/api/calls/log", json={
+                "lead_id": lead["id"], "disposition_id": disp["id"]}, timeout=30)
+            assert bad.status_code == 400
+            fut = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+            ok = agent.post(f"{BASE_URL}/api/calls/log", json={
+                "lead_id": lead["id"], "disposition_id": disp["id"],
+                "follow_up_at": fut}, timeout=30)
+            assert ok.status_code == 200, ok.text
+            got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+            assert got["pipeline_stage"] == "Contacted"
+            assert got["disposition_name"] == dname
+        finally:
+            admin.delete(f"{BASE_URL}/api/dispositions/{disp['id']}", timeout=30)
 
     def test_manual_convert_clears_follow_up(self, admin):
         from datetime import datetime, timezone, timedelta

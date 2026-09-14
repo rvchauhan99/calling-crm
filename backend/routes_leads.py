@@ -73,6 +73,12 @@ TODAY_CALLS_PROJECTION = {
 
 
 # ---------------- Dispositions ----------------
+DISP_TRACKED_FIELDS = (
+    "name", "slot", "type", "requires_acw", "color", "active",
+    "default_pipeline_stage", "converts_to_client",
+)
+
+
 class DispositionIn(BaseModel):
     name: str
     slot: int = 1
@@ -98,13 +104,31 @@ def _normalize_disposition_fields(body: DispositionIn) -> dict:
     return data
 
 
+def _disposition_snapshot(doc: dict) -> dict:
+    return {
+        "name": doc.get("name"),
+        "slot": doc.get("slot", doc.get("order")),
+        "type": doc.get("type"),
+        "requires_acw": bool(doc.get("requires_acw")),
+        "color": doc.get("color"),
+        "active": bool(doc.get("active", True)),
+        "default_pipeline_stage": doc.get("default_pipeline_stage"),
+        "converts_to_client": bool(doc.get("converts_to_client")),
+    }
+
+
+def _disposition_changes(before: dict, after: dict) -> dict:
+    changes = {}
+    for key in DISP_TRACKED_FIELDS:
+        old_val, new_val = before.get(key), after.get(key)
+        if old_val != new_val:
+            changes[key] = {"from": old_val, "to": new_val}
+    return changes
+
+
 def _mapped_stage_for_disposition(disp: dict) -> Optional[str]:
-    if disp.get("converts_to_client") or disp.get("name") == "Converted":
-        return "Won"
-    stage = disp.get("default_pipeline_stage")
-    if stage and stage in PIPELINE_STAGES:
-        return stage
-    return None
+    from disposition_pipeline import mapped_stage_for_disposition
+    return mapped_stage_for_disposition(disp)
 
 
 @router.get("/dispositions")
@@ -113,31 +137,67 @@ async def list_dispositions(principal: dict = Depends(get_principal)):
     return {"dispositions": docs}
 
 
+@router.get("/dispositions/activity")
+async def list_disposition_activity(page: int = 1, page_size: int = 40,
+                                    principal: dict = Depends(require("dispositions:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 40)
+    q = {"companyId": COMPANY_ID, "entity": "disposition"}
+    total = await db.audit_logs.count_documents(q)
+    skip = (page - 1) * page_size
+    logs = await db.audit_logs.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
+    return {"logs": logs, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/dispositions/{did}/activity")
+async def disposition_activity(did: str, principal: dict = Depends(require("dispositions:view"))):
+    logs = await db.audit_logs.find(
+        {"companyId": COMPANY_ID, "entity": "disposition", "entity_id": did},
+        {"_id": 0},
+    ).sort("created_at", -1).to_list(100)
+    return {"logs": logs}
+
+
 @router.post("/dispositions")
 async def create_disposition(body: DispositionIn, principal: dict = Depends(require("dispositions:create"))):
     did = new_id()
     fields = _normalize_disposition_fields(body)
     doc = {"id": did, "companyId": COMPANY_ID, **fields, "order": body.slot, "created_at": now_iso()}
     await db.dispositions.insert_one(dict(doc))
-    await audit(principal, "create", "disposition", did, {"name": body.name})
+    after = _disposition_snapshot({**fields, "slot": body.slot})
+    await audit(principal, "create", "disposition", did, {"name": body.name, "after": after})
     return {"disposition": doc}
 
 
 @router.put("/dispositions/{did}")
 async def update_disposition(did: str, body: DispositionIn, principal: dict = Depends(require("dispositions:edit"))):
-    fields = _normalize_disposition_fields(body)
-    res = await db.dispositions.update_one({"id": did, "companyId": COMPANY_ID},
-                                           {"$set": {**fields, "order": body.slot}})
-    if res.matched_count == 0:
+    existing = await db.dispositions.find_one({"id": did, "companyId": COMPANY_ID}, {"_id": 0})
+    if not existing:
         raise HTTPException(status_code=404, detail="Not found")
-    await audit(principal, "update", "disposition", did)
+    fields = _normalize_disposition_fields(body)
+    await db.dispositions.update_one({"id": did, "companyId": COMPANY_ID},
+                                     {"$set": {**fields, "order": body.slot}})
+    before = _disposition_snapshot(existing)
+    after = _disposition_snapshot({**fields, "slot": body.slot})
+    changes = _disposition_changes(before, after)
+    await audit(principal, "update", "disposition", did, {
+        "name": fields.get("name") or existing.get("name"),
+        "changes": changes,
+    })
     return {"ok": True}
 
 
 @router.delete("/dispositions/{did}")
 async def delete_disposition(did: str, principal: dict = Depends(require("dispositions:delete"))):
+    existing = await db.dispositions.find_one({"id": did, "companyId": COMPANY_ID}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Not found")
     await db.dispositions.delete_one({"id": did, "companyId": COMPANY_ID})
-    await audit(principal, "delete", "disposition", did)
+    before = _disposition_snapshot(existing)
+    await audit(principal, "delete", "disposition", did, {
+        "name": existing.get("name"),
+        "before": before,
+    })
     return {"ok": True}
 
 
@@ -1086,7 +1146,8 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
         next_fu = None
 
     should_convert = bool(disp.get("converts_to_client")) or disp.get("name") == "Converted"
-    if disp.get("name") == "Call Back" and not next_fu and not should_convert:
+    from disposition_pipeline import is_call_back_disposition
+    if is_call_back_disposition(disp) and not next_fu and not should_convert:
         raise HTTPException(status_code=400, detail="Follow-up required for Call Back")
     if body.deposit_amount is not None:
         try:

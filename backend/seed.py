@@ -150,6 +150,12 @@ DISPOSITIONS = [
 ]
 
 DISPOSITION_PIPELINE_DEFAULTS = {row[0]: (row[5], row[6]) for row in DISPOSITIONS}
+# Production aliases (also applied by disposition_pipeline.ensure_*)
+DISPOSITION_PIPELINE_DEFAULTS.update({
+    "Call Back / Busy": ("Contacted", False),
+    "Busy": ("Contacted", False),
+})
+
 
 PIPELINE_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
 
@@ -282,33 +288,8 @@ async def backfill_lead_last_notes():
 
 async def migrate_disposition_pipeline_links():
     """Backfill default_pipeline_stage + converts_to_client on known dispositions."""
-    for name, (stage, converts) in DISPOSITION_PIPELINE_DEFAULTS.items():
-        await db.dispositions.update_many(
-            {"companyId": COMPANY_ID, "name": name},
-            {"$set": {
-                "default_pipeline_stage": stage,
-                "converts_to_client": converts,
-            }},
-        )
-    # Ensure any disposition missing the new keys gets safe defaults
-    await db.dispositions.update_many(
-        {"companyId": COMPANY_ID, "default_pipeline_stage": {"$exists": False}},
-        {"$set": {"default_pipeline_stage": None}},
-    )
-    await db.dispositions.update_many(
-        {"companyId": COMPANY_ID, "converts_to_client": {"$exists": False}},
-        {"$set": {"converts_to_client": False}},
-    )
-    # Converted by name always converts + Won
-    await db.dispositions.update_many(
-        {"companyId": COMPANY_ID, "name": "Converted"},
-        {"$set": {"default_pipeline_stage": "Won", "converts_to_client": True}},
-    )
-    # Call Back: no ACW — next work is the scheduled follow-up
-    await db.dispositions.update_many(
-        {"companyId": COMPANY_ID, "name": "Call Back"},
-        {"$set": {"requires_acw": False}},
-    )
+    from disposition_pipeline import ensure_disposition_pipeline_links
+    await ensure_disposition_pipeline_links()
     # Converted / client leads never stay on follow-up queue
     await db.leads.update_many(
         {"companyId": COMPANY_ID, "$or": [{"is_client": True}, {"status": "converted"}]},

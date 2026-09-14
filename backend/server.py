@@ -112,6 +112,12 @@ async def lifespan(_app: FastAPI):
         logger.info("Undone-convert reports cleanup done: %s", result)
     except Exception as e:
         logger.exception("ensure_exclude_undone_convert_calls failed: %s", e)
+    try:
+        from disposition_pipeline import ensure_disposition_pipeline_links
+        result = await ensure_disposition_pipeline_links()
+        logger.info("Disposition pipeline links ensured: %s", result)
+    except Exception as e:
+        logger.exception("ensure_disposition_pipeline_links failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()

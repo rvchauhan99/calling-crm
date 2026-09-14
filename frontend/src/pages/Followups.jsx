@@ -119,7 +119,7 @@ export default function Followups() {
         disposition_id: form.disposition_id,
         notes: form.notes,
         duration: Number(form.duration) || 0,
-        pipeline_stage: form.pipeline_stage,
+        pipeline_stage: mappedStageForDisposition(disp) || form.pipeline_stage,
         follow_up_at: terminal || !form.follow_up_at
           ? null
           : new Date(form.follow_up_at).toISOString(),

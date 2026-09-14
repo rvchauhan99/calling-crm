@@ -80,7 +80,11 @@ export const toDatetimeLocalValue = (iso) => {
 /** Current local datetime for datetime-local inputs. */
 export const nowDatetimeLocalValue = () => toDatetimeLocalValue(new Date().toISOString())
 
-export const isCallBackDisposition = (disp) => disp?.name === "Call Back"
+export const isCallBackDisposition = (disp) => {
+  const name = (disp?.name || "").trim()
+  if (!name) return false
+  return name === "Call Back" || name.startsWith("Call Back")
+}
 
 export const isConvertDisposition = (disp) => (
   Boolean(disp?.converts_to_client || disp?.name === "Converted")

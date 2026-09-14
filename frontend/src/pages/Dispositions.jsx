@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion } from "@/components/common"
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion, Spinner } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -9,14 +9,23 @@ import { Switch } from "@/components/ui/switch"
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog"
+import {
+  Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
+} from "@/components/ui/sheet"
 import { SearchableSelect } from "@/components/ui/searchable-select"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { toast } from "sonner"
-import { Plus, ListChecks, Pencil, Trash2 } from "lucide-react"
+import { Plus, ListChecks, Pencil, Trash2, History } from "lucide-react"
 
 const STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
+
+const ACTION_COLORS = {
+  create: "blue",
+  update: "sky",
+  delete: "red",
+}
 
 const empty = {
   name: "",
@@ -29,19 +38,62 @@ const empty = {
   converts_to_client: false,
 }
 
+const formatValue = (value) => {
+  if (value === null || value === undefined || value === "") return "—"
+  if (typeof value === "boolean") return value ? "Yes" : "No"
+  return String(value)
+}
+
+export const formatDispositionActivityMeta = (meta) => {
+  if (!meta || typeof meta !== "object") return ""
+  const changes = meta.changes
+  if (changes && typeof changes === "object" && Object.keys(changes).length > 0) {
+    return Object.entries(changes)
+      .map(([field, diff]) => {
+        const from = diff && typeof diff === "object" ? diff.from : undefined
+        const to = diff && typeof diff === "object" ? diff.to : diff
+        return `${field}: ${formatValue(from)} → ${formatValue(to)}`
+      })
+      .join(" · ")
+  }
+  if (meta.after && typeof meta.after === "object") {
+    return `Created · ${meta.after.name || meta.name || ""}`.trim()
+  }
+  if (meta.before && typeof meta.before === "object") {
+    return `Deleted · ${meta.before.name || meta.name || ""}`.trim()
+  }
+  if (meta.name) return meta.name
+  const parts = Object.entries(meta)
+    .filter(([, v]) => v != null && v !== "")
+    .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`)
+  return parts.join(" · ")
+}
+
 export default function Dispositions() {
   const { can } = useAuth()
+  const canViewActivity = can("dispositions:view")
+  const canEdit = can("dispositions:edit")
+  const canDelete = can("dispositions:delete")
+  const showActions = canViewActivity || canEdit || canDelete
+
   const [list, setList] = useState(null)
   const [loading, setLoading] = useState(true)
   const [show, setShow] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(empty)
 
+  const [activityOpen, setActivityOpen] = useState(false)
+  const [activityTitle, setActivityTitle] = useState("Activity")
+  const [activityLogs, setActivityLogs] = useState([])
+  const [activityLoading, setActivityLoading] = useState(false)
+  const [activityError, setActivityError] = useState("")
+  const [activityScope, setActivityScope] = useState(null)
+
   const load = useCallback(async () => {
     setLoading(true)
-    try {const { data } = await api.get("/dispositions")
-    setList(data.dispositions)
-  
+    try {
+      const { data } = await api.get("/dispositions")
+      setList(data.dispositions)
     } finally {
       setLoading(false)
     }
@@ -89,7 +141,41 @@ export default function Dispositions() {
     load()
   }
 
-  
+  const loadActivity = useCallback(async (scope) => {
+    setActivityLoading(true)
+    setActivityError("")
+    setActivityLogs([])
+    try {
+      if (scope?.id) {
+        const { data } = await api.get(`/dispositions/${scope.id}/activity`)
+        setActivityLogs(data.logs || [])
+      } else {
+        const { data } = await api.get("/dispositions/activity?page=1&page_size=100")
+        setActivityLogs(data.logs || [])
+      }
+    } catch (e) {
+      setActivityError(formatApiError(e.response?.data?.detail) || "Failed to load activity")
+    } finally {
+      setActivityLoading(false)
+    }
+  }, [])
+
+  const openAllActivity = () => {
+    setActivityScope({ type: "all" })
+    setActivityTitle("All disposition activity")
+    setActivityOpen(true)
+  }
+
+  const openRowHistory = (d) => {
+    setActivityScope({ type: "row", id: d.id, name: d.name })
+    setActivityTitle(`History · ${d.name}`)
+    setActivityOpen(true)
+  }
+
+  useEffect(() => {
+    if (!activityOpen || !activityScope) return
+    loadActivity(activityScope).catch(() => {})
+  }, [activityOpen, activityScope, loadActivity])
 
   if (list === null) {
     return (
@@ -104,10 +190,19 @@ export default function Dispositions() {
       <PageHeader
         title="Responses"
         subtitle="Call disposition slots · pipeline mapping · carry-forward & ACW"
-        actions={can("dispositions:create") && (
-          <Button className="bg-sky-500 hover:bg-sky-600" onClick={openNew} data-testid="new-disposition-btn">
-            <Plus size={16} className="mr-1.5" /> New Response
-          </Button>
+        actions={(
+          <>
+            {canViewActivity && (
+              <Button variant="outline" onClick={openAllActivity} data-testid="disp-activity-btn">
+                <History size={16} className="mr-1.5" /> Activity
+              </Button>
+            )}
+            {can("dispositions:create") && (
+              <Button className="bg-sky-500 hover:bg-sky-600" onClick={openNew} data-testid="new-disposition-btn">
+                <Plus size={16} className="mr-1.5" /> New Response
+              </Button>
+            )}
+          </>
         )}
       />
 
@@ -126,7 +221,7 @@ export default function Dispositions() {
                 <TableHead>Client</TableHead>
                 <TableHead>ACW</TableHead>
                 <TableHead>Active</TableHead>
-                {(can("dispositions:edit") || can("dispositions:delete")) && (
+                {showActions && (
                   <TableHead className="text-right">Actions</TableHead>
                 )}
               </TableRow>
@@ -134,7 +229,7 @@ export default function Dispositions() {
             <TableBody>
               {list.map((d) => (
                 <TableRow key={d.id} data-testid={`disp-row-${d.id}`}>
-                  <TableCell className="tabular text-slate-500">{d.slot}</TableCell>
+                  <TableCell className="tabular text-slate-500">{d.slot ?? d.order}</TableCell>
                   <TableCell className="font-medium">
                     <span className="flex items-center gap-2">
                       <span className="h-3 w-3 rounded-full" style={{ background: d.color }} />
@@ -166,14 +261,25 @@ export default function Dispositions() {
                       ? <StatusPill color="sky">Active</StatusPill>
                       : <StatusPill color="slate">Off</StatusPill>}
                   </TableCell>
-                  {(can("dispositions:edit") || can("dispositions:delete")) && (
+                  {showActions && (
                     <TableCell className="text-right">
-                      {can("dispositions:edit") && (
+                      {canViewActivity && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => openRowHistory(d)}
+                          aria-label={`History for ${d.name}`}
+                          data-testid={`disp-history-${d.id}`}
+                        >
+                          <History size={15} />
+                        </Button>
+                      )}
+                      {canEdit && (
                         <Button variant="ghost" size="sm" onClick={() => openEdit(d)} data-testid={`edit-disp-${d.id}`}>
                           <Pencil size={15} />
                         </Button>
                       )}
-                      {can("dispositions:delete") && (
+                      {canDelete && (
                         <Button variant="ghost" size="sm" onClick={() => remove(d.id)} data-testid={`del-disp-${d.id}`}>
                           <Trash2 size={15} className="text-red-500" />
                         </Button>
@@ -302,6 +408,58 @@ export default function Dispositions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Sheet open={activityOpen} onOpenChange={(open) => {
+        setActivityOpen(open)
+        if (!open) {
+          setActivityScope(null)
+          setActivityLogs([])
+          setActivityError("")
+        }
+      }}>
+        <SheetContent className="w-full overflow-y-auto bg-white sm:max-w-md" data-testid="disp-activity-sheet">
+          <SheetHeader>
+            <SheetTitle>{activityTitle}</SheetTitle>
+            <SheetDescription>
+              Who changed this master setup and what fields moved.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="mt-4 space-y-2">
+            {activityLoading && (
+              <div className="flex justify-center py-8">
+                <Spinner />
+              </div>
+            )}
+            {!activityLoading && activityError && (
+              <p className="text-sm text-red-600" role="alert">{activityError}</p>
+            )}
+            {!activityLoading && !activityError && activityLogs.length === 0 && (
+              <p className="text-sm text-slate-400">No activity recorded yet.</p>
+            )}
+            {!activityLoading && !activityError && activityLogs.map((log) => (
+              <div
+                key={log.id}
+                className="rounded-md border border-slate-200 p-3 text-sm"
+                data-testid={`disp-activity-row-${log.id}`}
+              >
+                <div className="flex justify-between gap-2">
+                  <StatusPill color={ACTION_COLORS[log.action] || "slate"}>{log.action}</StatusPill>
+                  <span className="shrink-0 text-xs text-slate-400">
+                    {log.created_at ? new Date(log.created_at).toLocaleString("en-IN") : ""}
+                  </span>
+                </div>
+                {activityScope?.type === "all" && log.meta?.name && (
+                  <p className="mt-1 font-medium text-slate-700">{log.meta.name}</p>
+                )}
+                <p className="mt-1 text-xs text-slate-400">by {log.actor_name || "system"}</p>
+                {formatDispositionActivityMeta(log.meta) && (
+                  <p className="mt-1 text-xs text-slate-500">{formatDispositionActivityMeta(log.meta)}</p>
+                )}
+              </div>
+            ))}
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
   )
 }

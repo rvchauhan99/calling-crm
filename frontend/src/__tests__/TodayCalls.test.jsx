@@ -159,15 +159,22 @@ function mockApi(acwId = null) {
         },
       })
     }
-    if (url === "/dispositions") {
-      return Promise.resolve({
-        data: {
-          dispositions: [
-            { id: "d1", name: "Interested", active: true, color: "#0EA5E9", requires_acw: false },
-          ],
-        },
-      })
-    }
+      if (url === "/dispositions") {
+        return Promise.resolve({
+          data: {
+            dispositions: [
+              {
+                id: "d1",
+                name: "Interested",
+                active: true,
+                color: "#0EA5E9",
+                requires_acw: false,
+                default_pipeline_stage: "Qualified",
+              },
+            ],
+          },
+        })
+      }
     if (url === "/leads/filter-options") {
       return Promise.resolve({
         data: {
@@ -295,6 +302,74 @@ describe("TodayCalls workbench", () => {
           lead_id: "lead-overdue",
           disposition_id: "d1",
           notes: "Workbench call",
+          pipeline_stage: "Qualified",
+        }),
+      )
+    })
+  })
+
+  it("treats Call Back / Busy as call-back and posts mapped Contacted", async () => {
+    const user = userEvent.setup()
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/today-calls/counts")) {
+        return Promise.resolve({ data: JSON.parse(JSON.stringify(mockCounts)) })
+      }
+      if (url.startsWith("/today-calls")) {
+        return Promise.resolve({
+          data: {
+            date: "2026-09-04",
+            acw_pending_lead_id: null,
+            items: queueItems.slice(0, 1),
+            total: 1,
+            page: 1,
+            page_size: 50,
+            bucket: "all",
+            sort: "urgency",
+          },
+        })
+      }
+      if (url === "/dispositions") {
+        return Promise.resolve({
+          data: {
+            dispositions: [
+              {
+                id: "d-cbb",
+                name: "Call Back / Busy",
+                active: true,
+                color: "#38BDF8",
+                requires_acw: false,
+                default_pipeline_stage: "Contacted",
+              },
+            ],
+          },
+        })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { sources: [], dispositions: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<TodayCalls />)
+    await waitFor(() => {
+      expect(screen.getByTestId("log-call-btn-lead-overdue")).toBeInTheDocument()
+    })
+    await user.click(screen.getByTestId("log-call-btn-lead-overdue"))
+    const dialog = await screen.findByTestId("log-call-dialog")
+    await user.selectOptions(within(dialog).getByTestId("disposition-select"), "d-cbb")
+    expect(within(dialog).getByTestId("followup-input")).toBeRequired()
+    // Prefill FU then submit
+    const { fireEvent } = require("@testing-library/react")
+    fireEvent.change(within(dialog).getByTestId("followup-input"), {
+      target: { value: "2026-09-10T10:00" },
+    })
+    await user.click(within(dialog).getByTestId("submit-call-btn"))
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith(
+        "/calls/log",
+        expect.objectContaining({
+          disposition_id: "d-cbb",
+          pipeline_stage: "Contacted",
         }),
       )
     })
