@@ -1663,6 +1663,19 @@ class TestTodayCallsACW:
         bad = admin.get(f"{BASE_URL}/api/call-history?from=not-a-date", timeout=30)
         assert bad.status_code == 400
 
+    def test_call_history_search_regex_special_chars(self, admin):
+        """User search with regex metacharacters must not 500 (literal match)."""
+        for term in ("[", "]", "(", ".*", "+", "?"):
+            r = admin.get(f"{BASE_URL}/api/call-history", params={"search": term, "page_size": 5}, timeout=60)
+            assert r.status_code == 200, f"search={term!r} -> {r.status_code} {r.text[:200]}"
+            body = r.json()
+            assert "calls" in body and "total" in body
+            assert isinstance(body["total"], int)
+        leads = admin.get(f"{BASE_URL}/api/leads", params={"search": "[", "page_size": 5}, timeout=60)
+        assert leads.status_code == 200, leads.text
+        clients = admin.get(f"{BASE_URL}/api/clients", params={"search": "[", "page_size": 5}, timeout=60)
+        assert clients.status_code == 200, clients.text
+
 
 # ---------------- Clients + Ledger ----------------
 class TestClientsLedger:

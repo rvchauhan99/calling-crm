@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit,
-                  live_client_filter)
+                  live_client_filter, escape_regex)
 from lead_sources import (
     list_lead_sources,
     source_names,
@@ -254,9 +254,10 @@ def _apply_lead_filters(q: dict, *, search: Optional[str] = None, status: Option
                         assignment_status: Optional[str] = None, stage: Optional[str] = None,
                         source: Optional[str] = None, skip_assignment_status: bool = False) -> dict:
     if search:
-        q["$or"] = [{"name": {"$regex": search, "$options": "i"}},
-                    {"phone": {"$regex": search, "$options": "i"}},
-                    {"email": {"$regex": search, "$options": "i"}}]
+        safe = escape_regex(search)
+        q["$or"] = [{"name": {"$regex": safe, "$options": "i"}},
+                    {"phone": {"$regex": safe, "$options": "i"}},
+                    {"email": {"$regex": safe, "$options": "i"}}]
     if status:
         q["status"] = status
     if disposition == "__none__":
@@ -961,8 +962,9 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
 
     q = {"companyId": COMPANY_ID, **await scope_filter(principal, "agent_id")}
     if search:
-        q["$or"] = [{"lead_name": {"$regex": search, "$options": "i"}},
-                    {"lead_phone": {"$regex": search, "$options": "i"}}]
+        safe = escape_regex(search)
+        q["$or"] = [{"lead_name": {"$regex": safe, "$options": "i"}},
+                    {"lead_phone": {"$regex": safe, "$options": "i"}}]
     if disposition:
         q["disposition_name"] = disposition
     if agent_id:

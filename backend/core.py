@@ -126,6 +126,11 @@ def validate_email_optional(email: str) -> str:
     return e
 
 
+def escape_regex(text: str) -> str:
+    """Escape user search text for safe MongoDB $regex (literal match)."""
+    return re.escape(text or "")
+
+
 # ---------- Auth principal ----------
 async def _decode_token(request: Request):
     token = request.cookies.get("access_token")

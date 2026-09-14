@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc,
-                  live_client_filter, live_ledger_filter, reportable_calls_filter)
+                  live_client_filter, live_ledger_filter, reportable_calls_filter, escape_regex)
 from lead_sources import source_names
 from caller_sales import sales_disp_counts
 
@@ -791,8 +791,9 @@ async def export_calls(
     scope = await scope_filter(principal, "agent_id")
     q = {"companyId": COMPANY_ID, **scope}
     if search:
-        q["$or"] = [{"lead_name": {"$regex": search, "$options": "i"}},
-                    {"lead_phone": {"$regex": search, "$options": "i"}}]
+        safe = escape_regex(search)
+        q["$or"] = [{"lead_name": {"$regex": safe, "$options": "i"}},
+                    {"lead_phone": {"$regex": safe, "$options": "i"}}]
     if disposition:
         q["disposition_name"] = disposition
     if agent_id:
@@ -828,9 +829,10 @@ async def audit_log(search: Optional[str] = None, page: int = 1, page_size: int 
                     principal: dict = Depends(require("audit:view"))):
     q = {"companyId": COMPANY_ID}
     if search:
-        q["$or"] = [{"action": {"$regex": search, "$options": "i"}},
-                    {"entity": {"$regex": search, "$options": "i"}},
-                    {"actor_name": {"$regex": search, "$options": "i"}}]
+        safe = escape_regex(search)
+        q["$or"] = [{"action": {"$regex": safe, "$options": "i"}},
+                    {"entity": {"$regex": safe, "$options": "i"}},
+                    {"actor_name": {"$regex": safe, "$options": "i"}}]
     total = await db.audit_logs.count_documents(q)
     skip = (page - 1) * page_size
     logs = await db.audit_logs.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)

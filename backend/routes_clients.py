@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from core import (
     db, COMPANY_ID, require, scope_filter, client_scope_filter, new_id, now_iso, audit,
-    live_client_filter, live_ledger_filter,
+    live_client_filter, live_ledger_filter, escape_regex,
 )
 
 router = APIRouter(prefix="/api", tags=["clients"])
@@ -53,8 +53,9 @@ async def list_clients(search: Optional[str] = None, status: Optional[str] = Non
     if status in ("active", "inactive"):
         q["status"] = status
     if search:
-        q["$or"] = [{"name": {"$regex": search, "$options": "i"}},
-                    {"phone": {"$regex": search, "$options": "i"}}]
+        safe = escape_regex(search)
+        q["$or"] = [{"name": {"$regex": safe, "$options": "i"}},
+                    {"phone": {"$regex": safe, "$options": "i"}}]
     total = await db.clients.count_documents(q)
     skip = (page - 1) * page_size
     clients = await db.clients.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
@@ -79,9 +80,10 @@ async def convertible_leads(search: Optional[str] = None, page_size: int = 40,
         **await scope_filter(principal, "assigned_to"),
     }
     if search:
+        safe = escape_regex(search)
         q["$or"] = [
-            {"name": {"$regex": search, "$options": "i"}},
-            {"phone": {"$regex": search, "$options": "i"}},
+            {"name": {"$regex": safe, "$options": "i"}},
+            {"phone": {"$regex": safe, "$options": "i"}},
         ]
     leads = await db.leads.find(
         q, {"_id": 0, "id": 1, "name": 1, "phone": 1},
