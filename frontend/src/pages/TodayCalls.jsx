@@ -227,7 +227,7 @@ export default function TodayCalls() {
     return dispositions.map((d) => d.name).filter(Boolean)
   }, [filterOptions, dispositions])
 
-  const items = listData?.items || []
+  const items = useMemo(() => listData?.items || [], [listData?.items])
   const total = listData?.total || 0
   const sections = useMemo(() => groupItemsByReason(items), [items])
 
