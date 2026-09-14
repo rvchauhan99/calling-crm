@@ -267,4 +267,148 @@ describe("Leads role visibility", () => {
       expect(screen.queryByTestId("leads-results-overlay")).not.toBeInTheDocument()
     })
   })
+
+  it("selects and deselects all leads on the current page via header checkbox", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    const twoLeadsResponse = {
+      leads: [
+        {
+          id: "lead-1",
+          name: "Lead One",
+          phone: "+919876543210",
+          source: "Manual",
+          status: "active",
+          pipeline_stage: "New",
+          assigned_to: null,
+          assigned_name: null,
+        },
+        {
+          id: "lead-2",
+          name: "Lead Two",
+          phone: "+919876543211",
+          source: "Manual",
+          status: "active",
+          pipeline_stage: "New",
+          assigned_to: null,
+          assigned_name: null,
+        },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 25,
+    }
+
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/leads?")) {
+        return Promise.resolve({ data: twoLeadsResponse })
+      }
+      if (url === "/leads/tab-counts") {
+        return Promise.resolve({ data: { unassigned: 2, assigned: 0 } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { stages: ["New"], dispositions: [] } })
+      }
+      if (url === "/leads/assignable-callers") {
+        return Promise.resolve({ data: { users: [{ id: "agent-1", name: "Rohan" }] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-select-all")).toBeInTheDocument()
+      expect(screen.getByTestId("lead-check-lead-1")).toBeInTheDocument()
+      expect(screen.getByTestId("lead-check-lead-2")).toBeInTheDocument()
+    })
+
+    const selectAll = screen.getByTestId("leads-select-all")
+    await userEvent.click(selectAll)
+
+    await waitFor(() => {
+      expect(selectAll).toHaveAttribute("data-state", "checked")
+      expect(screen.getByTestId("lead-check-lead-1")).toHaveAttribute("data-state", "checked")
+      expect(screen.getByTestId("lead-check-lead-2")).toHaveAttribute("data-state", "checked")
+      expect(screen.getByTestId("assign-selected-btn")).toHaveTextContent("Assign (2)")
+    })
+
+    await userEvent.click(selectAll)
+
+    await waitFor(() => {
+      expect(selectAll).toHaveAttribute("data-state", "unchecked")
+      expect(screen.getByTestId("lead-check-lead-1")).toHaveAttribute("data-state", "unchecked")
+      expect(screen.getByTestId("lead-check-lead-2")).toHaveAttribute("data-state", "unchecked")
+      expect(screen.queryByTestId("assign-selected-btn")).not.toBeInTheDocument()
+    })
+  })
+
+  it("shows indeterminate select-all when only some page leads are selected", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    const twoLeadsResponse = {
+      leads: [
+        {
+          id: "lead-1",
+          name: "Lead One",
+          phone: "+919876543210",
+          source: "Manual",
+          status: "active",
+          pipeline_stage: "New",
+          assigned_to: null,
+          assigned_name: null,
+        },
+        {
+          id: "lead-2",
+          name: "Lead Two",
+          phone: "+919876543211",
+          source: "Manual",
+          status: "active",
+          pipeline_stage: "New",
+          assigned_to: null,
+          assigned_name: null,
+        },
+      ],
+      total: 2,
+      page: 1,
+      page_size: 25,
+    }
+
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/leads?")) {
+        return Promise.resolve({ data: twoLeadsResponse })
+      }
+      if (url === "/leads/tab-counts") {
+        return Promise.resolve({ data: { unassigned: 2, assigned: 0 } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { stages: ["New"], dispositions: [] } })
+      }
+      if (url === "/leads/assignable-callers") {
+        return Promise.resolve({ data: { users: [{ id: "agent-1", name: "Rohan" }] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-check-lead-1")).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByTestId("lead-check-lead-1"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-select-all")).toHaveAttribute("data-state", "indeterminate")
+      expect(screen.getByTestId("assign-selected-btn")).toHaveTextContent("Assign (1)")
+    })
+  })
 })

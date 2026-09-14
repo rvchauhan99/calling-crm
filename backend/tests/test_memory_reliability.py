@@ -39,7 +39,7 @@ class TestPageSizeClamp:
 
 class TestDashboardAgingShape:
     def test_aging_sla_buckets(self, admin):
-        r = admin.get(f"{BASE_URL}/api/dashboard", timeout=120)
+        r = admin.get(f"{BASE_URL}/api/dashboard?fresh=1", timeout=120)
         assert r.status_code == 200, r.text
         aging = r.json().get("aging_sla")
         assert isinstance(aging, list)
@@ -54,12 +54,26 @@ class TestDashboardAgingShape:
             assert isinstance(row["count"], int)
             assert row["count"] >= 0
 
+    def test_dashboard_today_range_ok(self, admin):
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        today = datetime.now(ist).date().isoformat()
+        r = admin.get(f"{BASE_URL}/api/dashboard?from={today}&to={today}&fresh=1", timeout=120)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "kpis" in body and "daily_trend" in body
+        assert len(body["daily_trend"]) >= 1
+        assert len(body["calls_trend"]) == 7
+        assert len(body.get("agent_performance") or []) <= 50
+
     def test_pipeline_board_fields(self, admin):
-        r = admin.get(f"{BASE_URL}/api/pipeline", timeout=60)
+        r = admin.get(f"{BASE_URL}/api/pipeline?page_size=50", timeout=60)
         assert r.status_code == 200, r.text
         body = r.json()
         assert "stages" in body and "board" in body and "counts" in body
+        assert "has_more" in body and body.get("page_size") == 50
         for stage in body["stages"]:
+            assert len(body["board"].get(stage) or []) <= 50
             for lead in (body["board"].get(stage) or [])[:3]:
                 assert "id" in lead and "name" in lead and "phone" in lead
 

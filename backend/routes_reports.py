@@ -2,6 +2,7 @@
 import asyncio
 import io
 import csv
+import os
 from datetime import timedelta, timezone, datetime, time, date
 from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
@@ -94,6 +95,306 @@ async def _ledger_type_totals(client_ids: list) -> tuple[float, float]:
     return round(credit, 2), round(debit, 2)
 
 
+async def _ledger_type_totals_company(match_extra: Optional[dict] = None) -> tuple[float, float]:
+    """Ledger totals for company (optional extra match), no client $in list."""
+    match = {"companyId": COMPANY_ID, **live_ledger_filter()}
+    if match_extra:
+        match.update(match_extra)
+    credit = debit = 0.0
+    async for row in db.ledger.aggregate([
+        {"$match": match},
+        {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}},
+    ]):
+        if row["_id"] == "credit":
+            credit = float(row.get("total") or 0)
+        elif row["_id"] == "debit":
+            debit = float(row.get("total") or 0)
+    return round(credit, 2), round(debit, 2)
+
+
+IST_TZ_NAME = "Asia/Kolkata"
+AGENT_PERFORMANCE_CAP = 50
+DASHBOARD_CACHE_TTL_SEC = int(os.environ.get("DASHBOARD_CACHE_TTL", "30") or "30")
+_dashboard_cache: dict = {}
+
+
+def clear_dashboard_cache():
+    _dashboard_cache.clear()
+
+
+def _ist_day_group_expr(field: str = "$created_at"):
+    """Group key = IST calendar day (YYYY-MM-DD) from ISO created_at strings."""
+    return {
+        "$let": {
+            "vars": {
+                "dt": {
+                    "$dateFromString": {
+                        "dateString": field,
+                        "onError": None,
+                        "onNull": None,
+                    },
+                },
+            },
+            "in": {
+                "$cond": [
+                    {"$eq": ["$$dt", None]},
+                    None,
+                    {
+                        "$dateToString": {
+                            "format": "%Y-%m-%d",
+                            "date": "$$dt",
+                            "timezone": IST_TZ_NAME,
+                        },
+                    },
+                ],
+            },
+        },
+    }
+
+
+def _facet_count(rows: list) -> int:
+    if not rows:
+        return 0
+    return int(rows[0].get("n") or 0)
+
+
+def _dashboard_cache_key(principal: dict, params: dict) -> tuple:
+    items = tuple(sorted((k, "" if v is None else str(v)) for k, v in params.items()))
+    return (principal.get("id"), principal.get("data_scope"), items)
+
+
+def _dashboard_cache_get(key: tuple):
+    if DASHBOARD_CACHE_TTL_SEC <= 0:
+        return None
+    entry = _dashboard_cache.get(key)
+    if not entry:
+        return None
+    expires_at, payload = entry
+    if datetime.now(timezone.utc).timestamp() >= expires_at:
+        _dashboard_cache.pop(key, None)
+        return None
+    return payload
+
+
+def _dashboard_cache_set(key: tuple, payload: dict):
+    if DASHBOARD_CACHE_TTL_SEC <= 0:
+        return
+    _dashboard_cache[key] = (
+        datetime.now(timezone.utc).timestamp() + DASHBOARD_CACHE_TTL_SEC,
+        payload,
+    )
+    # Soft bound: drop oldest if map grows large
+    if len(_dashboard_cache) > 256:
+        oldest = min(_dashboard_cache.items(), key=lambda kv: kv[1][0])
+        _dashboard_cache.pop(oldest[0], None)
+
+
+async def _dashboard_leads_bundle(lq: dict, is_own: bool, now_iso_cmp: str, today: date,
+                                  trend_from: date, trend_to: date):
+    """One leads $facet for KPIs/breakdowns/trend + aging from last_notes_at."""
+    facet = {
+        "total": [{"$count": "n"}],
+        "active": [{"$match": {"status": "active"}}, {"$count": "n"}],
+        "converted": [{"$match": {"is_client": True}}, {"$count": "n"}],
+        "unassigned": [{"$match": {"assigned_to": None}}, {"$count": "n"}],
+        "overdue": [{
+            "$match": {
+                "status": "active",
+                "follow_up_at": {"$ne": None, "$lt": now_iso_cmp},
+            },
+        }, {"$count": "n"}],
+        "with_response": [{
+            "$match": {"disposition_name": {"$nin": [None, ""]}},
+        }, {"$count": "n"}],
+        "carry_forward": [{"$match": {"carry_forward": True}}, {"$count": "n"}],
+        "by_status": [{
+            "$group": {
+                "_id": {"$ifNull": ["$status", "unknown"]},
+                "count": {"$sum": 1},
+            },
+        }],
+        "by_stage": [{
+            "$group": {
+                "_id": {"$ifNull": ["$pipeline_stage", "New"]},
+                "count": {"$sum": 1},
+            },
+        }],
+        "by_lead_disp": [{
+            "$group": {
+                "_id": {"$ifNull": ["$disposition_name", "__none__"]},
+                "count": {"$sum": 1},
+            },
+        }],
+        "by_source": [{
+            "$group": {
+                "_id": {"$ifNull": ["$source", "Unknown"]},
+                "count": {"$sum": 1},
+                "conversions": {
+                    "$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]},
+                },
+            },
+        }],
+        "by_agent": [
+            {"$match": {"assigned_to": {"$ne": None}}},
+            {"$group": {
+                "_id": "$assigned_to",
+                "name": {"$first": "$assigned_name"},
+                "leads": {"$sum": 1},
+                "conversions": {
+                    "$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]},
+                },
+            }},
+        ],
+        "daily": [{
+            "$group": {
+                "_id": _ist_day_group_expr("$created_at"),
+                "count": {"$sum": 1},
+            },
+        }],
+    }
+    rows = await db.leads.aggregate([{"$match": lq}, {"$facet": facet}]).to_list(1)
+    fac = rows[0] if rows else {}
+
+    aging = {"overdue_followup": 0, "no_call_3d": 0, "no_call_7d": 0, "no_call_14d": 0}
+    async for l in db.leads.find(
+        {**lq, "status": "active"},
+        {"_id": 0, "follow_up_at": 1, "created_at": 1, "last_notes_at": 1},
+    ):
+        if l.get("follow_up_at") and l["follow_up_at"] < now_iso_cmp:
+            aging["overdue_followup"] += 1
+        ref = l.get("last_notes_at") or l.get("created_at")
+        ref_d = ist_date(ref)
+        if not ref_d:
+            continue
+        age_days = (today - date.fromisoformat(ref_d)).days
+        if age_days >= 14:
+            aging["no_call_14d"] += 1
+        elif age_days >= 7:
+            aging["no_call_7d"] += 1
+        elif age_days >= 3:
+            aging["no_call_3d"] += 1
+
+    return {
+        "total_leads": _facet_count(fac.get("total") or []),
+        "active_leads": _facet_count(fac.get("active") or []),
+        "converted_leads": _facet_count(fac.get("converted") or []),
+        "unassigned_leads": 0 if is_own else _facet_count(fac.get("unassigned") or []),
+        "overdue_followups": _facet_count(fac.get("overdue") or []),
+        "with_response": _facet_count(fac.get("with_response") or []),
+        "carry_forward_count": _facet_count(fac.get("carry_forward") or []),
+        "status_rows": fac.get("by_status") or [],
+        "stage_rows": fac.get("by_stage") or [],
+        "lead_disp_rows": fac.get("by_lead_disp") or [],
+        "source_rows": fac.get("by_source") or [],
+        "lead_agent_rows": fac.get("by_agent") or [],
+        "daily_lead_rows": fac.get("daily") or [],
+        "aging": aging,
+        "trend_from": trend_from,
+        "trend_to": trend_to,
+    }
+
+
+async def _dashboard_calls_bundle(cq: dict, call_scope: dict, today: date,
+                                  trend_from: date, trend_to: date):
+    """Calls $facet for range stats + parallel all-time / today counts."""
+    facet = {
+        "stats": [{
+            "$group": {
+                "_id": None,
+                "n": {"$sum": 1},
+                "avg": {"$avg": "$duration"},
+            },
+        }],
+        "by_disp": [{
+            "$group": {
+                "_id": {"$ifNull": ["$disposition_name", "Unknown"]},
+                "count": {"$sum": 1},
+            },
+        }],
+        "by_agent": [
+            {"$match": {"agent_id": {"$ne": None}}},
+            {"$group": {
+                "_id": "$agent_id",
+                "name": {"$first": "$agent_name"},
+                "calls": {"$sum": 1},
+            }},
+        ],
+        "daily": [{
+            "$group": {
+                "_id": _ist_day_group_expr("$created_at"),
+                "count": {"$sum": 1},
+            },
+        }],
+    }
+
+    today_lo, today_hi = date_bounds_iso(today, today)
+    calls_today_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
+    if today_lo or today_hi:
+        calls_today_q["created_at"] = {}
+        if today_lo:
+            calls_today_q["created_at"]["$gte"] = today_lo
+        if today_hi:
+            calls_today_q["created_at"]["$lte"] = today_hi
+
+    all_time_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
+
+    week_from = today - timedelta(days=6)
+    need_week_scan = not (trend_from <= week_from and trend_to >= today)
+    week_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
+    apply_created_range(week_q, week_from, today)
+
+    async def _week_daily():
+        if not need_week_scan:
+            return None
+        rows = await db.calls.aggregate([
+            {"$match": week_q},
+            {"$group": {"_id": _ist_day_group_expr("$created_at"), "count": {"$sum": 1}}},
+        ]).to_list(14)
+        return rows
+
+    facet_rows, total_calls_all, calls_today, week_rows = await asyncio.gather(
+        db.calls.aggregate([{"$match": cq}, {"$facet": facet}]).to_list(1),
+        db.calls.count_documents(all_time_q),
+        db.calls.count_documents(calls_today_q),
+        _week_daily(),
+    )
+    fac = facet_rows[0] if facet_rows else {}
+    stats = (fac.get("stats") or [{}])[0] if fac.get("stats") else {}
+    return {
+        "calls_in_range": int(stats.get("n") or 0),
+        "avg_call_duration": round(float(stats.get("avg") or 0), 1) if stats.get("n") else 0.0,
+        "disp_rows": fac.get("by_disp") or [],
+        "call_agent_rows": fac.get("by_agent") or [],
+        "daily_call_rows": fac.get("daily") or [],
+        "total_calls_all": total_calls_all,
+        "calls_today": calls_today,
+        "week_rows": week_rows,
+        "week_from": week_from,
+        "need_week_scan": need_week_scan,
+        "trend_from": trend_from,
+        "trend_to": trend_to,
+    }
+
+
+async def _dashboard_finance_bundle(clq: dict, principal: dict):
+    total_clients, ftd_clients = await asyncio.gather(
+        db.clients.count_documents(clq),
+        db.clients.count_documents({**clq, "ftd_at": {"$ne": None}}),
+    )
+    # ALL scope: aggregate ledger by company without fetching client ids
+    if principal.get("data_scope") == "ALL" and principal.get("user_type") != "affiliate":
+        credit, debit = await _ledger_type_totals_company()
+    else:
+        client_ids = [c["id"] for c in await db.clients.find(clq, {"_id": 0, "id": 1}).to_list(5000)]
+        credit, debit = await _ledger_type_totals(client_ids)
+    return {
+        "total_clients": total_clients,
+        "ftd_clients": ftd_clients,
+        "credit": credit,
+        "debit": debit,
+    }
+
+
 def in_range(iso_str, from_d: Optional[date], to_d: Optional[date]) -> bool:
     d = ist_date(iso_str)
     if not d:
@@ -136,8 +437,19 @@ async def dashboard(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    fresh: Optional[int] = Query(None, description="Set to 1 to bypass short TTL cache"),
     principal: dict = Depends(require("dashboard:view")),
 ):
+    cache_key = _dashboard_cache_key(principal, {
+        "from": from_date, "to": to_date, "status": status, "source": source,
+        "stage": stage, "disposition": disposition,
+        "assignment_status": assignment_status, "assigned_to": assigned_to,
+    })
+    if not fresh:
+        cached = _dashboard_cache_get(cache_key)
+        if cached is not None:
+            return cached
+
     from_d = parse_date(from_date)
     to_d = parse_date(to_date)
     if from_date and from_d is None:
@@ -192,62 +504,33 @@ async def dashboard(
     apply_created_range(lq, from_d, to_d)
     apply_created_range(cq, from_d, to_d)
 
-    # Default trend window when no dates: this month (or last 30 days fallback handled by UI)
     today = ist_today()
     trend_from = from_d or date(today.year, today.month, 1)
     trend_to = to_d or today
     now_iso_cmp = now_utc().isoformat()
 
-    # KPIs via counts (no full document materialization)
-    total_leads = await db.leads.count_documents(lq)
-    active_leads = await db.leads.count_documents({**lq, "status": "active"})
-    converted_leads = await db.leads.count_documents({**lq, "is_client": True})
-    unassigned_leads = 0 if is_own else await db.leads.count_documents({**lq, "assigned_to": None})
-    overdue_followups = await db.leads.count_documents({
-        **lq, "status": "active", "follow_up_at": {"$ne": None, "$lt": now_iso_cmp},
-    })
-    with_response = await db.leads.count_documents({
-        **lq, "disposition_name": {"$nin": [None, ""]},
-    })
-    carry_forward_count = await db.leads.count_documents({**lq, "carry_forward": True})
-
-    total_clients = await db.clients.count_documents(clq)
-    ftd_clients = await db.clients.count_documents({**clq, "ftd_at": {"$ne": None}})
-    client_ids = [c["id"] for c in await db.clients.find(clq, {"_id": 0, "id": 1}).to_list(5000)]
-    credit, debit = await _ledger_type_totals(client_ids)
-
-    total_calls_all = await db.calls.count_documents(
-        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
+    leads_b, calls_b, fin_b = await asyncio.gather(
+        _dashboard_leads_bundle(lq, is_own, now_iso_cmp, today, trend_from, trend_to),
+        _dashboard_calls_bundle(cq, call_scope, today, trend_from, trend_to),
+        _dashboard_finance_bundle(clq, principal),
     )
-    calls_in_range = await db.calls.count_documents(cq)
-    avg_row = await db.calls.aggregate([
-        {"$match": cq},
-        {"$group": {"_id": None, "avg": {"$avg": "$duration"}, "n": {"$sum": 1}}},
-    ]).to_list(1)
-    avg_call_duration = round(float(avg_row[0]["avg"] or 0), 1) if avg_row and avg_row[0].get("n") else 0.0
 
-    today_lo, today_hi = date_bounds_iso(today, today)
-    calls_today_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
-    if today_lo or today_hi:
-        calls_today_q["created_at"] = {}
-        if today_lo:
-            calls_today_q["created_at"]["$gte"] = today_lo
-        if today_hi:
-            calls_today_q["created_at"]["$lte"] = today_hi
-    calls_today = await db.calls.count_documents(calls_today_q)
-
+    total_leads = leads_b["total_leads"]
+    active_leads = leads_b["active_leads"]
+    converted_leads = leads_b["converted_leads"]
+    unassigned_leads = leads_b["unassigned_leads"]
+    overdue_followups = leads_b["overdue_followups"]
+    with_response = leads_b["with_response"]
+    carry_forward_count = leads_b["carry_forward_count"]
     conv_rate = round((converted_leads / total_leads * 100) if total_leads else 0, 1)
 
-    # Status / pipeline / disposition / source via $group
-    status_rows = await _agg_groups(db.leads, lq, {"$ifNull": ["$status", "unknown"]})
     status_breakdown = sorted(
-        [{"status": r["_id"], "count": r["count"]} for r in status_rows],
+        [{"status": r["_id"], "count": r["count"]} for r in leads_b["status_rows"]],
         key=lambda x: -x["count"],
     )
 
-    stage_rows = await _agg_groups(db.leads, lq, {"$ifNull": ["$pipeline_stage", "New"]})
     stage_counts = {s: 0 for s in PIPELINE_STAGES}
-    for r in stage_rows:
+    for r in leads_b["stage_rows"]:
         st = r["_id"] or "New"
         stage_counts[st] = stage_counts.get(st, 0) + r["count"]
     pipeline_funnel = []
@@ -258,17 +541,13 @@ async def dashboard(
         pipeline_funnel.append({"stage": st, "count": cnt, "rate_from_prev": rate})
         prev = cnt if cnt else prev
 
-    disp_rows = await _agg_groups(db.calls, cq, {"$ifNull": ["$disposition_name", "Unknown"]})
     disposition_mix = sorted(
-        [{"name": r["_id"], "value": r["count"]} for r in disp_rows],
+        [{"name": r["_id"], "value": r["count"]} for r in calls_b["disp_rows"]],
         key=lambda x: -x["value"],
     )
 
-    lead_disp_rows = await _agg_groups(
-        db.leads, lq, {"$ifNull": ["$disposition_name", "__none__"]},
-    )
     lead_disposition_breakdown = []
-    for r in sorted(lead_disp_rows, key=lambda x: -x["count"]):
+    for r in sorted(leads_b["lead_disp_rows"], key=lambda x: -x["count"]):
         name = r["_id"]
         lead_disposition_breakdown.append({
             "name": name,
@@ -290,12 +569,8 @@ async def dashboard(
         "top_response_count": top_response["count"] if top_response else 0,
     }
 
-    source_rows = await _agg_groups(
-        db.leads, lq, {"$ifNull": ["$source", "Unknown"]},
-        extra={"conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}}},
-    )
     source_breakdown = []
-    for r in source_rows:
+    for r in leads_b["source_rows"]:
         leads_n = r["count"]
         conv_n = r.get("conversions") or 0
         source_breakdown.append({
@@ -306,18 +581,8 @@ async def dashboard(
         })
     source_breakdown.sort(key=lambda x: -x["leads"])
 
-    # Agent performance: two light aggregations
     agent_map = {}
-    lead_agent_rows = await db.leads.aggregate([
-        {"$match": {**lq, "assigned_to": {"$ne": None}}},
-        {"$group": {
-            "_id": "$assigned_to",
-            "name": {"$first": "$assigned_name"},
-            "leads": {"$sum": 1},
-            "conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}},
-        }},
-    ]).to_list(500)
-    for r in lead_agent_rows:
+    for r in leads_b["lead_agent_rows"]:
         aid = r["_id"]
         if not aid:
             continue
@@ -328,15 +593,7 @@ async def dashboard(
             "calls": 0,
             "conversions": r.get("conversions") or 0,
         }
-    call_agent_rows = await db.calls.aggregate([
-        {"$match": {**cq, "agent_id": {"$ne": None}}},
-        {"$group": {
-            "_id": "$agent_id",
-            "name": {"$first": "$agent_name"},
-            "calls": {"$sum": 1},
-        }},
-    ]).to_list(500)
-    for r in call_agent_rows:
+    for r in calls_b["call_agent_rows"]:
         aid = r["_id"]
         if not aid:
             continue
@@ -358,8 +615,8 @@ async def dashboard(
         )
         agent_performance.append(row)
     agent_performance.sort(key=lambda x: (-x["conversions"], -x["calls"], -x["leads"]))
+    agent_performance = agent_performance[:AGENT_PERFORMANCE_CAP]
 
-    # Daily trend — stream only created_at within trend window (IST bucketing in Python)
     daily = {}
     cursor_d = trend_from
     while cursor_d <= trend_to:
@@ -367,82 +624,29 @@ async def dashboard(
         cursor_d += timedelta(days=1)
         if len(daily) > 120:
             break
-    trend_lq = dict(lq)
-    trend_cq = dict(cq)
-    apply_created_range(trend_lq, trend_from, trend_to)
-    apply_created_range(trend_cq, trend_from, trend_to)
-    async for l in db.leads.find(trend_lq, {"_id": 0, "created_at": 1}):
-        d = ist_date(l.get("created_at"))
-        if d in daily:
-            daily[d]["leads"] += 1
-    async for c in db.calls.find(trend_cq, {"_id": 0, "created_at": 1}):
-        d = ist_date(c.get("created_at"))
-        if d in daily:
-            daily[d]["calls"] += 1
+    for r in leads_b["daily_lead_rows"]:
+        day = r.get("_id")
+        if day in daily:
+            daily[day]["leads"] = r["count"]
+    for r in calls_b["daily_call_rows"]:
+        day = r.get("_id")
+        if day in daily:
+            daily[day]["calls"] = r["count"]
     daily_trend = list(daily.values())
 
-    # calls_trend: last 7 IST days — date-bounded, not full history scan
     seven = {}
     for i in range(6, -1, -1):
         d = (today - timedelta(days=i)).isoformat()
         seven[d] = 0
-    week_from = today - timedelta(days=6)
-    week_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
-    apply_created_range(week_q, week_from, today)
-    async for c in db.calls.find(week_q, {"_id": 0, "created_at": 1}):
-        d = ist_date(c.get("created_at"))
-        if d in seven:
-            seven[d] += 1
+    week_source = calls_b["week_rows"] if calls_b["need_week_scan"] else calls_b["daily_call_rows"]
+    if week_source:
+        for r in week_source:
+            day = r.get("_id")
+            if day in seven:
+                seven[day] = r["count"]
     calls_trend = [{"date": k[5:], "calls": v} for k, v in seven.items()]
 
-    # Aging / SLA — stream active leads in chunks (bounded RAM) + last-call $group
-    aging = {"overdue_followup": 0, "no_call_3d": 0, "no_call_7d": 0, "no_call_14d": 0}
-    CHUNK = 2000
-    chunk: list = []
-
-    async def _flush_aging_chunk(items: list):
-        if not items:
-            return
-        lead_ids = [l["id"] for l in items if l.get("id")]
-        lead_last_call = {}
-        if lead_ids:
-            async for row in db.calls.aggregate([
-                {"$match": {
-                    "companyId": COMPANY_ID,
-                    "lead_id": {"$in": lead_ids},
-                    **reportable_calls_filter(),
-                }},
-                {"$group": {"_id": "$lead_id", "last": {"$max": "$created_at"}}},
-            ]):
-                if row.get("_id") and row.get("last"):
-                    lead_last_call[row["_id"]] = row["last"]
-        for l in items:
-            if l.get("follow_up_at") and l["follow_up_at"] < now_iso_cmp:
-                aging["overdue_followup"] += 1
-            last = lead_last_call.get(l["id"])
-            created = l.get("created_at")
-            ref = last or created
-            ref_d = ist_date(ref)
-            if not ref_d:
-                continue
-            age_days = (today - date.fromisoformat(ref_d)).days
-            if age_days >= 14:
-                aging["no_call_14d"] += 1
-            elif age_days >= 7:
-                aging["no_call_7d"] += 1
-            elif age_days >= 3:
-                aging["no_call_3d"] += 1
-
-    async for l in db.leads.find(
-        {**lq, "status": "active"},
-        {"_id": 0, "id": 1, "follow_up_at": 1, "created_at": 1},
-    ):
-        chunk.append(l)
-        if len(chunk) >= CHUNK:
-            await _flush_aging_chunk(chunk)
-            chunk = []
-            await asyncio.sleep(0)
-    await _flush_aging_chunk(chunk)
+    aging = leads_b["aging"]
     aging_sla = [
         {"bucket": "Overdue follow-ups", "count": aging["overdue_followup"]},
         {"bucket": "No call 3–6 days", "count": aging["no_call_3d"]},
@@ -450,7 +654,6 @@ async def dashboard(
         {"bucket": "No call 14+ days", "count": aging["no_call_14d"]},
     ]
 
-    # Insights (max 5)
     insights = []
     if not is_own and unassigned_leads >= max(5, int(total_leads * 0.2)):
         insights.append({
@@ -484,7 +687,8 @@ async def dashboard(
         })
     insights = insights[:5]
 
-    return {
+    credit, debit = fin_b["credit"], fin_b["debit"]
+    payload = {
         "kpis": {
             "total_leads": total_leads,
             "active_leads": active_leads,
@@ -492,12 +696,12 @@ async def dashboard(
             "conversion_rate": conv_rate,
             "unassigned_leads": unassigned_leads,
             "overdue_followups": overdue_followups,
-            "total_calls": total_calls_all,
-            "calls_in_range": calls_in_range,
-            "calls_today": calls_today,
-            "avg_call_duration": avg_call_duration,
-            "total_clients": total_clients,
-            "ftd_clients": ftd_clients,
+            "total_calls": calls_b["total_calls_all"],
+            "calls_in_range": calls_b["calls_in_range"],
+            "calls_today": calls_b["calls_today"],
+            "avg_call_duration": calls_b["avg_call_duration"],
+            "total_clients": fin_b["total_clients"],
+            "ftd_clients": fin_b["ftd_clients"],
             "ledger_credit": credit,
             "ledger_debit": debit,
             "net_balance": round(credit - debit, 2),
@@ -514,6 +718,8 @@ async def dashboard(
         "aging_sla": aging_sla,
         "insights": insights,
     }
+    _dashboard_cache_set(cache_key, payload)
+    return payload
 
 
 def _report_date_range(from_date: Optional[str], to_date: Optional[str]):

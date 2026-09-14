@@ -86,8 +86,10 @@ def main():
     caller_keys = set(caller.keys())
 
     for label, path in [
-        ("pipeline", "/api/pipeline"),
-        ("today_calls", "/api/today-calls"),
+        ("pipeline", "/api/pipeline?page_size=50"),
+        ("pipeline_counts", "/api/pipeline/counts"),
+        ("today_calls", "/api/today-calls?page_size=50"),
+        ("today_calls_counts", "/api/today-calls/counts"),
         ("leads_clamp", "/api/leads?page_size=50000"),
         ("company", "/api/reports/company"),
         ("affiliate", "/api/reports/affiliate"),
@@ -97,6 +99,18 @@ def main():
         assert code == 200, f"{label} -> {code}"
         if label == "leads_clamp":
             assert body["page_size"] == 100
+        if label == "pipeline":
+            assert body.get("page_size") == 50
+            assert "board" in body and "has_more" in body
+            for stage, col in (body.get("board") or {}).items():
+                assert len(col) <= 50
+        if label == "pipeline_counts":
+            assert "counts" in body and "total" in body
+        if label == "today_calls":
+            assert body.get("page_size") == 50
+            assert "items" in body and "total" in body
+        if label == "today_calls_counts":
+            assert "counts" in body and "tab_counts" in body
 
     # Repeat dashboard for RSS drift
     dash_times = []

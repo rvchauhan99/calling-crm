@@ -216,6 +216,12 @@ async def ensure_indexes():
     await db.leads.create_index([("companyId", 1), ("phone", 1)])
     await db.leads.create_index("assigned_to")
     await db.leads.create_index([("companyId", 1), ("follow_up_at", 1)])
+    await db.leads.create_index([("companyId", 1), ("assigned_date", 1)])
+    await db.leads.create_index([("companyId", 1), ("pipeline_stage", 1), ("updated_at", -1)])
+    # Dashboard / reports date + status / assignment hot paths
+    await db.leads.create_index([("companyId", 1), ("created_at", 1)])
+    await db.leads.create_index([("companyId", 1), ("status", 1), ("created_at", 1)])
+    await db.leads.create_index([("companyId", 1), ("assigned_to", 1), ("created_at", 1)])
     await db.lead_import_jobs.create_index("id", unique=True)
     await db.lead_import_jobs.create_index([("companyId", 1), ("status", 1), ("created_at", 1)])
     await db.leads.create_index(
@@ -230,7 +236,13 @@ async def ensure_indexes():
     await ensure_lead_source_indexes()
     await db.ledger.create_index("idempotency_key", unique=True, sparse=True)
     await db.ledger.create_index([("client_id", 1), ("created_at", 1)])
+    await db.ledger.create_index([("companyId", 1), ("client_id", 1)])
     await db.calls.create_index("agent_id")
+    await db.calls.create_index([("companyId", 1), ("created_at", 1)])
+    await db.calls.create_index([("companyId", 1), ("agent_id", 1), ("created_at", 1)])
+    await db.calls.create_index([("lead_id", 1), ("created_at", 1)])
+    await db.clients.create_index([("companyId", 1), ("deleted_at", 1)])
+    await db.clients.create_index("id")
     await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.login_attempts.create_index("identifier")
 

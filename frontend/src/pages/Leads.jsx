@@ -249,6 +249,13 @@ export default function Leads() {
   const openDetail = (id) => setLead360Id(id)
 
   const toggle = (id) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
+  const pageLeadIds = data?.leads?.map((l) => l.id) || []
+  const allPageSelected = pageLeadIds.length > 0 && pageLeadIds.every((id) => selected.includes(id))
+  const somePageSelected = pageLeadIds.some((id) => selected.includes(id))
+  const handleSelectAllPage = (checked) => {
+    if (checked) setSelected(pageLeadIds)
+    else setSelected([])
+  }
   const tabLabel = isOwnScope ? "my" : tab === "assigned" ? "assigned" : "unassigned"
   const subtitle = data
     ? `${data.total} ${tabLabel} lead${data.total === 1 ? "" : "s"}`
@@ -424,7 +431,16 @@ export default function Leads() {
             <Table>
               <TableHeader>
                 <TableRow className="bg-slate-50">
-                  {can("leads:assign") && <TableHead className="w-10"></TableHead>}
+                  {can("leads:assign") && (
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={allPageSelected ? true : somePageSelected ? "indeterminate" : false}
+                        onCheckedChange={handleSelectAllPage}
+                        aria-label="Select all leads on this page"
+                        data-testid="leads-select-all"
+                      />
+                    </TableHead>
+                  )}
                   <TableHead>Name</TableHead>
                   <TableHead>Phone</TableHead>
                   <TableHead>Source</TableHead>

@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import api from "@/lib/api"
 import TodayCalls from "@/pages/TodayCalls"
+import { __setMockSearchParams, __getMockSetParams } from "react-router-dom"
 
 jest.mock("@/context/AuthContext", () => ({
   useAuth: () => ({ can: () => true, dataScope: "ALL", user: { id: "u1" } }),
@@ -39,7 +40,79 @@ jest.mock("sonner", () => ({
   toast: { success: jest.fn(), error: jest.fn() },
 }))
 
-const mockWorkbench = {
+const queueItems = [
+  {
+    id: "lead-overdue",
+    name: "Overdue Lead",
+    phone: "+919111111111",
+    source: "Website",
+    pipeline_stage: "Contacted",
+    disposition_name: "Call Back",
+    carry_forward: true,
+    follow_up_at: "2026-09-01T10:00:00.000Z",
+    queue_reason: "overdue",
+    days_overdue: 3,
+    last_notes: "Missed two callbacks",
+  },
+  {
+    id: "lead-today",
+    name: "Today Lead",
+    phone: "+919222222222",
+    source: "Referral",
+    pipeline_stage: "New",
+    disposition_name: null,
+    follow_up_at: "2026-09-04T15:00:00.000Z",
+    queue_reason: "due_today",
+    hours_until: 3,
+    last_notes: null,
+  },
+  {
+    id: "lead-assigned",
+    name: "Assigned Lead",
+    phone: "+919333333333",
+    source: "Manual",
+    pipeline_stage: "New",
+    disposition_name: null,
+    follow_up_at: null,
+    queue_reason: "assigned_today",
+  },
+  {
+    id: "lead-upcoming",
+    name: "Upcoming Lead",
+    phone: "+919444444444",
+    source: "Website",
+    pipeline_stage: "Qualified",
+    disposition_name: "Interested",
+    carry_forward: true,
+    follow_up_at: "2026-09-08T10:00:00.000Z",
+    queue_reason: "upcoming",
+  },
+]
+
+const calledItems = [
+  {
+    id: "lead-called-a",
+    name: "Called A",
+    phone: "+919555555555",
+    source: "Website",
+    pipeline_stage: "Contacted",
+    disposition_name: "Interested",
+    carry_forward: true,
+    queue_reason: "called_today",
+  },
+  {
+    id: "lead-called-b",
+    name: "Called B",
+    phone: "+919666666666",
+    source: "Manual",
+    pipeline_stage: "New",
+    disposition_name: "Call Back",
+    carry_forward: true,
+    queue_reason: "called_today",
+  },
+]
+
+const mockCounts = {
   date: "2026-09-04",
   acw_pending_lead_id: null,
   counts: {
@@ -50,101 +123,70 @@ const mockWorkbench = {
     called_today: 2,
   },
   tab_counts: { queue: 4, acw_pending: 0 },
-  buckets: {
-    overdue: [{
-      id: "lead-overdue",
-      name: "Overdue Lead",
-      phone: "+919111111111",
-      source: "Website",
-      pipeline_stage: "Contacted",
-      disposition_name: "Call Back",
-      carry_forward: true,
-      follow_up_at: "2026-09-01T10:00:00.000Z",
-      queue_reason: "overdue",
-      days_overdue: 3,
-      last_notes: "Missed two callbacks",
-    }],
-    due_today: [{
-      id: "lead-today",
-      name: "Today Lead",
-      phone: "+919222222222",
-      source: "Referral",
-      pipeline_stage: "New",
-      disposition_name: null,
-      follow_up_at: "2026-09-04T15:00:00.000Z",
-      queue_reason: "due_today",
-      hours_until: 3,
-      last_notes: null,
-    }],
-    assigned_today: [{
-      id: "lead-assigned",
-      name: "Assigned Lead",
-      phone: "+919333333333",
-      source: "Manual",
-      pipeline_stage: "New",
-      disposition_name: null,
-      follow_up_at: null,
-      queue_reason: "assigned_today",
-    }],
-    upcoming: [{
-      id: "lead-upcoming",
-      name: "Upcoming Lead",
-      phone: "+919444444444",
-      source: "Website",
-      pipeline_stage: "Qualified",
-      disposition_name: "Interested",
-      carry_forward: true,
-      follow_up_at: "2026-09-08T10:00:00.000Z",
-      queue_reason: "upcoming",
-    }],
-    called_today: [{
-      id: "lead-called-a",
-      name: "Called A",
-      phone: "+919555555555",
-      source: "Website",
-      pipeline_stage: "Contacted",
-      disposition_name: "Interested",
-      carry_forward: true,
-      queue_reason: "called_today",
-    }, {
-      id: "lead-called-b",
-      name: "Called B",
-      phone: "+919666666666",
-      source: "Manual",
-      pipeline_stage: "New",
-      disposition_name: "Call Back",
-      carry_forward: true,
-      queue_reason: "called_today",
-    }],
-  },
-  leads: [],
+}
+
+function itemsForUrl(url) {
+  const qs = new URLSearchParams(url.split("?")[1] || "")
+  const bucket = qs.get("bucket") || "all"
+  if (bucket === "called_today") return calledItems
+  if (bucket === "overdue") return queueItems.filter((l) => l.queue_reason === "overdue")
+  if (bucket === "all") return queueItems
+  return queueItems.filter((l) => l.queue_reason === bucket)
+}
+
+function mockApi(acwId = null) {
+  api.get.mockImplementation((url) => {
+    if (url.startsWith("/today-calls/counts")) {
+      const payload = JSON.parse(JSON.stringify(mockCounts))
+      if (acwId) {
+        payload.acw_pending_lead_id = acwId
+        payload.tab_counts = { queue: 4, acw_pending: 1 }
+      }
+      return Promise.resolve({ data: payload })
+    }
+    if (url.startsWith("/today-calls")) {
+      const items = itemsForUrl(url)
+      return Promise.resolve({
+        data: {
+          date: "2026-09-04",
+          acw_pending_lead_id: acwId,
+          items,
+          total: items.length,
+          page: 1,
+          page_size: 50,
+          bucket: new URLSearchParams(url.split("?")[1] || "").get("bucket") || "all",
+          sort: "urgency",
+        },
+      })
+    }
+    if (url === "/dispositions") {
+      return Promise.resolve({
+        data: {
+          dispositions: [
+            { id: "d1", name: "Interested", active: true, color: "#0EA5E9", requires_acw: false },
+          ],
+        },
+      })
+    }
+    if (url === "/leads/filter-options") {
+      return Promise.resolve({
+        data: {
+          stages: ["New", "Contacted"],
+          sources: ["Website", "Referral", "Manual"],
+          dispositions: [{ id: "d1", name: "Interested" }, { id: "d2", name: "Call Back" }],
+        },
+      })
+    }
+    return Promise.resolve({ data: {} })
+  })
+  api.post.mockResolvedValue({ data: { acw: false, call: { id: "c1" } } })
 }
 
 describe("TodayCalls workbench", () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    mockWorkbench.leads = [
-      ...mockWorkbench.buckets.overdue,
-      ...mockWorkbench.buckets.due_today,
-      ...mockWorkbench.buckets.assigned_today,
-      ...mockWorkbench.buckets.upcoming,
-    ]
-    api.get.mockImplementation((url) => {
-      if (url === "/today-calls") {
-        return Promise.resolve({ data: JSON.parse(JSON.stringify(mockWorkbench)) })
-      }
-      if (url === "/dispositions") {
-        return Promise.resolve({
-          data: {
-            dispositions: [
-              { id: "d1", name: "Interested", active: true, color: "#0EA5E9", requires_acw: false },
-            ],
-          },
-        })
-      }
-      return Promise.resolve({ data: {} })
-    })
-    api.post.mockResolvedValue({ data: { acw: false, call: { id: "c1" } } })
+    __setMockSearchParams(new URLSearchParams())
+    mockApi()
   })
 
   it("shows KPI counts and section order overdue first", async () => {
@@ -158,19 +200,24 @@ describe("TodayCalls workbench", () => {
     })
 
     expect(screen.getByTestId("overdue-banner")).toBeInTheDocument()
-    expect(screen.queryByTestId("filter-bucket-all")).not.toBeInTheDocument()
-    expect(screen.queryByTestId("tab-queue")).not.toBeInTheDocument()
-    expect(screen.queryByTestId("tab-acw-pending")).not.toBeInTheDocument()
     expect(screen.getByTestId("filter-stage")).toBeInTheDocument()
     expect(screen.getByTestId("filter-source")).toBeInTheDocument()
     expect(screen.getByTestId("filter-disposition")).toBeInTheDocument()
     expect(screen.getByTestId("filter-sort")).toBeInTheDocument()
     expect(screen.getByTestId("kpi-acw")).toHaveTextContent("0")
-    // Cloud Call UI stays off until /telephony/status.ui_enabled (default mock → inactive)
     expect(screen.queryByTestId("dial-call-btn-lead-overdue")).not.toBeInTheDocument()
     expect(screen.getByTestId("log-call-btn-lead-overdue")).toBeInTheDocument()
     const sections = screen.getAllByTestId(/section-(overdue|due_today|assigned_today|upcoming)/)
     expect(sections[0]).toHaveAttribute("data-testid", "section-overdue")
+    expect(api.get).toHaveBeenCalledWith("/today-calls/counts")
+    expect(api.get).toHaveBeenCalledWith(expect.stringMatching(/^\/today-calls\?/))
+  })
+
+  it("requests default page_size 50", async () => {
+    render(<TodayCalls />)
+    await waitFor(() => {
+      expect(api.get).toHaveBeenCalledWith("/today-calls?page=1&page_size=50")
+    })
   })
 
   it("filters to overdue bucket only via count strip", async () => {
@@ -183,25 +230,24 @@ describe("TodayCalls workbench", () => {
 
     await user.click(screen.getByTestId("kpi-overdue"))
 
-    expect(screen.getByTestId("today-card-lead-overdue")).toBeInTheDocument()
-    expect(screen.queryByTestId("today-card-lead-today")).not.toBeInTheDocument()
-    expect(screen.queryByTestId("today-card-lead-assigned")).not.toBeInTheDocument()
+    await waitFor(() => {
+      const setParams = __getMockSetParams()
+      expect(setParams).toHaveBeenCalled()
+      const last = setParams.mock.calls.at(-1)[0]
+      expect(last.get("bucket")).toBe("overdue")
+    })
   })
 
   it("filters to called today via count strip", async () => {
     const user = userEvent.setup()
+    __setMockSearchParams(new URLSearchParams("bucket=called_today"))
     render(<TodayCalls />)
 
     await waitFor(() => {
-      expect(screen.getByTestId("kpi-called_today")).toBeEnabled()
-      expect(screen.getByTestId("kpi-called_today")).toHaveTextContent("2")
+      expect(screen.getByTestId("section-called_today")).toBeInTheDocument()
+      expect(screen.getByTestId("today-card-lead-called-a")).toBeInTheDocument()
+      expect(screen.getByTestId("today-card-lead-called-b")).toBeInTheDocument()
     })
-
-    await user.click(screen.getByTestId("kpi-called_today"))
-
-    expect(screen.getByTestId("section-called_today")).toBeInTheDocument()
-    expect(screen.getByTestId("today-card-lead-called-a")).toBeInTheDocument()
-    expect(screen.getByTestId("today-card-lead-called-b")).toBeInTheDocument()
     expect(screen.queryByTestId("today-card-lead-overdue")).not.toBeInTheDocument()
     expect(screen.queryByTestId("section-overdue")).not.toBeInTheDocument()
   })
@@ -255,15 +301,40 @@ describe("TodayCalls workbench", () => {
   })
 
   it("keeps Log Call enabled when ACW pending and shows ACW count on KPI", async () => {
+    mockApi("lead-overdue")
+    render(<TodayCalls />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("log-call-btn-lead-overdue")).toBeEnabled()
+    })
+    expect(screen.getByTestId("acw-banner")).toHaveTextContent(/complete anytime/i)
+    expect(screen.getByTestId("kpi-acw")).toHaveTextContent("1")
+  })
+
+  it("shows pagination when total exceeds page", async () => {
     api.get.mockImplementation((url) => {
-      if (url === "/today-calls") {
-        const payload = JSON.parse(JSON.stringify(mockWorkbench))
-        payload.acw_pending_lead_id = "lead-overdue"
-        payload.tab_counts = { queue: 4, acw_pending: 1 }
-        return Promise.resolve({ data: payload })
+      if (url.startsWith("/today-calls/counts")) {
+        return Promise.resolve({ data: mockCounts })
+      }
+      if (url.startsWith("/today-calls")) {
+        return Promise.resolve({
+          data: {
+            date: "2026-09-04",
+            acw_pending_lead_id: null,
+            items: queueItems,
+            total: 87,
+            page: 1,
+            page_size: 50,
+            bucket: "all",
+            sort: "urgency",
+          },
+        })
       }
       if (url === "/dispositions") {
         return Promise.resolve({ data: { dispositions: [] } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { sources: [], dispositions: [] } })
       }
       return Promise.resolve({ data: {} })
     })
@@ -271,11 +342,8 @@ describe("TodayCalls workbench", () => {
     render(<TodayCalls />)
 
     await waitFor(() => {
-      expect(screen.getByTestId("log-call-btn-lead-overdue")).toBeEnabled()
+      expect(screen.getByTestId("table-pagination")).toBeInTheDocument()
     })
-    expect(screen.getByTestId("acw-banner")).toHaveTextContent(/complete anytime/i)
-    expect(screen.queryByTestId("tab-acw-pending")).not.toBeInTheDocument()
-    expect(screen.queryByTestId("acw-pending-panel")).not.toBeInTheDocument()
-    expect(screen.getByTestId("kpi-acw")).toHaveTextContent("1")
+    expect(screen.getByTestId("pagination-range")).toHaveTextContent("1–50 of 87")
   })
 })

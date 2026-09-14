@@ -1,6 +1,10 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react"
+import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
 import { EmptyState, PageLoader, StatusPill, LoadingOverlay, PageHeader } from "@/components/common"
+import { TablePagination } from "@/components/TablePagination"
+import { usePageParams } from "@/hooks/usePageParams"
+import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LastRemarks } from "@/components/leads/LastRemarks"
@@ -29,11 +33,21 @@ import {
   parseDepositAmount,
 } from "@/lib/followupBuckets"
 import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
+
 const SORTS = [
   { id: "urgency", label: "Urgency" },
   { id: "soonest", label: "Soonest FU" },
   { id: "name", label: "Name" },
 ]
+
+const BUCKET_IDS = new Set([
+  "all", "overdue", "due_today", "assigned_today", "upcoming", "called_today",
+])
+
+const SECTION_META = {
+  ...Object.fromEntries(QUEUE_BUCKETS.map((b) => [b.id, b])),
+  called_today: { id: "called_today", label: "Called today", color: "emerald" },
+}
 
 const bucketPill = (reason) => {
   if (reason === "overdue") return "red"
@@ -43,43 +57,108 @@ const bucketPill = (reason) => {
   return "slate"
 }
 
-const DISPLAY_SECTIONS = [
-  ...QUEUE_BUCKETS,
-  { id: "called_today", label: "Called today", color: "emerald" },
-]
+const DEFAULT_PAGE_SIZE = 50
+
+const groupItemsByReason = (items) => {
+  const groups = []
+  for (const item of items) {
+    const reason = item.queue_reason || "assigned_today"
+    const last = groups[groups.length - 1]
+    if (last && last.id === reason) {
+      last.items.push(item)
+    } else {
+      groups.push({ id: reason, items: [item] })
+    }
+  }
+  return groups
+}
 
 export default function TodayCalls() {
   const { enabled: telephonyEnabled } = useTelephonyEnabled()
-  const [data, setData] = useState(null)
+  const [params, setParams] = useSearchParams()
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams, {
+    defaultPageSize: DEFAULT_PAGE_SIZE,
+  })
+
+  const bucketFilter = BUCKET_IDS.has(params.get("bucket")) ? params.get("bucket") : "all"
+  const sortBy = SORTS.some((s) => s.id === params.get("sort")) ? params.get("sort") : "urgency"
+  const search = params.get("search") || ""
+  const stageFilter = params.get("stage") || ""
+  const sourceFilter = params.get("source") || ""
+  const dispositionFilter = params.get("disposition") || ""
+
+  const [countsData, setCountsData] = useState(null)
+  const [listData, setListData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [dispositions, setDispositions] = useState([])
+  const [filterOptions, setFilterOptions] = useState(null)
   const [active, setActive] = useState(null)
   const [lead360Id, setLead360Id] = useState(null)
   const [form, setForm] = useState({
     disposition_id: "", notes: "", follow_up_at: "", pipeline_stage: "", duration: 0, deposit_amount: "",
   })
-  const [bucketFilter, setBucketFilter] = useState("all")
-  const [search, setSearch] = useState("")
-  const [stageFilter, setStageFilter] = useState("")
-  const [sourceFilter, setSourceFilter] = useState("")
-  const [dispositionFilter, setDispositionFilter] = useState("")
-  const [sortBy, setSortBy] = useState("urgency")
   const [highlightAcw, setHighlightAcw] = useState(false)
   const [softLead, setSoftLead] = useState(null)
   const acwFocusPending = useRef(false)
 
-  const load = useCallback(async () => {
+  const patchParams = useCallback((mutator) => {
+    const p = new URLSearchParams(params)
+    mutator(p)
+    p.set("page", "1")
+    if (p.get("page") === "1") p.delete("page")
+    setParams(p)
+  }, [params, setParams])
+
+  const commitSearch = useCallback((value) => {
+    patchParams((p) => {
+      if (!value) p.delete("search")
+      else p.set("search", value)
+    })
+  }, [patchParams])
+
+  const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
+
+  const loadCounts = useCallback(async () => {
+    const { data } = await api.get("/today-calls/counts")
+    setCountsData(data)
+  }, [])
+
+  const loadList = useCallback(async () => {
     setLoading(true)
     try {
-      const [tc, ds] = await Promise.all([api.get("/today-calls"), api.get("/dispositions")])
-      setData(tc.data)
-      setDispositions((ds.data.dispositions || []).filter((d) => d.active))
+      const p = new URLSearchParams()
+      p.set("page", String(page))
+      p.set("page_size", String(pageSize))
+      if (bucketFilter && bucketFilter !== "all") p.set("bucket", bucketFilter)
+      if (sortBy && sortBy !== "urgency") p.set("sort", sortBy)
+      if (search) p.set("search", search)
+      if (stageFilter) p.set("pipeline_stage", stageFilter)
+      if (sourceFilter) p.set("source", sourceFilter)
+      if (dispositionFilter) p.set("disposition", dispositionFilter)
+      const { data } = await api.get(`/today-calls?${p.toString()}`)
+      setListData(data)
     } finally {
       setLoading(false)
     }
+  }, [page, pageSize, bucketFilter, sortBy, search, stageFilter, sourceFilter, dispositionFilter])
+
+  const loadMeta = useCallback(async () => {
+    const [ds, fo] = await Promise.all([
+      api.get("/dispositions"),
+      api.get("/leads/filter-options").catch(() => ({ data: null })),
+    ])
+    setDispositions((ds.data.dispositions || []).filter((d) => d.active))
+    setFilterOptions(fo.data)
   }, [])
 
-  useEffect(() => { load().catch(() => {}) }, [load])
+  const refresh = useCallback(() => {
+    loadCounts().catch(() => {})
+    loadList().catch(() => {})
+  }, [loadCounts, loadList])
+
+  useEffect(() => { loadMeta().catch(() => {}) }, [loadMeta])
+  useEffect(() => { loadCounts().catch(() => {}) }, [loadCounts])
+  useEffect(() => { loadList().catch(() => {}) }, [loadList])
 
   const openLog = (lead) => {
     setActive(lead)
@@ -124,7 +203,7 @@ export default function TodayCalls() {
         toast.success("Client conversion undone · Removed from Clients")
       } else toast.success(res.acw ? "Logged — after-call work pending" : "Call logged")
       setActive(null)
-      load()
+      refresh()
     } catch (e) {
       toast.error(formatApiError(e.response?.data?.detail))
     }
@@ -133,111 +212,40 @@ export default function TodayCalls() {
   const completeAcw = async () => {
     await api.post("/calls/complete-acw")
     toast.success("After-call work completed")
-    load()
+    refresh()
   }
 
   const sources = useMemo(() => {
-    if (!data?.buckets) return []
-    const set = new Set()
-    Object.values(data.buckets).flat().forEach((l) => {
-      if (l.source) set.add(l.source)
-    })
-    return [...set].sort()
-  }, [data])
+    if (filterOptions?.sources?.length) return filterOptions.sources
+    return []
+  }, [filterOptions])
 
   const dispositionNames = useMemo(() => {
-    if (!data?.buckets) return []
-    const set = new Set()
-    Object.values(data.buckets).flat().forEach((l) => {
-      if (l.disposition_name) set.add(l.disposition_name)
-    })
-    return [...set].sort()
-  }, [data])
-
-  const filterLead = useCallback((lead) => {
-    if (search) {
-      const q = search.toLowerCase()
-      const hay = `${lead.name || ""} ${lead.phone || ""}`.toLowerCase()
-      if (!hay.includes(q)) return false
+    if (filterOptions?.dispositions?.length) {
+      return filterOptions.dispositions.map((d) => d.name).filter(Boolean)
     }
-    if (stageFilter && lead.pipeline_stage !== stageFilter) return false
-    if (sourceFilter && lead.source !== sourceFilter) return false
-    if (dispositionFilter === "__none__" && lead.disposition_name) return false
-    if (dispositionFilter === "__has__" && !lead.disposition_name) return false
-    if (
-      dispositionFilter
-      && dispositionFilter !== "__none__"
-      && dispositionFilter !== "__has__"
-      && lead.disposition_name !== dispositionFilter
-    ) return false
-    return true
-  }, [search, stageFilter, sourceFilter, dispositionFilter])
+    return dispositions.map((d) => d.name).filter(Boolean)
+  }, [filterOptions, dispositions])
 
-  const sortLeads = useCallback((list) => {
-    const copy = [...list]
-    if (sortBy === "name") {
-      copy.sort((a, b) => (a.name || "").localeCompare(b.name || ""))
-    } else if (sortBy === "soonest") {
-      copy.sort((a, b) => {
-        const fa = a.follow_up_at || "9999"
-        const fb = b.follow_up_at || "9999"
-        return fa.localeCompare(fb)
-      })
-    }
-    return copy
-  }, [sortBy])
+  const items = listData?.items || []
+  const total = listData?.total || 0
+  const sections = useMemo(() => groupItemsByReason(items), [items])
 
-  const visibleBuckets = useMemo(() => {
-    if (!data?.buckets) return {}
-    const out = {}
-    for (const b of QUEUE_BUCKETS) {
-      if (bucketFilter === "called_today") {
-        out[b.id] = []
-        continue
-      }
-      if (bucketFilter !== "all" && bucketFilter !== b.id) {
-        out[b.id] = []
-        continue
-      }
-      out[b.id] = sortLeads((data.buckets[b.id] || []).filter(filterLead))
-    }
-    if (bucketFilter === "called_today") {
-      out.called_today = sortLeads((data.buckets.called_today || []).filter(filterLead))
-    } else if (bucketFilter === "all") {
-      out.called_today = []
-    } else {
-      out.called_today = []
-    }
-    return out
-  }, [data, bucketFilter, filterLead, sortLeads])
-
-  const totalVisible = useMemo(
-    () => Object.values(visibleBuckets).reduce((n, arr) => n + arr.length, 0),
-    [visibleBuckets],
-  )
-
-  const acwId = data?.acw_pending_lead_id
-
-  const findAcwBucket = useCallback(() => {
-    if (!acwId || !data?.buckets) return null
-    for (const key of [...QUEUE_BUCKETS.map((b) => b.id), "called_today"]) {
-      if ((data.buckets[key] || []).some((l) => l.id === acwId)) return key
-    }
-    return null
-  }, [acwId, data])
+  const acwId = countsData?.acw_pending_lead_id ?? listData?.acw_pending_lead_id
+  const dateLabel = countsData?.date || listData?.date
 
   const focusAcwLead = useCallback(() => {
     if (!acwId) return
-    const bucket = findAcwBucket()
-    setSearch("")
-    setStageFilter("")
-    setSourceFilter("")
-    setDispositionFilter("")
-    if (bucket === "called_today") setBucketFilter("called_today")
-    else setBucketFilter("all")
+    patchParams((p) => {
+      p.delete("bucket")
+      p.delete("search")
+      p.delete("stage")
+      p.delete("source")
+      p.delete("disposition")
+    })
     acwFocusPending.current = true
     setHighlightAcw(true)
-  }, [acwId, findAcwBucket])
+  }, [acwId, patchParams])
 
   useEffect(() => {
     if (!acwFocusPending.current || !acwId) return
@@ -248,9 +256,9 @@ export default function TodayCalls() {
       const t = setTimeout(() => setHighlightAcw(false), 2000)
       return () => clearTimeout(t)
     }
-  }, [acwId, visibleBuckets, bucketFilter])
+  }, [acwId, items, bucketFilter])
 
-  if (!data && loading) {
+  if (!countsData && !listData && loading) {
     return (
       <div data-testid="today-calls-page">
         <PageHeader title="Today Calls" subtitle="Loading queue…" />
@@ -258,25 +266,28 @@ export default function TodayCalls() {
       </div>
     )
   }
-  if (!data) {
+  if (!countsData && !listData) {
     return (
       <div data-testid="today-calls-page">
         <PageHeader title="Today Calls" subtitle="Unable to load" />
       </div>
     )
   }
-  const counts = data.counts || {}
-  const acwCount = data.tab_counts?.acw_pending ?? (acwId ? 1 : 0)
+
+  const counts = countsData?.counts || {}
+  const acwCount = countsData?.tab_counts?.acw_pending ?? (acwId ? 1 : 0)
   const overdueCount = counts.overdue || 0
   const queueTotal = (counts.overdue || 0) + (counts.due_today || 0)
     + (counts.assigned_today || 0) + (counts.upcoming || 0)
 
   const handleBucketChip = (id) => {
-    if (id === "all") {
-      setBucketFilter("all")
-      return
-    }
-    setBucketFilter(bucketFilter === id ? "all" : id)
+    patchParams((p) => {
+      if (id === "all" || (bucketFilter === id && id !== "all")) {
+        p.delete("bucket")
+      } else {
+        p.set("bucket", id)
+      }
+    })
   }
 
   const countChips = [
@@ -295,7 +306,7 @@ export default function TodayCalls() {
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <h1 className="font-display text-lg font-bold text-slate-900">Today Calls</h1>
-          <p className="text-xs text-slate-500">Calls workbench · {data.date}</p>
+          <p className="text-xs text-slate-500">Calls workbench · {dateLabel}</p>
         </div>
         {acwId && (
           <Button size="sm" variant="outline" className="h-8" onClick={completeAcw} data-testid="complete-acw-btn">
@@ -375,8 +386,8 @@ export default function TodayCalls() {
         <div className="relative min-w-[10rem] flex-1">
           <Search size={14} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
           <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchLocal}
+            onChange={(e) => setSearchLocal(e.target.value)}
             placeholder="Search name or phone"
             className="h-8 pl-8"
             data-testid="filter-search"
@@ -386,7 +397,10 @@ export default function TodayCalls() {
         <div className="w-32 shrink-0">
           <SearchableSelect
             value={stageFilter || "all"}
-            onChange={(v) => setStageFilter(v === "all" ? "" : v)}
+            onChange={(v) => patchParams((p) => {
+              if (!v || v === "all") p.delete("stage")
+              else p.set("stage", v)
+            })}
             options={[
               { value: "all", label: "All stages" },
               ...STAGES.map((s) => ({ value: s, label: s })),
@@ -399,7 +413,10 @@ export default function TodayCalls() {
         <div className="w-32 shrink-0">
           <SearchableSelect
             value={sourceFilter || "all"}
-            onChange={(v) => setSourceFilter(v === "all" ? "" : v)}
+            onChange={(v) => patchParams((p) => {
+              if (!v || v === "all") p.delete("source")
+              else p.set("source", v)
+            })}
             options={[
               { value: "all", label: "All sources" },
               ...sources.map((s) => ({ value: s, label: s })),
@@ -412,7 +429,10 @@ export default function TodayCalls() {
         <div className="min-w-[9rem] w-40 shrink-0">
           <SearchableSelect
             value={dispositionFilter || "all"}
-            onChange={(v) => setDispositionFilter(v === "all" ? "" : v)}
+            onChange={(v) => patchParams((p) => {
+              if (!v || v === "all") p.delete("disposition")
+              else p.set("disposition", v)
+            })}
             options={[
               { value: "all", label: "All dispositions" },
               { value: "__none__", label: "No disposition" },
@@ -427,7 +447,10 @@ export default function TodayCalls() {
         <div className="w-28 shrink-0">
           <SearchableSelect
             value={sortBy}
-            onChange={setSortBy}
+            onChange={(v) => patchParams((p) => {
+              if (!v || v === "urgency") p.delete("sort")
+              else p.set("sort", v)
+            })}
             options={SORTS.map((s) => ({ value: s.id, label: s.label }))}
             placeholder="Sort"
             testId="filter-sort"
@@ -436,7 +459,7 @@ export default function TodayCalls() {
         </div>
       </div>
 
-      {totalVisible === 0 ? (
+      {total === 0 ? (
         <EmptyState
           icon={PhoneOutgoing}
           title="No calls in this queue"
@@ -445,134 +468,127 @@ export default function TodayCalls() {
         />
       ) : (
         <div className="space-y-3">
-          {DISPLAY_SECTIONS.map((section) => {
-            const items = visibleBuckets[section.id] || []
-            if (bucketFilter === "called_today") {
-              if (section.id !== "called_today") return null
-            } else if (section.id === "called_today") {
-              return null
-            } else if (bucketFilter !== "all" && bucketFilter !== section.id) {
-              return null
-            }
-            if (bucketFilter === "all" && items.length === 0) return null
+          {sections.map((section) => {
+            const meta = SECTION_META[section.id] || { id: section.id, label: section.id }
             return (
               <section key={section.id} data-testid={`section-${section.id}`}>
                 <div className="sticky top-0 z-10 mb-1 flex items-center gap-1.5 bg-slate-50/95 py-0.5 backdrop-blur-sm">
-                  <h2 className="font-display text-xs font-bold text-slate-800">{section.label}</h2>
+                  <h2 className="font-display text-xs font-bold text-slate-800">{meta.label}</h2>
                   <span className="rounded-full bg-slate-200 px-1.5 py-0 text-[10px] font-semibold text-slate-600">
-                    {items.length}
+                    {section.items.length}
                   </span>
                 </div>
-                {items.length === 0 ? (
-                  <p className="text-xs text-slate-400" data-testid={`section-empty-${section.id}`}>
-                    Nothing in this bucket
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
-                    {items.map((l) => {
-                      const urgency = urgencyLabel(l)
-                      const isAcwPending = acwId === l.id
-                      return (
-                        <div
-                          key={l.id}
-                          className={cn(
-                            "rounded-md border bg-white p-2.5 shadow-sm transition-shadow duration-200 hover:shadow-md",
-                            isAcwPending ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200",
-                            highlightAcw && isAcwPending && "ring-2 ring-amber-400",
-                            l.queue_reason === "overdue" && "border-l-4 border-l-red-500",
-                            l.queue_reason === "due_today" && "border-l-4 border-l-amber-400",
-                            l.queue_reason === "called_today" && "border-l-4 border-l-emerald-500",
-                          )}
-                          data-testid={`today-card-${l.id}`}
-                          data-queue-reason={l.queue_reason}
-                        >
-                          <div className="flex items-start gap-2">
-                            <div className="min-w-0 flex-1">
-                              <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} asName testId={`today-name-${l.id}`}>
-                                {l.name}
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+                  {section.items.map((l) => {
+                    const urgency = urgencyLabel(l)
+                    const isAcwPending = acwId === l.id
+                    return (
+                      <div
+                        key={l.id}
+                        className={cn(
+                          "rounded-md border bg-white p-2.5 shadow-sm transition-shadow duration-200 hover:shadow-md",
+                          isAcwPending ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200",
+                          highlightAcw && isAcwPending && "ring-2 ring-amber-400",
+                          l.queue_reason === "overdue" && "border-l-4 border-l-red-500",
+                          l.queue_reason === "due_today" && "border-l-4 border-l-amber-400",
+                          l.queue_reason === "called_today" && "border-l-4 border-l-emerald-500",
+                        )}
+                        data-testid={`today-card-${l.id}`}
+                        data-queue-reason={l.queue_reason}
+                      >
+                        <div className="flex items-start gap-2">
+                          <div className="min-w-0 flex-1">
+                            <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} asName testId={`today-name-${l.id}`}>
+                              {l.name}
+                            </LeadPhoneLink>
+                            <div className="mt-0.5">
+                              <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`today-phone-${l.id}`}>
+                                {l.phone}
                               </LeadPhoneLink>
-                              <div className="mt-0.5">
-                                <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`today-phone-${l.id}`}>
-                                  {l.phone}
-                                </LeadPhoneLink>
-                              </div>
-                              <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
-                                <span>{l.source || "—"}</span>
-                                <span>·</span>
-                                <span>{l.pipeline_stage || "New"}</span>
-                                {l.city && (
-                                  <>
-                                    <span>·</span>
-                                    <span>{l.city}</span>
-                                  </>
-                                )}
-                              </div>
-                              <div className="mt-1 flex flex-wrap gap-1">
-                                {isAcwPending && <StatusPill color="amber">ACW</StatusPill>}
-                                {urgency && (
-                                  <StatusPill color={bucketPill(l.queue_reason)}>{urgency}</StatusPill>
-                                )}
-                                {l.disposition_name ? (
-                                  <StatusPill color={l.carry_forward ? "sky" : "amber"}>
-                                    {l.disposition_name}
-                                  </StatusPill>
-                                ) : (
-                                  <StatusPill color="slate">Fresh</StatusPill>
-                                )}
-                              </div>
-                              <LastRemarks
-                                notes={l.last_notes}
-                                compact
-                                showLabel
-                                className="mt-1.5"
-                                testId={`today-last-remarks-${l.id}`}
-                              />
                             </div>
-                            <div className="flex shrink-0 flex-col gap-1">
-                              {telephonyEnabled && (
-                                <Button
-                                  size="sm"
-                                  className="h-7 bg-emerald-600 px-2 hover:bg-emerald-700"
-                                  onClick={() => setSoftLead(l)}
-                                  data-testid={`dial-call-btn-${l.id}`}
-                                  aria-label={`Call ${l.name}`}
-                                >
-                                  <Phone size={13} className="mr-1" />
-                                  Call
-                                </Button>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
+                              <span>{l.source || "—"}</span>
+                              <span>·</span>
+                              <span>{l.pipeline_stage || "New"}</span>
+                              {l.city && (
+                                <>
+                                  <span>·</span>
+                                  <span>{l.city}</span>
+                                </>
                               )}
+                            </div>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {isAcwPending && <StatusPill color="amber">ACW</StatusPill>}
+                              {urgency && (
+                                <StatusPill color={bucketPill(l.queue_reason)}>{urgency}</StatusPill>
+                              )}
+                              {l.disposition_name ? (
+                                <StatusPill color={l.carry_forward ? "sky" : "amber"}>
+                                  {l.disposition_name}
+                                </StatusPill>
+                              ) : (
+                                <StatusPill color="slate">Fresh</StatusPill>
+                              )}
+                            </div>
+                            <LastRemarks
+                              notes={l.last_notes}
+                              compact
+                              showLabel
+                              className="mt-1.5"
+                              testId={`today-last-remarks-${l.id}`}
+                            />
+                          </div>
+                          <div className="flex shrink-0 flex-col gap-1">
+                            {telephonyEnabled && (
                               <Button
                                 size="sm"
-                                className="h-7 bg-sky-500 px-2 hover:bg-sky-600"
-                                onClick={() => openLog(l)}
-                                data-testid={`log-call-btn-${l.id}`}
-                                aria-label={`Log call for ${l.name}`}
+                                className="h-7 bg-emerald-600 px-2 hover:bg-emerald-700"
+                                onClick={() => setSoftLead(l)}
+                                data-testid={`dial-call-btn-${l.id}`}
+                                aria-label={`Call ${l.name}`}
                               >
-                                <PhoneCall size={13} className="mr-1" />
-                                Log
+                                <Phone size={13} className="mr-1" />
+                                Call
                               </Button>
-                              {isAcwPending && (
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="h-7 px-2"
-                                  onClick={completeAcw}
-                                  data-testid={`complete-acw-card-${l.id}`}
-                                >
-                                  <CheckCircle2 size={13} className="mr-1" />
-                                  ACW
-                                </Button>
-                              )}
-                            </div>
+                            )}
+                            <Button
+                              size="sm"
+                              className="h-7 bg-sky-500 px-2 hover:bg-sky-600"
+                              onClick={() => openLog(l)}
+                              data-testid={`log-call-btn-${l.id}`}
+                              aria-label={`Log call for ${l.name}`}
+                            >
+                              <PhoneCall size={13} className="mr-1" />
+                              Log
+                            </Button>
+                            {isAcwPending && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2"
+                                onClick={completeAcw}
+                                data-testid={`complete-acw-card-${l.id}`}
+                              >
+                                <CheckCircle2 size={13} className="mr-1" />
+                                ACW
+                              </Button>
+                            )}
                           </div>
                         </div>
-                      )
-                    })}
-                  </div>
-                )}
+                      </div>
+                    )
+                  })}
+                </div>
               </section>
             )
           })}
+          <TablePagination
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
         </div>
       )}
 
@@ -732,7 +748,7 @@ export default function TodayCalls() {
       <Lead360Sheet
         leadId={lead360Id}
         onClose={() => setLead360Id(null)}
-        onLogged={() => load()}
+        onLogged={() => refresh()}
       />
 
       <SoftphoneDock
@@ -755,7 +771,7 @@ export default function TodayCalls() {
               deposit_amount: "",
             })
           }
-          load()
+          refresh()
         }}
       />
     </div>

@@ -42,6 +42,8 @@ const board = {
   stages: ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"],
   counts: { New: 1, Contacted: 0, Qualified: 0, Proposal: 0, Won: 0, Lost: 0 },
   total: 1,
+  page_size: 50,
+  has_more: { New: false, Contacted: false, Qualified: false, Proposal: false, Won: false, Lost: false },
   board: {
     New: [{
       id: "lead-1",
@@ -63,6 +65,77 @@ const board = {
   },
 }
 
+const countsPayload = {
+  stages: board.stages,
+  counts: board.counts,
+  total: board.total,
+}
+
+function mockApi() {
+  api.get.mockImplementation((url) => {
+    if (url.startsWith("/pipeline/counts")) {
+      return Promise.resolve({ data: JSON.parse(JSON.stringify(countsPayload)) })
+    }
+    if (url.startsWith("/pipeline")) {
+      const qs = new URLSearchParams(url.split("?")[1] || "")
+      if (qs.get("view") === "list") {
+        return Promise.resolve({
+          data: {
+            stages: board.stages,
+            items: board.board.New,
+            total: 1,
+            page: 1,
+            page_size: 50,
+            counts: board.counts,
+          },
+        })
+      }
+      if (qs.get("stage")) {
+        return Promise.resolve({
+          data: {
+            stage: qs.get("stage"),
+            items: [],
+            total: 0,
+            page: Number(qs.get("page") || 1),
+            page_size: 50,
+          },
+        })
+      }
+      return Promise.resolve({ data: JSON.parse(JSON.stringify(board)) })
+    }
+    if (url === "/leads/filter-options") {
+      return Promise.resolve({ data: { sources: ["Website"], dispositions: [] } })
+    }
+    if (url === "/dispositions") {
+      return Promise.resolve({
+        data: {
+          dispositions: [
+            { id: "d1", name: "Call Back", active: true, color: "#0EA5E9", requires_acw: false },
+          ],
+        },
+      })
+    }
+    if (url === "/dashboard/filter-options") {
+      return Promise.resolve({ data: { agents: [{ id: "a1", name: "Rohan" }] } })
+    }
+    if (url === "/leads/lead-1") {
+      return Promise.resolve({
+        data: {
+          lead: board.board.New[0],
+          calls: [],
+          client: null,
+          activity: [],
+        },
+      })
+    }
+    if (url.startsWith("/today-calls")) {
+      return Promise.resolve({ data: { acw_pending_lead_id: null } })
+    }
+    return Promise.resolve({ data: {} })
+  })
+  api.post.mockResolvedValue({ data: { acw: false } })
+}
+
 describe("Pipeline workbench", () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -72,41 +145,7 @@ describe("Pipeline workbench", () => {
       dataScope: "ALL",
       user: { id: "admin", user_type: "admin" },
     })
-    api.get.mockImplementation((url) => {
-      if (url.startsWith("/pipeline")) {
-        return Promise.resolve({ data: JSON.parse(JSON.stringify(board)) })
-      }
-      if (url === "/leads/filter-options") {
-        return Promise.resolve({ data: { sources: ["Website"], dispositions: [] } })
-      }
-      if (url === "/dispositions") {
-        return Promise.resolve({
-          data: {
-            dispositions: [
-              { id: "d1", name: "Call Back", active: true, color: "#0EA5E9", requires_acw: false },
-            ],
-          },
-        })
-      }
-      if (url === "/dashboard/filter-options") {
-        return Promise.resolve({ data: { agents: [{ id: "a1", name: "Rohan" }] } })
-      }
-      if (url === "/leads/lead-1") {
-        return Promise.resolve({
-          data: {
-            lead: board.board.New[0],
-            calls: [],
-            client: null,
-            activity: [],
-          },
-        })
-      }
-      if (url === "/today-calls") {
-        return Promise.resolve({ data: { acw_pending_lead_id: null } })
-      }
-      return Promise.resolve({ data: {} })
-    })
-    api.post.mockResolvedValue({ data: { acw: false } })
+    mockApi()
   })
 
   it("renders filters and kanban card", async () => {
@@ -120,6 +159,8 @@ describe("Pipeline workbench", () => {
     expect(screen.getByTestId("pipeline-card-last-remarks-lead-1")).toHaveTextContent(
       "Needs site survey",
     )
+    expect(api.get).toHaveBeenCalledWith(expect.stringMatching(/^\/pipeline\/counts/))
+    expect(api.get).toHaveBeenCalledWith(expect.stringMatching(/^\/pipeline\?.*page_size=50/))
   })
 
   it("shows last remarks in list view and log dialog", async () => {
@@ -132,12 +173,49 @@ describe("Pipeline workbench", () => {
     expect(screen.getByTestId("pipeline-last-remarks-lead-1")).toHaveTextContent(
       "Needs site survey",
     )
+    expect(api.get).toHaveBeenCalledWith(expect.stringMatching(/view=list/))
 
     await user.click(screen.getByTestId("list-log-call-lead-1"))
     const dialog = await screen.findByTestId("pipeline-log-call-dialog")
     expect(within(dialog).getByTestId("log-call-last-remarks")).toHaveTextContent(
       "Needs site survey",
     )
+  })
+
+  it("list view shows pagination when total exceeds page", async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/pipeline/counts")) {
+        return Promise.resolve({ data: { ...countsPayload, total: 87, counts: { ...board.counts, New: 87 } } })
+      }
+      if (url.startsWith("/pipeline")) {
+        return Promise.resolve({
+          data: {
+            stages: board.stages,
+            items: board.board.New,
+            total: 87,
+            page: 1,
+            page_size: 50,
+            counts: board.counts,
+          },
+        })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { sources: [], dispositions: [] } })
+      }
+      if (url === "/dispositions") {
+        return Promise.resolve({ data: { dispositions: [] } })
+      }
+      if (url === "/dashboard/filter-options") {
+        return Promise.resolve({ data: { agents: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    __setMockSearchParams(new URLSearchParams("view=list"))
+    render(<Pipeline />)
+    await waitFor(() => {
+      expect(screen.getByTestId("table-pagination")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("pagination-range")).toHaveTextContent("1–50 of 87")
   })
 
   it("kanban Call button opens log dialog without opening detail", async () => {
@@ -183,7 +261,6 @@ describe("Pipeline workbench", () => {
 
     const dialog = await screen.findByTestId("pipeline-log-call-dialog")
     await user.selectOptions(within(dialog).getByTestId("pipeline-disposition-select"), "d1")
-    // Move mode / Call Back already prefills follow-up; set explicitly for determinism
     fireEvent.change(within(dialog).getByTestId("pipeline-followup-input"), {
       target: { value: "2026-09-10T10:00" },
     })
@@ -209,6 +286,59 @@ describe("Pipeline workbench", () => {
     await waitFor(() => {
       expect(screen.getByTestId("lead-360")).toBeInTheDocument()
       expect(screen.getByTestId("lead-360-log-call")).toBeInTheDocument()
+    })
+  })
+
+  it("shows Load more when has_more and appends on click", async () => {
+    const user = userEvent.setup()
+    const boardWithMore = JSON.parse(JSON.stringify(board))
+    boardWithMore.counts.New = 2
+    boardWithMore.total = 2
+    boardWithMore.has_more.New = true
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/pipeline/counts")) {
+        return Promise.resolve({
+          data: { stages: board.stages, counts: boardWithMore.counts, total: 2 },
+        })
+      }
+      if (url.startsWith("/pipeline")) {
+        const qs = new URLSearchParams(url.split("?")[1] || "")
+        if (qs.get("stage") === "New") {
+          return Promise.resolve({
+            data: {
+              stage: "New",
+              items: [{
+                id: "lead-2",
+                name: "More Lead",
+                phone: "+918888888888",
+                pipeline_stage: "New",
+                source: "Manual",
+              }],
+              total: 2,
+              page: 2,
+              page_size: 50,
+            },
+          })
+        }
+        return Promise.resolve({ data: boardWithMore })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { sources: [], dispositions: [] } })
+      }
+      if (url === "/dispositions") {
+        return Promise.resolve({ data: { dispositions: [] } })
+      }
+      if (url === "/dashboard/filter-options") {
+        return Promise.resolve({ data: { agents: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Pipeline />)
+    await waitFor(() => expect(screen.getByTestId("load-more-New")).toBeInTheDocument())
+    await user.click(screen.getByTestId("load-more-New"))
+    await waitFor(() => {
+      expect(screen.getByTestId("pipeline-card-lead-2")).toBeInTheDocument()
     })
   })
 })

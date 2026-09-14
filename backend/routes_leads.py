@@ -675,132 +675,160 @@ class LogCallIn(BaseModel):
     deposit_amount: Optional[float] = None
 
 
-@router.get("/today-calls")
-async def today_calls(principal: dict = Depends(require("today_calls:view"))):
-    """Calls workbench: overdue / due-today / assigned-today / upcoming (7d), RBAC-scoped."""
-    from datetime import date as date_cls
+# ---------------- Today Calls workbench (paginated) ----------------
+TODAY_CALLS_QUEUE_BUCKETS = ("overdue", "due_today", "assigned_today", "upcoming")
+TODAY_CALLS_BUCKETS = {"all", "overdue", "due_today", "assigned_today", "upcoming", "called_today"}
+TODAY_CALLS_SORTS = {"urgency", "soonest", "name"}
 
+
+def _today_calls_window():
+    """IST calendar today, ISO bounds, and upcoming (today+7d) end UTC."""
     today = ist_today()
     today_s = today.isoformat()
-    now = now_utc()
-    upcoming_end = datetime.combine(today + timedelta(days=7), time.max, tzinfo=IST).astimezone(timezone.utc)
+    today_lo, today_hi = date_bounds_iso(today, today)
+    upcoming_end = datetime.combine(
+        today + timedelta(days=7), time.max, tzinfo=IST,
+    ).astimezone(timezone.utc)
+    return today, today_s, today_lo, today_hi, upcoming_end.isoformat()
 
+
+async def _today_calls_base(principal: dict) -> dict:
     scope = await scope_filter(principal, "assigned_to")
-    base = {"companyId": COMPANY_ID, "status": "active", "is_client": False, **scope}
+    return {"companyId": COMPANY_ID, "status": "active", "is_client": False, **scope}
 
-    candidates = await db.leads.find({
-        **base,
-        "$or": [
-            {"assigned_date": today_s},
-            {"follow_up_at": {"$ne": None, "$lte": upcoming_end.isoformat()}},
-        ],
-    }, TODAY_CALLS_PROJECTION).to_list(5000)
 
-    buckets = {"overdue": [], "due_today": [], "assigned_today": [], "upcoming": []}
-    seen = set()
+def _today_calls_bucket_clause(
+    bucket: str, today_s: str, today_lo: str, today_hi: str, upcoming_end: str,
+) -> dict:
+    """Mongo clause for a queue bucket (exclusive ranges)."""
+    key = (bucket or "all").strip().lower()
+    if key not in TODAY_CALLS_BUCKETS:
+        key = "all"
+    if key == "overdue":
+        return {"follow_up_at": {"$ne": None, "$lt": today_lo}}
+    if key == "due_today":
+        return {"follow_up_at": {"$ne": None, "$gte": today_lo, "$lte": today_hi}}
+    if key == "assigned_today":
+        return {
+            "assigned_date": today_s,
+            "$or": [{"follow_up_at": None}, {"follow_up_at": {"$exists": False}}],
+        }
+    if key == "upcoming":
+        return {"follow_up_at": {"$ne": None, "$gt": today_hi, "$lte": upcoming_end}}
+    if key == "all":
+        return {
+            "$or": [
+                {"follow_up_at": {"$ne": None, "$lte": upcoming_end}},
+                {
+                    "assigned_date": today_s,
+                    "$or": [{"follow_up_at": None}, {"follow_up_at": {"$exists": False}}],
+                },
+            ],
+        }
+    return {}
 
-    def annotate(lead, reason):
-        item = dict(lead)
-        item["queue_reason"] = reason
-        fu = lead.get("follow_up_at")
-        days_overdue = None
-        hours_until = None
-        if fu:
-            try:
-                dt = datetime.fromisoformat(fu)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                fu_day = ist_date(fu)
-                if reason == "overdue" and fu_day:
-                    days_overdue = max(1, (today - date_cls.fromisoformat(fu_day)).days)
-                elif reason in ("due_today", "upcoming"):
-                    hours_until = round((dt - now).total_seconds() / 3600, 1)
-            except Exception:
-                pass
-        item["days_overdue"] = days_overdue
-        item["hours_until"] = hours_until
-        return item
 
-    for lead in candidates:
-        fu = lead.get("follow_up_at")
-        if not fu:
-            continue
-        fu_day = ist_date(fu)
-        if not fu_day or fu_day >= today_s:
-            continue
-        lid = lead["id"]
-        if lid in seen:
-            continue
-        seen.add(lid)
-        buckets["overdue"].append(annotate(lead, "overdue"))
+def _today_calls_apply_filters(
+    q: dict,
+    *,
+    search: Optional[str] = None,
+    pipeline_stage: Optional[str] = None,
+    source: Optional[str] = None,
+    disposition: Optional[str] = None,
+) -> dict:
+    """Apply workbench filters; nests under $and when $or is already present."""
+    extras: list = []
+    if search:
+        safe = escape_regex(search.strip())
+        if safe:
+            extras.append({
+                "$or": [
+                    {"name": {"$regex": safe, "$options": "i"}},
+                    {"phone": {"$regex": safe, "$options": "i"}},
+                ],
+            })
+    if pipeline_stage:
+        extras.append({"pipeline_stage": pipeline_stage})
+    if source:
+        extras.append({"source": source})
+    if disposition == "__none__":
+        extras.append({"disposition_name": None})
+    elif disposition == "__has__":
+        extras.append({"disposition_name": {"$nin": [None, ""]}})
+    elif disposition:
+        extras.append({"disposition_name": disposition})
 
-    for lead in candidates:
-        fu = lead.get("follow_up_at")
-        if not fu:
-            continue
-        fu_day = ist_date(fu)
-        if fu_day != today_s:
-            continue
-        lid = lead["id"]
-        if lid in seen:
-            continue
-        seen.add(lid)
-        buckets["due_today"].append(annotate(lead, "due_today"))
+    if not extras:
+        return q
+    and_list = [q, *extras] if extras else [q]
+    # Flatten if q already uses $and
+    flat: list = []
+    for part in and_list:
+        if "$and" in part and len(part) == 1:
+            flat.extend(part["$and"])
+        else:
+            flat.append(part)
+    return {"$and": flat}
 
-    # Assigned today: today's assignment with no pending FU (future FU → upcoming)
-    for lead in candidates:
-        if lead.get("assigned_date") != today_s:
-            continue
-        lid = lead["id"]
-        if lid in seen:
-            continue
-        fu = lead.get("follow_up_at")
-        if fu:
-            continue
-        seen.add(lid)
-        buckets["assigned_today"].append(annotate(lead, "assigned_today"))
 
-    for lead in candidates:
-        fu = lead.get("follow_up_at")
-        if not fu:
-            continue
-        fu_day = ist_date(fu)
-        if not fu_day or fu_day <= today_s:
-            continue
+def _today_calls_classify_reason(
+    lead: dict, today_s: str, today_lo: str, today_hi: str, upcoming_end: str,
+) -> Optional[str]:
+    fu = lead.get("follow_up_at")
+    if fu:
+        if fu < today_lo:
+            return "overdue"
+        if today_lo <= fu <= today_hi:
+            return "due_today"
+        if today_hi < fu <= upcoming_end:
+            return "upcoming"
+        return None
+    if lead.get("assigned_date") == today_s:
+        return "assigned_today"
+    return None
+
+
+def _today_calls_annotate(
+    lead: dict, reason: str, today, now,
+) -> dict:
+    from datetime import date as date_cls
+
+    item = dict(lead)
+    item["queue_reason"] = reason
+    fu = lead.get("follow_up_at")
+    days_overdue = None
+    hours_until = None
+    if fu:
         try:
             dt = datetime.fromisoformat(fu)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            if dt > upcoming_end:
-                continue
+            fu_day = ist_date(fu)
+            if reason == "overdue" and fu_day:
+                days_overdue = max(1, (today - date_cls.fromisoformat(fu_day)).days)
+            elif reason in ("due_today", "upcoming"):
+                hours_until = round((dt - now).total_seconds() / 3600, 1)
         except Exception:
-            continue
-        lid = lead["id"]
-        if lid in seen:
-            continue
-        seen.add(lid)
-        buckets["upcoming"].append(annotate(lead, "upcoming"))
+            pass
+    item["days_overdue"] = days_overdue
+    item["hours_until"] = hours_until
+    return item
 
-    def sort_key_fu(item):
-        return item.get("follow_up_at") or ""
 
-    buckets["overdue"].sort(key=sort_key_fu)
-    buckets["due_today"].sort(key=sort_key_fu)
-    buckets["assigned_today"].sort(key=lambda x: (x.get("name") or "").lower())
-    buckets["upcoming"].sort(key=sort_key_fu)
+def _today_calls_sort_spec(bucket: str, sort: str) -> list:
+    """Mongo sort for a single bucket (or merged all with soonest/name)."""
+    key = (sort or "urgency").strip().lower()
+    if key == "name":
+        return [("name", 1)]
+    if key == "soonest":
+        return [("follow_up_at", 1), ("name", 1)]
+    # urgency defaults
+    if bucket == "assigned_today":
+        return [("name", 1)]
+    return [("follow_up_at", 1), ("name", 1)]
 
-    for key in buckets:
-        buckets[key] = buckets[key][:500]
 
-    flat = (
-        buckets["overdue"]
-        + buckets["due_today"]
-        + buckets["assigned_today"]
-        + buckets["upcoming"]
-    )
-
-    # Called today: unique leads this principal logged a call on (IST today). Not in flat `leads`.
-    today_lo, today_hi = date_bounds_iso(today, today)
+def _called_today_match(principal: dict, today_lo: Optional[str], today_hi: Optional[str]) -> dict:
     called_q = {"companyId": COMPANY_ID, "agent_id": principal["id"]}
     if today_lo or today_hi:
         called_q["created_at"] = {}
@@ -808,52 +836,238 @@ async def today_calls(principal: dict = Depends(require("today_calls:view"))):
             called_q["created_at"]["$gte"] = today_lo
         if today_hi:
             called_q["created_at"]["$lte"] = today_hi
-    today_calls_rows = await db.calls.find(
-        called_q,
-        {"_id": 0, "lead_id": 1, "created_at": 1},
-    ).sort("created_at", -1).to_list(5000)
-    called_ids = []
-    seen_called = set()
-    for c in today_calls_rows:
-        lid = c.get("lead_id")
-        if not lid or lid in seen_called:
-            continue
-        seen_called.add(lid)
-        called_ids.append(lid)
+    return called_q
 
-    called_bucket = []
-    if called_ids:
-        lead_docs = await db.leads.find(
-            {"companyId": COMPANY_ID, "id": {"$in": called_ids[:500]}},
-            TODAY_CALLS_PROJECTION,
-        ).to_list(500)
-        by_id = {l["id"]: l for l in lead_docs}
-        for lid in called_ids[:500]:
-            lead = by_id.get(lid)
-            if not lead:
-                continue
-            called_bucket.append(annotate(lead, "called_today"))
-    buckets["called_today"] = called_bucket
 
+async def _called_today_ordered_ids(principal: dict, today_lo: str, today_hi: str) -> list:
+    """Distinct lead_ids called today by principal, most recent call first."""
+    match = _called_today_match(principal, today_lo, today_hi)
+    pipeline = [
+        {"$match": match},
+        {"$sort": {"created_at": -1}},
+        {"$group": {"_id": "$lead_id", "last_call": {"$first": "$created_at"}}},
+        {"$sort": {"last_call": -1}},
+        {"$project": {"_id": 1}},
+    ]
+    rows = await db.calls.aggregate(pipeline).to_list(10000)
+    return [r["_id"] for r in rows if r.get("_id")]
+
+
+async def _called_today_count(principal: dict, today_lo: str, today_hi: str) -> int:
+    match = _called_today_match(principal, today_lo, today_hi)
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": "$lead_id"}},
+        {"$count": "n"},
+    ]
+    rows = await db.calls.aggregate(pipeline).to_list(1)
+    return int(rows[0]["n"]) if rows else 0
+
+
+async def _today_calls_acw(principal: dict):
     fresh = await db.users.find_one({"id": principal["id"]}, {"_id": 0, "acw_pending_lead_id": 1})
-    acw = fresh.get("acw_pending_lead_id") if fresh else principal.get("acw_pending_lead_id")
+    return fresh.get("acw_pending_lead_id") if fresh else principal.get("acw_pending_lead_id")
+
+
+async def _today_calls_queue_counts(base: dict, today_s: str, today_lo: str, today_hi: str,
+                                    upcoming_end: str) -> dict:
+    counts = {}
+    for key in TODAY_CALLS_QUEUE_BUCKETS:
+        clause = _today_calls_bucket_clause(key, today_s, today_lo, today_hi, upcoming_end)
+        counts[key] = await db.leads.count_documents(_combine_base_clause(base, clause))
+    return counts
+
+
+def _combine_base_clause(base: dict, clause: dict) -> dict:
+    if not clause:
+        return dict(base)
+    if "$or" in clause or "$and" in clause:
+        return {"$and": [base, clause]}
+    return {**base, **clause}
+
+
+async def _paginated_bucket_query(
+    q: dict, *, sort_spec: list, page: int, page_size: int, reason: str,
+    today, now, today_s: str, today_lo: str, today_hi: str, upcoming_end: str,
+):
+    total = await db.leads.count_documents(q)
+    skip = (page - 1) * page_size
+    docs = await db.leads.find(q, TODAY_CALLS_PROJECTION).sort(sort_spec).skip(skip).limit(page_size).to_list(page_size)
+    items = []
+    for lead in docs:
+        r = reason
+        if reason == "all" or not reason:
+            r = _today_calls_classify_reason(lead, today_s, today_lo, today_hi, upcoming_end) or "assigned_today"
+        items.append(_today_calls_annotate(lead, r, today, now))
+    return items, total
+
+
+async def _waterfall_urgency_page(
+    base: dict, filters_kwargs: dict, today_s: str, today_lo: str, today_hi: str,
+    upcoming_end: str, page: int, page_size: int, today, now,
+):
+    """Paginate all-queue in priority order without loading full sets."""
+    bucket_totals = []
+    for key in TODAY_CALLS_QUEUE_BUCKETS:
+        clause = _today_calls_bucket_clause(key, today_s, today_lo, today_hi, upcoming_end)
+        q = _today_calls_apply_filters(_combine_base_clause(base, clause), **filters_kwargs)
+        n = await db.leads.count_documents(q)
+        bucket_totals.append((key, q, n))
+    total = sum(n for _, _, n in bucket_totals)
+    skip = (page - 1) * page_size
+    need = page_size
+    remaining_skip = skip
+    items = []
+    for key, q, n in bucket_totals:
+        if need <= 0:
+            break
+        if remaining_skip >= n:
+            remaining_skip -= n
+            continue
+        take = min(need, n - remaining_skip)
+        sort_spec = _today_calls_sort_spec(key, "urgency")
+        docs = await db.leads.find(q, TODAY_CALLS_PROJECTION).sort(sort_spec).skip(
+            remaining_skip).limit(take).to_list(take)
+        remaining_skip = 0
+        for lead in docs:
+            items.append(_today_calls_annotate(lead, key, today, now))
+        need -= len(docs)
+    return items, total
+
+
+@router.get("/today-calls/counts")
+async def today_calls_counts(principal: dict = Depends(require("today_calls:view"))):
+    """Lightweight KPI counts for the Today Calls workbench (no lead payloads)."""
+    today, today_s, today_lo, today_hi, upcoming_end = _today_calls_window()
+    base = await _today_calls_base(principal)
+    counts = await _today_calls_queue_counts(base, today_s, today_lo, today_hi, upcoming_end)
+    called = await _called_today_count(principal, today_lo, today_hi)
+    counts["called_today"] = called
+    acw = await _today_calls_acw(principal)
+    queue = sum(counts[k] for k in TODAY_CALLS_QUEUE_BUCKETS)
+    return {
+        "date": today_s,
+        "acw_pending_lead_id": acw,
+        "counts": counts,
+        "tab_counts": {
+            "queue": queue,
+            "acw_pending": 1 if acw else 0,
+        },
+    }
+
+
+@router.get("/today-calls")
+async def today_calls(
+    page: int = 1,
+    page_size: int = 50,
+    bucket: Optional[str] = None,
+    sort: Optional[str] = None,
+    search: Optional[str] = None,
+    pipeline_stage: Optional[str] = None,
+    source: Optional[str] = None,
+    disposition: Optional[str] = None,
+    principal: dict = Depends(require("today_calls:view")),
+):
+    """Paginated Today Calls workbench. Default page_size=50."""
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 50)
+    bucket_key = (bucket or "all").strip().lower()
+    if bucket_key not in TODAY_CALLS_BUCKETS:
+        bucket_key = "all"
+    sort_key = (sort or "urgency").strip().lower()
+    if sort_key not in TODAY_CALLS_SORTS:
+        sort_key = "urgency"
+
+    today, today_s, today_lo, today_hi, upcoming_end = _today_calls_window()
+    now = now_utc()
+    base = await _today_calls_base(principal)
+    filters_kwargs = {
+        "search": search,
+        "pipeline_stage": pipeline_stage,
+        "source": source,
+        "disposition": disposition,
+    }
+    acw = await _today_calls_acw(principal)
+
+    if bucket_key == "called_today":
+        ordered_ids = await _called_today_ordered_ids(principal, today_lo, today_hi)
+        if not ordered_ids:
+            return {
+                "date": today_s,
+                "acw_pending_lead_id": acw,
+                "items": [],
+                "total": 0,
+                "page": page,
+                "page_size": page_size,
+                "bucket": bucket_key,
+                "sort": sort_key,
+            }
+        lead_q = _today_calls_apply_filters(
+            {"companyId": COMPANY_ID, "id": {"$in": ordered_ids}},
+            **filters_kwargs,
+        )
+        matching = await db.leads.find(lead_q, {"_id": 0, "id": 1}).to_list(10000)
+        match_set = {l["id"] for l in matching}
+        ordered = [i for i in ordered_ids if i in match_set]
+        if sort_key == "name":
+            by_id_name = {l["id"]: l for l in await db.leads.find(
+                {"id": {"$in": ordered}}, {"_id": 0, "id": 1, "name": 1},
+            ).to_list(len(ordered))}
+            ordered.sort(key=lambda i: (by_id_name.get(i, {}).get("name") or "").lower())
+        elif sort_key == "soonest":
+            by_id_fu = {l["id"]: l for l in await db.leads.find(
+                {"id": {"$in": ordered}}, {"_id": 0, "id": 1, "follow_up_at": 1},
+            ).to_list(len(ordered))}
+            ordered.sort(key=lambda i: by_id_fu.get(i, {}).get("follow_up_at") or "9999")
+        total = len(ordered)
+        skip = (page - 1) * page_size
+        page_ids = ordered[skip:skip + page_size]
+        docs = await db.leads.find(
+            {"id": {"$in": page_ids}}, TODAY_CALLS_PROJECTION,
+        ).to_list(len(page_ids))
+        by_id = {l["id"]: l for l in docs}
+        items = [
+            _today_calls_annotate(by_id[lid], "called_today", today, now)
+            for lid in page_ids if lid in by_id
+        ]
+        return {
+            "date": today_s,
+            "acw_pending_lead_id": acw,
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "bucket": bucket_key,
+            "sort": sort_key,
+        }
+
+    if bucket_key == "all" and sort_key == "urgency":
+        items, total = await _waterfall_urgency_page(
+            base, filters_kwargs, today_s, today_lo, today_hi, upcoming_end,
+            page, page_size, today, now,
+        )
+    else:
+        clause = _today_calls_bucket_clause(
+            bucket_key, today_s, today_lo, today_hi, upcoming_end,
+        )
+        q = _today_calls_apply_filters(_combine_base_clause(base, clause), **filters_kwargs)
+        sort_spec = _today_calls_sort_spec(bucket_key, sort_key)
+        items, total = await _paginated_bucket_query(
+            q, sort_spec=sort_spec, page=page, page_size=page_size,
+            reason=bucket_key if bucket_key != "all" else "all",
+            today=today, now=now, today_s=today_s, today_lo=today_lo,
+            today_hi=today_hi, upcoming_end=upcoming_end,
+        )
 
     return {
         "date": today_s,
         "acw_pending_lead_id": acw,
-        "counts": {
-            "overdue": len(buckets["overdue"]),
-            "due_today": len(buckets["due_today"]),
-            "assigned_today": len(buckets["assigned_today"]),
-            "upcoming": len(buckets["upcoming"]),
-            "called_today": len(buckets["called_today"]),
-        },
-        "tab_counts": {
-            "queue": len(flat),
-            "acw_pending": 1 if acw else 0,
-        },
-        "buckets": buckets,
-        "leads": flat,
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "bucket": bucket_key,
+        "sort": sort_key,
     }
 
 
@@ -1050,25 +1264,166 @@ class StageIn(BaseModel):
     stage: str
 
 
-@router.get("/pipeline")
-async def pipeline(search: Optional[str] = None, source: Optional[str] = None,
-                   disposition: Optional[str] = None, assigned_to: Optional[str] = None,
-                   principal: dict = Depends(require("pipeline:view"))):
+async def _pipeline_base_query(
+    principal: dict,
+    *,
+    search: Optional[str] = None,
+    source: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+) -> dict:
     q = await _scoped_leads_query(principal)
     skip_assignment = principal.get("data_scope") == "OWN"
     _apply_lead_filters(
         q, search=search, source=source, disposition=disposition,
         assigned_to=assigned_to, skip_assignment_status=skip_assignment,
     )
-    leads = await db.leads.find(q, PIPELINE_BOARD_PROJECTION).sort("updated_at", -1).to_list(2000)
-    board = {s: [] for s in PIPELINE_STAGES}
-    for l in leads:
-        s = l.get("pipeline_stage") or "New"
-        if l.get("is_client"):
-            s = "Won"
-        board.setdefault(s, []).append(l)
-    counts = {s: len(board.get(s) or []) for s in PIPELINE_STAGES}
-    return {"stages": PIPELINE_STAGES, "board": board, "counts": counts, "total": len(leads)}
+    return q
+
+
+def _pipeline_stage_match(stage: str) -> dict:
+    """Match leads for a Kanban column (clients always land in Won)."""
+    if stage == "Won":
+        return {"$or": [
+            {"is_client": True},
+            {"pipeline_stage": "Won", "is_client": {"$ne": True}},
+        ]}
+    non_client = {"is_client": {"$ne": True}}
+    if stage == "New":
+        return {
+            **non_client,
+            "$or": [
+                {"pipeline_stage": "New"},
+                {"pipeline_stage": None},
+                {"pipeline_stage": {"$exists": False}},
+                {"pipeline_stage": ""},
+            ],
+        }
+    return {**non_client, "pipeline_stage": stage}
+
+
+def _pipeline_combine(base: dict, stage_clause: dict) -> dict:
+    if not stage_clause:
+        return dict(base)
+    if "$or" in base or "$and" in base or "$or" in stage_clause or "$and" in stage_clause:
+        return {"$and": [base, stage_clause]}
+    return {**base, **stage_clause}
+
+
+async def _pipeline_stage_counts(base: dict) -> tuple:
+    counts = {}
+    for stage in PIPELINE_STAGES:
+        clause = _pipeline_stage_match(stage)
+        counts[stage] = await db.leads.count_documents(_pipeline_combine(base, clause))
+    total = sum(counts.values())
+    return counts, total
+
+
+def _pipeline_annotate_card(lead: dict) -> dict:
+    item = dict(lead)
+    if item.get("is_client"):
+        item["pipeline_stage"] = "Won"
+    elif not item.get("pipeline_stage"):
+        item["pipeline_stage"] = "New"
+    return item
+
+
+@router.get("/pipeline/counts")
+async def pipeline_counts(
+    search: Optional[str] = None,
+    source: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    principal: dict = Depends(require("pipeline:view")),
+):
+    """True per-stage totals for Pipeline (no lead payloads)."""
+    base = await _pipeline_base_query(
+        principal, search=search, source=source,
+        disposition=disposition, assigned_to=assigned_to,
+    )
+    counts, total = await _pipeline_stage_counts(base)
+    return {"stages": PIPELINE_STAGES, "counts": counts, "total": total}
+
+
+@router.get("/pipeline")
+async def pipeline(
+    search: Optional[str] = None,
+    source: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    view: Optional[str] = None,
+    page: int = 1,
+    page_size: int = 50,
+    stage: Optional[str] = None,
+    principal: dict = Depends(require("pipeline:view")),
+):
+    """Paginated pipeline board (per-stage limit) or list view."""
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 50)
+    view_key = (view or "board").strip().lower()
+    if view_key not in ("board", "list"):
+        view_key = "board"
+
+    base = await _pipeline_base_query(
+        principal, search=search, source=source,
+        disposition=disposition, assigned_to=assigned_to,
+    )
+    counts, total = await _pipeline_stage_counts(base)
+
+    # Single-stage page (Kanban Load more)
+    if stage:
+        stage_key = stage.strip()
+        if stage_key not in PIPELINE_STAGES:
+            raise HTTPException(status_code=400, detail="Invalid stage")
+        q = _pipeline_combine(base, _pipeline_stage_match(stage_key))
+        stage_total = counts.get(stage_key, 0)
+        skip = (page - 1) * page_size
+        docs = await db.leads.find(q, PIPELINE_BOARD_PROJECTION).sort(
+            "updated_at", -1,
+        ).skip(skip).limit(page_size).to_list(page_size)
+        items = [_pipeline_annotate_card(l) for l in docs]
+        return {
+            "stage": stage_key,
+            "items": items,
+            "total": stage_total,
+            "page": page,
+            "page_size": page_size,
+        }
+
+    if view_key == "list":
+        skip = (page - 1) * page_size
+        docs = await db.leads.find(base, PIPELINE_BOARD_PROJECTION).sort(
+            "updated_at", -1,
+        ).skip(skip).limit(page_size).to_list(page_size)
+        items = [_pipeline_annotate_card(l) for l in docs]
+        return {
+            "stages": PIPELINE_STAGES,
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "counts": counts,
+        }
+
+    # Board mode: first page_size cards per stage
+    board = {}
+    has_more = {}
+    for s in PIPELINE_STAGES:
+        q = _pipeline_combine(base, _pipeline_stage_match(s))
+        docs = await db.leads.find(q, PIPELINE_BOARD_PROJECTION).sort(
+            "updated_at", -1,
+        ).limit(page_size).to_list(page_size)
+        board[s] = [_pipeline_annotate_card(l) for l in docs]
+        has_more[s] = counts[s] > len(board[s])
+
+    return {
+        "stages": PIPELINE_STAGES,
+        "board": board,
+        "counts": counts,
+        "total": total,
+        "page_size": page_size,
+        "has_more": has_more,
+    }
 
 
 @router.put("/pipeline/{lid}")

@@ -77,6 +77,12 @@ async def _sheet_poll_loop():
 async def lifespan(_app: FastAPI):
     global _sheet_poll_task, _lead_import_worker_task
     try:
+        from seed import ensure_indexes
+        await ensure_indexes()
+        logger.info("Mongo indexes ensured")
+    except Exception as e:
+        logger.exception("ensure_indexes failed: %s", e)
+    try:
         from lead_sources import ensure_lead_sources
         await ensure_lead_sources()
         logger.info("Lead sources master ensured")

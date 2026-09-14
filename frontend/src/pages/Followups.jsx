@@ -57,7 +57,7 @@ export default function Followups() {
   const loadMeta = useCallback(async () => {
     const [ds, tc] = await Promise.all([
       api.get("/dispositions"),
-      api.get("/today-calls"),
+      api.get("/today-calls/counts"),
     ])
     setDispositions((ds.data.dispositions || []).filter((d) => d.active))
     setAcwId(tc.data.acw_pending_lead_id || null)

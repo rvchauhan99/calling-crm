@@ -106,7 +106,7 @@ function mockApi(acwId = null) {
         },
       })
     }
-    if (url === "/today-calls") {
+    if (url === "/today-calls/counts") {
       return Promise.resolve({ data: { leads: [], acw_pending_lead_id: acwId, date: "2026-09-04" } })
     }
     return Promise.resolve({ data: {} })
@@ -163,7 +163,7 @@ describe("Followups page", () => {
       if (url === "/dispositions") {
         return Promise.resolve({ data: { dispositions: [] } })
       }
-      if (url === "/today-calls") {
+      if (url === "/today-calls/counts") {
         return Promise.resolve({ data: { leads: [], acw_pending_lead_id: null } })
       }
       return Promise.resolve({ data: {} })
