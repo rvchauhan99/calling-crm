@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import api, { API, getToken } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
@@ -45,6 +45,7 @@ export default function Reports() {
   const [options, setOptions] = useState(null)
   const [payload, setPayload] = useState(null)
   const [loading, setLoading] = useState(true)
+  const loadAbortRef = useRef(null)
 
   const leadFiltersVisible = !isAffiliate && tab !== "affiliate"
 
@@ -61,16 +62,33 @@ export default function Reports() {
   }
 
   const load = useCallback(async (kind, f) => {
+    if (loadAbortRef.current) {
+      loadAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    loadAbortRef.current = controller
     setLoading(true)
     try {
       const p = new URLSearchParams()
       appendLeadParams(p, f, kind)
-      const { data } = await api.get(`/reports/${kind}?${p.toString()}`)
-      setPayload(data)
-    } catch {
-      setPayload({ rows: [], summary: {} })
+      const { data } = await api.get(`/reports/${kind}?${p.toString()}`, {
+        signal: controller.signal,
+      })
+      if (!controller.signal.aborted) {
+        setPayload(data)
+      }
+    } catch (err) {
+      if (err?.code === "ERR_CANCELED" || err?.name === "CanceledError" || err?.name === "AbortError") {
+        return
+      }
+      if (!controller.signal.aborted) {
+        setPayload({ rows: [], summary: {} })
+      }
     } finally {
-      setLoading(false)
+      if (loadAbortRef.current === controller) {
+        setLoading(false)
+        loadAbortRef.current = null
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOwnScope])
@@ -83,6 +101,11 @@ export default function Reports() {
 
   useEffect(() => {
     load(tab, filters).catch(() => {})
+    return () => {
+      if (loadAbortRef.current) {
+        loadAbortRef.current.abort()
+      }
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab])
 

@@ -1,4 +1,4 @@
-import { render, screen, waitFor, act } from "@testing-library/react"
+import { render, screen, waitFor, act, fireEvent } from "@testing-library/react"
 import { useAuth } from "@/context/AuthContext"
 import api from "@/lib/api"
 import Reports from "@/pages/Reports"
@@ -24,7 +24,18 @@ jest.mock("@/lib/api", () => ({
 }))
 
 jest.mock("@/components/ui/searchable-select", () => ({
-  SearchableSelect: ({ testId, label }) => <div data-testid={testId || "searchable"}>{label}</div>,
+  SearchableSelect: ({ testId, value, onChange, options, placeholder }) => (
+    <select
+      data-testid={testId || "searchable"}
+      aria-label={placeholder || testId}
+      value={value || ""}
+      onChange={(e) => onChange && onChange(e.target.value)}
+    >
+      {(options || []).map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  ),
 }))
 
 jest.mock("recharts", () => ({
@@ -245,6 +256,37 @@ describe("Reports page", () => {
     await waitFor(() => {
       expect(screen.getByTestId("preset-today").className).toMatch(/bg-sky-500/)
     })
+  })
+
+  it("Apply with No disposition sends disposition=__none__", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
+    })
+
+    render(<Reports />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("filter-disposition")).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByTestId("filter-disposition"), {
+      target: { value: "__none__" },
+    })
+
+    api.get.mockClear()
+    await act(async () => {
+      screen.getByTestId("reports-apply").click()
+    })
+
+    await waitFor(() => {
+      const urls = api.get.mock.calls.map((c) => c[0]).filter((u) => typeof u === "string")
+      expect(
+        urls.some((u) => u.includes("/reports/caller?") && u.includes("disposition=__none__")),
+      ).toBe(true)
+    })
+    expect(screen.getByText(/Disposition: None/i)).toBeInTheDocument()
   })
 
   it("hides lead filters for affiliate users (date-only)", async () => {

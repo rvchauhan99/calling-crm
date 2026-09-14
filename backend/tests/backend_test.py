@@ -2494,6 +2494,63 @@ class TestReports:
         assert emptyish.status_code == 200
         assert emptyish.json()["summary"]["total_leads"] == 0
 
+    def test_reports_filter_combos_fast(self, admin):
+        """Disposition / full lead-filter combos with a 3-month window stay fast."""
+        from datetime import date, timedelta
+        to_d = date.today()
+        from_d = to_d - timedelta(days=90)
+        fr, to = from_d.isoformat(), to_d.isoformat()
+        timeout = 15
+
+        date_only = admin.get(
+            f"{BASE_URL}/api/reports/caller?from={fr}&to={to}", timeout=timeout,
+        )
+        assert date_only.status_code == 200, date_only.text[:300]
+
+        none_disp = admin.get(
+            f"{BASE_URL}/api/reports/caller?from={fr}&to={to}&disposition=__none__",
+            timeout=timeout,
+        )
+        assert none_disp.status_code == 200, none_disp.text[:300]
+        assert "summary" in none_disp.json() and "rows" in none_disp.json()
+
+        named = admin.get(
+            f"{BASE_URL}/api/reports/caller?from={fr}&to={to}&disposition=Interested",
+            timeout=timeout,
+        )
+        assert named.status_code == 200, named.text[:300]
+
+        full = admin.get(
+            f"{BASE_URL}/api/reports/caller?from={fr}&to={to}"
+            f"&status=active&stage=New&source=Manual"
+            f"&assignment_status=assigned&disposition=__none__",
+            timeout=timeout,
+        )
+        assert full.status_code == 200, full.text[:300]
+        assert isinstance(full.json()["rows"], list)
+
+        unassigned = admin.get(
+            f"{BASE_URL}/api/reports/caller?from={fr}&to={to}"
+            f"&assignment_status=unassigned&disposition=__none__",
+            timeout=timeout,
+        )
+        assert unassigned.status_code == 200, unassigned.text[:300]
+        assert unassigned.json()["summary"]["total_leads"] == 0
+
+        co = admin.get(
+            f"{BASE_URL}/api/reports/company?from={fr}&to={to}&disposition=__none__",
+            timeout=timeout,
+        )
+        assert co.status_code == 200, co.text[:300]
+        assert "disposition_breakdown" in co.json()
+
+        exp = admin.get(
+            f"{BASE_URL}/api/reports/export?kind=caller&from={fr}&to={to}&disposition=__none__",
+            timeout=timeout,
+        )
+        assert exp.status_code == 200
+        assert "text/csv" in exp.headers.get("content-type", "")
+
     def test_reports_lead_filters_agent_denied(self, agent):
         r = agent.get(
             f"{BASE_URL}/api/reports/caller?status=active&source=Manual",

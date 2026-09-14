@@ -795,10 +795,14 @@ def _apply_lead_attr_filters(
         lq["pipeline_stage"] = {"$in": stages} if len(stages) > 1 else stages[0]
     if dispositions_f:
         if "__none__" in dispositions_f and len(dispositions_f) == 1:
-            lq["disposition_name"] = None
+            # null matches missing; include "" for empty-string dispositions
+            lq["disposition_name"] = {"$in": [None, ""]}
         elif "__none__" in dispositions_f:
             others = [d for d in dispositions_f if d != "__none__"]
-            lq["$or"] = [{"disposition_name": None}, {"disposition_name": {"$in": others}}]
+            lq["$or"] = [
+                {"disposition_name": {"$in": [None, ""]}},
+                {"disposition_name": {"$in": others}},
+            ]
         else:
             lq["disposition_name"] = (
                 {"$in": dispositions_f} if len(dispositions_f) > 1 else dispositions_f[0]
@@ -806,7 +810,23 @@ def _apply_lead_attr_filters(
     return lq
 
 
-def _lead_lookup_match(
+def _prefix_lead_fields(lead_match: dict) -> dict:
+    """Rewrite lead match keys to `_lead.*` after equality $lookup + $unwind."""
+    out = {}
+    for key, val in lead_match.items():
+        if key == "$or":
+            out["$or"] = [
+                {f"_lead.{sk}": sv for sk, sv in clause.items()}
+                for clause in (val or [])
+            ]
+        elif key.startswith("$"):
+            out[key] = val
+        else:
+            out[f"_lead.{key}"] = val
+    return out
+
+
+def _build_lead_filter(
     *,
     date_q: dict,
     status: Optional[str] = None,
@@ -819,13 +839,9 @@ def _lead_lookup_match(
     principal_id: Optional[str] = None,
     apply_assignment: bool = True,
 ) -> dict:
-    lead_match = {
-        "$expr": {"$eq": ["$id", "$$lid"]},
-        "companyId": COMPANY_ID,
-        **date_q,
-    }
+    lead = {"companyId": COMPANY_ID, **date_q}
     _apply_lead_attr_filters(
-        lead_match,
+        lead,
         status=status,
         source=source,
         stage=stage,
@@ -836,35 +852,37 @@ def _lead_lookup_match(
         principal_id=principal_id,
         apply_assignment=apply_assignment,
     )
-    return lead_match
+    return lead
 
 
-def _agg_calls_by_disposition(match_q: dict, lead_match: Optional[dict] = None):
-    """Aggregate calls by disposition/outcome; optionally restrict via lead $lookup."""
+def _agg_calls_by_disposition(
+    match_q: dict,
+    lead_match: Optional[dict] = None,
+    *,
+    group_by_agent: bool = False,
+):
+    """Aggregate calls by disposition/outcome; optional indexed lead join via localField."""
     pipeline = [{"$match": match_q}]
     if lead_match is not None:
         pipeline.extend([
             {"$lookup": {
                 "from": "leads",
-                "let": {"lid": "$lead_id"},
-                "pipeline": [
-                    {"$match": lead_match},
-                    {"$project": {"_id": 1}},
-                    {"$limit": 1},
-                ],
+                "localField": "lead_id",
+                "foreignField": "id",
                 "as": "_lead",
             }},
-            {"$match": {"_lead.0": {"$exists": True}}},
+            {"$unwind": "$_lead"},
+            {"$match": _prefix_lead_fields(lead_match)},
         ])
-    pipeline.append({
-        "$group": {
-            "_id": {
-                "disposition_name": {"$ifNull": ["$disposition_name", "Unknown"]},
-                "outcome": "$outcome",
-            },
-            "n": {"$sum": 1},
-        },
-    })
+    group_id = {
+        "disposition_name": {"$ifNull": ["$disposition_name", "Unknown"]},
+        "outcome": "$outcome",
+    }
+    group_stage = {"_id": group_id, "n": {"$sum": 1}}
+    if group_by_agent:
+        group_id["agent_id"] = "$agent_id"
+        group_stage["agent_name"] = {"$first": "$agent_name"}
+    pipeline.append({"$group": group_stage})
     return db.calls.aggregate(pipeline)
 
 
@@ -887,21 +905,81 @@ async def caller_report(
     lead_attrs_on = _lead_attr_filters_active(
         status, source, stage, disposition, assignment_status, None,
     )
-    agents = await db.users.find({"companyId": COMPANY_ID, "user_type": "caller"}, {"_id": 0}).to_list(500)
+    agents = await db.users.find(
+        {"companyId": COMPANY_ID, "user_type": "caller"}, {"_id": 0, "id": 1, "name": 1},
+    ).to_list(500)
     if assigned_to:
         agents = [a for a in agents if a["id"] == assigned_to]
     if is_own:
         agents = [a for a in agents if a["id"] == principal["id"]]
+    agent_by_id = {a["id"]: a for a in agents}
+    agent_ids = list(agent_by_id.keys())
+
     disp_meta = {
         d["name"]: d
         for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
     }
-    rows = []
-    for a in agents:
-        aq = {"companyId": COMPANY_ID, "agent_id": a["id"], **reportable_calls_filter(), **date_q}
-        lead_match = None
-        if lead_attrs_on:
-            lead_match = _lead_lookup_match(
+
+    # Per-agent call buckets from one aggregation (indexed lead join when filters on)
+    call_stats = {aid: {"disp_counts": {}, "connected": 0, "calls": 0} for aid in agent_ids}
+    skip_calls = False
+    if lead_attrs_on:
+        probe = _build_lead_filter(
+            date_q=date_q,
+            status=status,
+            source=source,
+            stage=stage,
+            disposition=disposition,
+            assignment_status=assignment_status if assignment_status == "unassigned" else None,
+            apply_assignment=assignment_status == "unassigned",
+        )
+        if await db.leads.count_documents(probe) == 0:
+            skip_calls = True
+
+    if agent_ids and not skip_calls:
+        cq = {
+            "companyId": COMPANY_ID,
+            "agent_id": {"$in": agent_ids},
+            **reportable_calls_filter(),
+            **date_q,
+        }
+        if lead_attrs_on and assignment_status != "unassigned":
+            pipeline_lead = _build_lead_filter(
+                date_q=date_q,
+                status=status,
+                source=source,
+                stage=stage,
+                disposition=disposition,
+                assignment_status=None,
+                apply_assignment=False,
+            )
+            # Equality lookup + lead attrs + lead assigned to the call's agent
+            pipe = [
+                {"$match": cq},
+                {"$lookup": {
+                    "from": "leads",
+                    "localField": "lead_id",
+                    "foreignField": "id",
+                    "as": "_lead",
+                }},
+                {"$unwind": "$_lead"},
+                {"$match": {
+                    **_prefix_lead_fields(pipeline_lead),
+                    "$expr": {"$eq": ["$_lead.assigned_to", "$agent_id"]},
+                }},
+                {"$group": {
+                    "_id": {
+                        "agent_id": "$agent_id",
+                        "disposition_name": {"$ifNull": ["$disposition_name", "Unknown"]},
+                        "outcome": "$outcome",
+                    },
+                    "n": {"$sum": 1},
+                    "agent_name": {"$first": "$agent_name"},
+                }},
+            ]
+            agg_iter = db.calls.aggregate(pipe)
+        elif lead_attrs_on:
+            pipeline_lead = _build_lead_filter(
                 date_q=date_q,
                 status=status,
                 source=source,
@@ -910,21 +988,55 @@ async def caller_report(
                 assignment_status=assignment_status,
                 apply_assignment=True,
             )
-            # Per-agent rows already imply assignment to this agent
-            if assignment_status != "unassigned":
-                lead_match["assigned_to"] = a["id"]
-        # Aggregate disposition/outcome counts instead of loading up to 50k call docs
-        disp_counts = {}
-        connected = 0
-        calls = 0
-        async for row in _agg_calls_by_disposition(aq, lead_match):
+            agg_iter = _agg_calls_by_disposition(cq, pipeline_lead, group_by_agent=True)
+        else:
+            agg_iter = _agg_calls_by_disposition(cq, None, group_by_agent=True)
+
+        async for row in agg_iter:
+            key = row.get("_id") or {}
+            aid = key.get("agent_id")
+            if aid not in call_stats:
+                continue
             n = int(row.get("n") or 0)
-            calls += n
-            key = row["_id"] or {}
+            call_stats[aid]["calls"] += n
             dn = key.get("disposition_name") or "Unknown"
-            disp_counts[dn] = disp_counts.get(dn, 0) + n
+            call_stats[aid]["disp_counts"][dn] = call_stats[aid]["disp_counts"].get(dn, 0) + n
             if key.get("outcome") == "connected":
-                connected += n
+                call_stats[aid]["connected"] += n
+
+    # One leads aggregation for per-agent lead/conversion counts
+    lead_counts = {aid: {"leads": 0, "conversions": 0} for aid in agent_ids}
+    if assignment_status != "unassigned" and agent_ids:
+        lq = {"companyId": COMPANY_ID, "assigned_to": {"$in": agent_ids}, **date_q}
+        _apply_lead_attr_filters(
+            lq,
+            status=status,
+            source=source,
+            stage=stage,
+            disposition=disposition,
+            assignment_status=assignment_status,
+            apply_assignment=False,
+        )
+        async for row in db.leads.aggregate([
+            {"$match": lq},
+            {"$group": {
+                "_id": "$assigned_to",
+                "leads": {"$sum": 1},
+                "conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}},
+            }},
+        ]):
+            aid = row.get("_id")
+            if aid in lead_counts:
+                lead_counts[aid]["leads"] = int(row.get("leads") or 0)
+                lead_counts[aid]["conversions"] = int(row.get("conversions") or 0)
+
+    rows = []
+    for a in agents:
+        aid = a["id"]
+        stats = call_stats.get(aid) or {"disp_counts": {}, "connected": 0, "calls": 0}
+        disp_counts = stats["disp_counts"]
+        calls = stats["calls"]
+        connected = stats["connected"]
         top_disp = max(disp_counts.items(), key=lambda x: x[1])[0] if disp_counts else None
         converted_disp_calls = sum(
             n for dn, n in disp_counts.items()
@@ -935,24 +1047,10 @@ async def caller_report(
         registered = sales["registered"]
         deposite = sales["deposite"]
         conversion_ratio = round((deposite / calls * 100) if calls else 0, 1)
-        lq = {"companyId": COMPANY_ID, "assigned_to": a["id"], **date_q}
-        _apply_lead_attr_filters(
-            lq,
-            status=status,
-            source=source,
-            stage=stage,
-            disposition=disposition,
-            assignment_status=assignment_status,
-            apply_assignment=False,
-        )
-        if assignment_status == "unassigned":
-            leads = 0
-            converted = 0
-        else:
-            leads = await db.leads.count_documents(lq)
-            converted = await db.leads.count_documents({**lq, "is_client": True})
+        leads = lead_counts[aid]["leads"] if assignment_status != "unassigned" else 0
+        converted = lead_counts[aid]["conversions"] if assignment_status != "unassigned" else 0
         rows.append({
-            "agent_id": a["id"],
+            "agent_id": aid,
             "name": a["name"],
             "interested": interested,
             "registered": registered,
@@ -983,7 +1081,6 @@ async def caller_report(
     total_registered = sum(r["registered"] for r in rows)
     total_deposite = sum(r["deposite"] for r in rows)
     conversion_ratio = round((total_deposite / total_calls * 100) if total_calls else 0, 1)
-    # Company-level disposition mix for caller report
     all_disp = {}
     for r in rows:
         for d in r.get("disposition_breakdown") or []:
@@ -1148,8 +1245,9 @@ async def company_report(
         status, source, stage, disposition, assignment_status, assigned_to if not is_own else None,
     )
     lead_match = None
+    skip_calls = False
     if lead_attrs_on:
-        lead_match = _lead_lookup_match(
+        lead_match = _build_lead_filter(
             date_q=date_q,
             status=status,
             source=source,
@@ -1160,20 +1258,22 @@ async def company_report(
             is_own=is_own,
             principal_id=principal.get("id"),
         )
-    agg_cursor = _agg_calls_by_disposition(cq, lead_match)
+        if await db.leads.count_documents(lead_match) == 0:
+            skip_calls = True
 
-    async for row in agg_cursor:
-        n = int(row.get("n") or 0)
-        responses_logged += n
-        key = row["_id"] or {}
-        dn = key.get("disposition_name") or "Unknown"
-        bucket = per_disp.setdefault(dn, {"count": 0, "connected": 0})
-        bucket["count"] += n
-        if key.get("outcome") == "connected":
-            bucket["connected"] += n
-            connected += n
-        if dn == "Converted" or disp_meta.get(dn, {}).get("converts_to_client"):
-            converted_responses += n
+    if not skip_calls:
+        async for row in _agg_calls_by_disposition(cq, lead_match if lead_attrs_on else None):
+            n = int(row.get("n") or 0)
+            responses_logged += n
+            key = row["_id"] or {}
+            dn = key.get("disposition_name") or "Unknown"
+            bucket = per_disp.setdefault(dn, {"count": 0, "connected": 0})
+            bucket["count"] += n
+            if key.get("outcome") == "connected":
+                bucket["connected"] += n
+                connected += n
+            if dn == "Converted" or disp_meta.get(dn, {}).get("converts_to_client"):
+                converted_responses += n
     disposition_breakdown = [
         {
             "name": k,
