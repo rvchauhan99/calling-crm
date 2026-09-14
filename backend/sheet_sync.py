@@ -7,7 +7,7 @@ import io
 import logging
 import os
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
@@ -32,6 +32,9 @@ SYNC_LOCK_SECONDS = 300
 MAX_SHEET_BYTES = 10 * 1024 * 1024
 MAX_SHEET_ROWS = 50_000
 SYNC_CHUNK_SIZE = 500
+COMPANY_SYNC_COOLDOWN_SECONDS = max(
+    0, int(os.environ.get("SHEET_SYNC_COOLDOWN_SECONDS", "5") or "5"),
+)
 
 META_COLUMN_MAP = {
     "name": "full_name",
@@ -370,7 +373,7 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
 
 
 async def try_acquire_sync_lock(source_id: str) -> bool:
-    """Atomic lock; returns True if this caller owns the sync."""
+    """Atomic per-source lock; returns True if this caller owns the sync."""
     now = now_utc()
     until = now + timedelta(seconds=SYNC_LOCK_SECONDS)
     result = await db.sheet_sources.update_one(
@@ -397,6 +400,146 @@ async def release_sync_lock(source_id: str) -> None:
         {"id": source_id, "companyId": COMPANY_ID},
         {"$set": {"syncing": False, "sync_lock_until": None}},
     )
+
+
+def _parse_iso_ts(ts) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        if isinstance(ts, datetime):
+            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+async def ensure_company_sync_lock_doc() -> None:
+    await db.sheet_sync_locks.update_one(
+        {"companyId": COMPANY_ID},
+        {"$setOnInsert": {
+            "companyId": COMPANY_ID,
+            "locked": False,
+            "locked_until": None,
+            "holder": None,
+            "source_id": None,
+        }},
+        upsert=True,
+    )
+
+
+async def acquire_company_sync_lock(
+    *,
+    holder: str,
+    source_id: Optional[str] = None,
+) -> bool:
+    """Company-wide single-flight lock. Returns True if acquired."""
+    await ensure_company_sync_lock_doc()
+    now = now_utc()
+    until = now + timedelta(seconds=SYNC_LOCK_SECONDS)
+    result = await db.sheet_sync_locks.update_one(
+        {
+            "companyId": COMPANY_ID,
+            "$or": [
+                {"locked": {"$ne": True}},
+                {"locked_until": {"$lte": now.isoformat()}},
+                {"locked_until": None},
+                {"locked_until": {"$exists": False}},
+            ],
+        },
+        {"$set": {
+            "locked": True,
+            "locked_until": until.isoformat(),
+            "holder": holder,
+            "source_id": source_id,
+            "updated_at": now.isoformat(),
+        }},
+    )
+    return result.modified_count == 1
+
+
+async def release_company_sync_lock(*, holder: str) -> None:
+    await db.sheet_sync_locks.update_one(
+        {"companyId": COMPANY_ID, "holder": holder},
+        {"$set": {
+            "locked": False,
+            "locked_until": None,
+            "holder": None,
+            "source_id": None,
+            "updated_at": now_iso(),
+        }},
+    )
+
+
+async def company_sync_is_busy() -> bool:
+    """True when another sync holds a non-expired company lock."""
+    doc = await db.sheet_sync_locks.find_one({"companyId": COMPANY_ID}, {"_id": 0})
+    if not doc or not doc.get("locked"):
+        return False
+    until = _parse_iso_ts(doc.get("locked_until"))
+    if until is None:
+        return bool(doc.get("locked"))
+    return until > now_utc()
+
+
+async def pick_next_due_source() -> Optional[dict]:
+    """
+    Fair pick: one enabled source whose poll_seconds elapsed.
+    Oldest last_synced_at first (never-synced first).
+    """
+    now = now_utc()
+    sources = await db.sheet_sources.find(
+        {"companyId": COMPANY_ID, "enabled": True},
+        {"_id": 0},
+    ).to_list(200)
+    due: list[dict] = []
+    for source in sources:
+        if source.get("syncing"):
+            lock_until = _parse_iso_ts(source.get("sync_lock_until"))
+            if lock_until and lock_until > now:
+                continue
+        poll = max(MIN_POLL_SECONDS, int(source.get("poll_seconds") or DEFAULT_POLL_SECONDS))
+        last = _parse_iso_ts(source.get("last_synced_at"))
+        if last and (now - last).total_seconds() < poll:
+            continue
+        due.append(source)
+    if not due:
+        return None
+    due.sort(key=lambda s: s.get("last_synced_at") or "")
+    return due[0]
+
+
+async def run_sync_with_company_lock(
+    source: dict,
+    *,
+    holder: str,
+    csv_text: Optional[str] = None,
+) -> dict:
+    """
+    Acquire company lock, sync one source, hold lock through cooldown, then release.
+    Returns status=busy if the company lock is held.
+    """
+    sid = source.get("id")
+    if not await acquire_company_sync_lock(holder=holder, source_id=sid):
+        return {
+            "created": 0,
+            "duplicates": 0,
+            "invalid": 0,
+            "assigned": 0,
+            "skipped": 0,
+            "status": "busy",
+            "error": "Another sheet sync is already running. Try again shortly.",
+        }
+    try:
+        result = await sync_source(source, csv_text=csv_text, acquire_lock=True)
+        # Cooldown after network fetches so RAM can settle; skip for inline CSV (tests).
+        if csv_text is None and COMPANY_SYNC_COOLDOWN_SECONDS > 0:
+            await asyncio.sleep(COMPANY_SYNC_COOLDOWN_SECONDS)
+        return result
+    finally:
+        await release_company_sync_lock(holder=holder)
 
 
 async def preview_source(source: dict, *, csv_text: Optional[str] = None) -> dict:

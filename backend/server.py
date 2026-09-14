@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from dotenv import load_dotenv
 from pathlib import Path
 load_dotenv(Path(__file__).parent / ".env")
@@ -15,7 +14,10 @@ import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
 import routes_telephony
 from seed import seed
-from sheet_sync import sync_source, MIN_POLL_SECONDS
+from sheet_sync import (
+    pick_next_due_source,
+    run_sync_with_company_lock,
+)
 from lead_import_jobs import start_lead_import_worker, stop_lead_import_worker
 from bind_port import listen_port
 
@@ -31,42 +33,29 @@ def _run_seed_enabled() -> bool:
     return os.environ.get("RUN_SEED", "").strip().lower() in ("1", "true", "yes")
 
 
-def _parse_iso(ts):
-    if not ts:
-        return None
-    try:
-        if isinstance(ts, datetime):
-            return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-    except Exception:
-        return None
-
-
 async def _sheet_poll_loop():
-    """Every 30s, sync enabled sources whose poll_seconds elapsed."""
+    """Every 30s, sync at most one due source (company-wide single-flight)."""
     while True:
         try:
             await asyncio.sleep(30)
             if os.environ.get("SHEET_SYNC_DISABLED", "").lower() in ("1", "true", "yes"):
                 continue
-            now = datetime.now(timezone.utc)
-            sources = await db.sheet_sources.find(
-                {"companyId": COMPANY_ID, "enabled": True},
-                {"_id": 0},
-            ).to_list(200)
-            for source in sources:
-                if source.get("syncing"):
-                    lock_until = _parse_iso(source.get("sync_lock_until"))
-                    if lock_until and lock_until > now:
-                        continue
-                poll = max(MIN_POLL_SECONDS, int(source.get("poll_seconds") or 120))
-                last = _parse_iso(source.get("last_synced_at"))
-                if last and (now - last).total_seconds() < poll:
-                    continue
-                try:
-                    await sync_source(source, acquire_lock=True)
-                except Exception:
-                    logger.exception("Background sync failed for %s", source.get("id"))
+            source = await pick_next_due_source()
+            if not source:
+                continue
+            holder = f"poller-{os.getpid()}"
+            try:
+                result = await run_sync_with_company_lock(source, holder=holder)
+                if result.get("status") == "busy":
+                    logger.info("Sheet sync skipped (company lock busy)")
+                elif result.get("status") == "error":
+                    logger.warning(
+                        "Background sync error for %s: %s",
+                        source.get("id"),
+                        result.get("error"),
+                    )
+            except Exception:
+                logger.exception("Background sync failed for %s", source.get("id"))
         except asyncio.CancelledError:
             break
         except Exception:

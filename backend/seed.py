@@ -239,7 +239,9 @@ async def ensure_indexes():
         name="sheet_external_id_unique",
     )
     await db.sheet_sources.create_index([("companyId", 1), ("id", 1)], unique=True)
+    await db.sheet_sources.create_index([("companyId", 1), ("enabled", 1), ("last_synced_at", 1)])
     await db.sheet_sync_runs.create_index([("companyId", 1), ("sheet_source_id", 1), ("created_at", -1)])
+    await db.sheet_sync_locks.create_index([("companyId", 1)], unique=True)
     from lead_sources import ensure_lead_source_indexes
     await ensure_lead_source_indexes()
     await db.ledger.create_index("idempotency_key", unique=True, sparse=True)

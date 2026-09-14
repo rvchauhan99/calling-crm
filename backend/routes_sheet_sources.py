@@ -18,7 +18,7 @@ from sheet_sync import (
     parse_sheet_url,
     preview_draft,
     preview_source,
-    sync_source,
+    run_sync_with_company_lock,
     validate_column_map,
 )
 
@@ -225,7 +225,15 @@ async def sync_sheet_source(
     if not source:
         raise HTTPException(status_code=404, detail="Sheet source not found")
     csv_text = body.csv_text if body else None
-    result = await sync_source(source, csv_text=csv_text, acquire_lock=True)
+    holder = f"manual-{principal.get('id') or principal.get('email') or 'user'}-{sid}"
+    result = await run_sync_with_company_lock(
+        source, holder=holder, csv_text=csv_text,
+    )
+    if result.get("status") == "busy":
+        raise HTTPException(
+            status_code=409,
+            detail=result.get("error") or "Another sheet sync is already running",
+        )
     await audit(principal, "sync", "sheet_source", sid, {
         "created": result.get("created"),
         "duplicates": result.get("duplicates"),
