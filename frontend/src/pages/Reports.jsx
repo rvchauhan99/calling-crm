@@ -2,18 +2,18 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import api, { API, getToken } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, PageLoader, StatusPill, Money } from "@/components/common"
+import { PageHeader, StatusPill, Money, Spinner, LoadingRegion } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { DATE_PRESETS, matchDatePresetId } from "@/components/filters/datePresets"
 import {
-  PanelHeader, KpiCard, FilterChip,
-  monthStartISO, todayISO, startOfWeekISO, monthsAgoISO, buildLeadHref,
+  PanelHeader, KpiCard, buildLeadHref, todayISO,
 } from "@/components/dashboard/atoms"
 import {
   BarChart, Bar, XAxis, YAxis,
@@ -21,42 +21,50 @@ import {
 } from "recharts"
 import { Download } from "lucide-react"
 
-const PRESETS = [
-  { id: "today", label: "Today", apply: () => ({ from: todayISO(), to: todayISO() }) },
-  { id: "week", label: "This Week", apply: () => ({ from: startOfWeekISO(), to: todayISO() }) },
-  { id: "month", label: "This Month", apply: () => ({ from: monthStartISO(), to: todayISO() }) },
-  { id: "3m", label: "Last 3M", apply: () => ({ from: monthsAgoISO(3), to: todayISO() }) },
-]
-
 const INITIAL_FILTERS = {
   from: todayISO(),
   to: todayISO(),
-  assigned_to: "",
+  status: "",
+  stage: "",
   source: "",
+  disposition: "",
+  assignment_status: "",
+  assigned_to: "",
 }
 
 export default function Reports() {
-  const { can, user } = useAuth()
+  const { can, user, dataScope } = useAuth()
   const navigate = useNavigate()
   const isAffiliate = user?.user_type === "affiliate"
+  const isOwnScope = dataScope === "OWN"
   const defaultTab = isAffiliate ? "affiliate" : "caller"
 
   const [tab, setTab] = useState(defaultTab)
   const [filters, setFilters] = useState(INITIAL_FILTERS)
   const [activePreset, setActivePreset] = useState("today")
-  const [agents, setAgents] = useState([])
-  const [sources, setSources] = useState([])
+  const [options, setOptions] = useState(null)
   const [payload, setPayload] = useState(null)
   const [loading, setLoading] = useState(true)
+
+  const leadFiltersVisible = !isAffiliate && tab !== "affiliate"
+
+  const appendLeadParams = (p, f, kind) => {
+    if (f.from) p.set("from", f.from)
+    if (f.to) p.set("to", f.to)
+    if (kind === "affiliate") return
+    if (f.status) p.set("status", f.status)
+    if (f.stage) p.set("stage", f.stage)
+    if (f.source) p.set("source", f.source)
+    if (f.disposition) p.set("disposition", f.disposition)
+    if (!isOwnScope && f.assignment_status) p.set("assignment_status", f.assignment_status)
+    if (!isOwnScope && f.assigned_to) p.set("assigned_to", f.assigned_to)
+  }
 
   const load = useCallback(async (kind, f) => {
     setLoading(true)
     try {
       const p = new URLSearchParams()
-      if (f.from) p.set("from", f.from)
-      if (f.to) p.set("to", f.to)
-      if (kind === "caller" && f.assigned_to) p.set("assigned_to", f.assigned_to)
-      if (kind === "company" && f.source) p.set("source", f.source)
+      appendLeadParams(p, f, kind)
       const { data } = await api.get(`/reports/${kind}?${p.toString()}`)
       setPayload(data)
     } catch {
@@ -64,14 +72,12 @@ export default function Reports() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOwnScope])
 
   useEffect(() => {
     if (!isAffiliate) {
-      api.get("/dashboard/filter-options").then((r) => {
-        setAgents(r.data.agents || [])
-        setSources(r.data.sources || [])
-      }).catch(() => {})
+      api.get("/dashboard/filter-options").then((r) => setOptions(r.data)).catch(() => {})
     }
   }, [isAffiliate])
 
@@ -88,7 +94,8 @@ export default function Reports() {
   }
 
   const handleApply = () => {
-    setActivePreset("")
+    const presetId = matchDatePresetId(filters.from, filters.to, activePreset)
+    setActivePreset(presetId)
     load(tab, filters)
   }
 
@@ -102,12 +109,19 @@ export default function Reports() {
     setTab(nextTab)
   }
 
+  const handleDateChange = (key, val) => {
+    setFilters((f) => {
+      const next = { ...f, [key]: val }
+      setActivePreset(matchDatePresetId(next.from, next.to, activePreset))
+      return next
+    })
+  }
+
+  const fc = (key, val) => setFilters((f) => ({ ...f, [key]: val }))
+
   const exportCsv = async () => {
     const p = new URLSearchParams({ kind: tab })
-    if (filters.from) p.set("from", filters.from)
-    if (filters.to) p.set("to", filters.to)
-    if (tab === "caller" && filters.assigned_to) p.set("assigned_to", filters.assigned_to)
-    if (tab === "company" && filters.source) p.set("source", filters.source)
+    appendLeadParams(p, filters, tab)
     const res = await fetch(`${API}/reports/export?${p.toString()}`, {
       headers: { Authorization: `Bearer ${getToken()}` },
     })
@@ -125,15 +139,25 @@ export default function Reports() {
     if (filters.from || filters.to) {
       list.push({ key: "date", label: `${filters.from || "…"} → ${filters.to || "…"}` })
     }
-    if (tab === "caller" && filters.assigned_to) {
-      const name = agents.find((a) => a.id === filters.assigned_to)?.name || filters.assigned_to
+    if (!leadFiltersVisible) return list
+    if (filters.status) list.push({ key: "status", label: `Status: ${filters.status}` })
+    if (filters.stage) list.push({ key: "stage", label: `Stage: ${filters.stage}` })
+    if (filters.source) list.push({ key: "source", label: `Source: ${filters.source}` })
+    if (filters.disposition) {
+      list.push({
+        key: "disposition",
+        label: `Disposition: ${filters.disposition === "__none__" ? "None" : filters.disposition}`,
+      })
+    }
+    if (!isOwnScope && filters.assignment_status) {
+      list.push({ key: "assignment_status", label: `Assignment: ${filters.assignment_status}` })
+    }
+    if (!isOwnScope && filters.assigned_to) {
+      const name = options?.agents?.find((a) => a.id === filters.assigned_to)?.name || filters.assigned_to
       list.push({ key: "assigned_to", label: `Agent: ${name}` })
     }
-    if (tab === "company" && filters.source) {
-      list.push({ key: "source", label: `Source: ${filters.source}` })
-    }
     return list
-  }, [filters, tab, agents])
+  }, [filters, leadFiltersVisible, isOwnScope, options])
 
   const removeChip = (key) => {
     let next = { ...filters }
@@ -160,26 +184,27 @@ export default function Reports() {
         subtitle={`Comparative analytics · IST · ${rangeLabel}`}
         actions={
           <div className="flex flex-wrap items-center gap-1.5">
-            {PRESETS.map((p) => (
+            {DATE_PRESETS.map((p) => (
               <Button
                 key={p.id}
                 size="sm"
                 variant={activePreset === p.id ? "default" : "outline"}
                 className={activePreset === p.id ? "h-8 bg-sky-500 hover:bg-sky-600" : "h-8"}
                 onClick={() => handlePreset(p)}
+                disabled={loading}
                 data-testid={`preset-${p.id}`}
               >
                 {p.label}
               </Button>
             ))}
-            <Button size="sm" variant="outline" className="h-8" onClick={handleReset} data-testid="reports-reset">
+            <Button size="sm" variant="outline" className="h-8" onClick={handleReset} disabled={loading} data-testid="reports-reset">
               Reset
             </Button>
-            <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600" onClick={handleApply} data-testid="reports-apply">
-              Apply
+            <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600" onClick={handleApply} disabled={loading} data-testid="reports-apply">
+              {loading ? <><Spinner className="mr-1.5 h-3.5 w-3.5" /> Applying…</> : "Apply"}
             </Button>
             {can("reports:export") && (
-              <Button variant="outline" size="sm" className="h-8" onClick={exportCsv} data-testid="export-report-btn">
+              <Button variant="outline" size="sm" className="h-8" onClick={exportCsv} disabled={loading} data-testid="export-report-btn">
                 <Download size={16} className="mr-1.5" /> Export {tab}
               </Button>
             )}
@@ -187,65 +212,123 @@ export default function Reports() {
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <div>
-          <Label className="text-[10px] uppercase text-slate-500">From</Label>
-          <Input
-            type="date"
-            value={filters.from}
-            onChange={(e) => setFilters((f) => ({ ...f, from: e.target.value }))}
-            className="mt-1 h-9"
-            data-testid="filter-from"
-          />
-        </div>
-        <div>
-          <Label className="text-[10px] uppercase text-slate-500">To</Label>
-          <Input
-            type="date"
-            value={filters.to}
-            onChange={(e) => setFilters((f) => ({ ...f, to: e.target.value }))}
-            className="mt-1 h-9"
-            data-testid="filter-to"
-          />
-        </div>
-        {tab === "caller" && !isAffiliate && (
-          <SearchableSelect
-            label="Agent"
-            value={filters.assigned_to || "all"}
-            onChange={(v) => setFilters((f) => ({ ...f, assigned_to: v === "all" ? "" : v }))}
-            options={[
-              { value: "all", label: "All agents" },
-              ...agents.map((a) => ({ value: a.id, label: a.name })),
-            ]}
-            placeholder="All agents"
-            testId="filter-agent"
-          />
+      <FilterToolbar
+        testId="reports-filters"
+        fields={(
+          <>
+            <FilterField label="From" className="w-36">
+              <Input
+                type="date"
+                value={filters.from}
+                onChange={(e) => handleDateChange("from", e.target.value)}
+                className="h-8"
+                data-testid="filter-from"
+              />
+            </FilterField>
+            <FilterField label="To" className="w-36">
+              <Input
+                type="date"
+                value={filters.to}
+                onChange={(e) => handleDateChange("to", e.target.value)}
+                className="h-8"
+                data-testid="filter-to"
+              />
+            </FilterField>
+            {leadFiltersVisible && (
+              <>
+                <FilterField label="Status" className="w-36">
+                  <SearchableSelect
+                    value={filters.status || "all"}
+                    onChange={(v) => fc("status", v === "all" ? "" : v)}
+                    options={[
+                      { value: "all", label: "All statuses" },
+                      { value: "active", label: "Active" },
+                      { value: "inactive", label: "Inactive" },
+                      { value: "converted", label: "Converted" },
+                    ]}
+                    placeholder="All statuses"
+                    testId="filter-status"
+                    className="h-8"
+                  />
+                </FilterField>
+                <FilterField label="Stage" className="w-36">
+                  <SearchableSelect
+                    value={filters.stage || "all"}
+                    onChange={(v) => fc("stage", v === "all" ? "" : v)}
+                    options={[
+                      { value: "all", label: "All stages" },
+                      ...(options?.stages || []).map((s) => ({ value: s, label: s })),
+                    ]}
+                    placeholder="All stages"
+                    testId="filter-stage"
+                    className="h-8"
+                  />
+                </FilterField>
+                <FilterField label="Source" className="w-36">
+                  <SearchableSelect
+                    value={filters.source || "all"}
+                    onChange={(v) => fc("source", v === "all" ? "" : v)}
+                    options={[
+                      { value: "all", label: "All sources" },
+                      ...(options?.sources || []).map((s) => ({ value: s, label: s })),
+                    ]}
+                    placeholder="All sources"
+                    testId="filter-source"
+                    className="h-8"
+                  />
+                </FilterField>
+                <FilterField label="Disposition" className="min-w-[10rem] w-44">
+                  <SearchableSelect
+                    value={filters.disposition || "all"}
+                    onChange={(v) => fc("disposition", v === "all" ? "" : v)}
+                    options={[
+                      { value: "all", label: "All dispositions" },
+                      { value: "__none__", label: "No disposition" },
+                      ...(options?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                    ]}
+                    placeholder="All dispositions"
+                    testId="filter-disposition"
+                    className="h-8"
+                  />
+                </FilterField>
+                {!isOwnScope && (
+                  <FilterField label="Assignment" className="w-36">
+                    <SearchableSelect
+                      value={filters.assignment_status || "all"}
+                      onChange={(v) => fc("assignment_status", v === "all" ? "" : v)}
+                      options={[
+                        { value: "all", label: "All" },
+                        { value: "assigned", label: "Assigned" },
+                        { value: "unassigned", label: "Unassigned" },
+                      ]}
+                      placeholder="Assignment"
+                      testId="filter-assignment"
+                      className="h-8"
+                    />
+                  </FilterField>
+                )}
+                {!isOwnScope && (
+                  <FilterField label="Agent" className="w-40">
+                    <SearchableSelect
+                      value={filters.assigned_to || "all"}
+                      onChange={(v) => fc("assigned_to", v === "all" ? "" : v)}
+                      options={[
+                        { value: "all", label: "All agents" },
+                        ...(options?.agents || []).map((a) => ({ value: a.id, label: a.name })),
+                      ]}
+                      placeholder="All agents"
+                      testId="filter-agent"
+                      className="h-8"
+                    />
+                  </FilterField>
+                )}
+              </>
+            )}
+          </>
         )}
-        {tab === "company" && !isAffiliate && (
-          <SearchableSelect
-            label="Source"
-            value={filters.source || "all"}
-            onChange={(v) => setFilters((f) => ({ ...f, source: v === "all" ? "" : v }))}
-            options={[
-              { value: "all", label: "All sources" },
-              ...sources.map((s) => ({ value: s, label: s })),
-            ]}
-            placeholder="All sources"
-            testId="filter-source"
-          />
-        )}
-      </div>
-
-      {chips.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5" data-testid="filter-chips">
-          {chips.map((c) => (
-            <FilterChip key={c.key} label={c.label} onRemove={() => removeChip(c.key)} />
-          ))}
-          <button type="button" className="text-xs text-sky-600 hover:underline" onClick={handleReset}>
-            Clear all
-          </button>
-        </div>
-      )}
+        chips={chips.map((c) => ({ ...c, onRemove: () => removeChip(c.key) }))}
+        onClearAll={chips.length ? handleReset : undefined}
+      />
 
       <Tabs value={tab} onValueChange={handleTabChange}>
         <TabsList className="bg-slate-100" data-testid="reports-tabs">
@@ -254,11 +337,14 @@ export default function Reports() {
           {!isAffiliate && <TabsTrigger value="company" data-testid="tab-company">Company</TabsTrigger>}
         </TabsList>
 
-        {loading && !payload ? (
-          <div className="mt-4"><PageLoader /></div>
-        ) : (
-          <>
-            <TabsContent value="caller" className="mt-3 space-y-3">
+        <LoadingRegion
+          loading={loading}
+          hasData={!!payload}
+          testId="reports-results"
+          overlayTestId="reports-loading-overlay"
+          className="mt-3"
+        >
+            <TabsContent value="caller" className="mt-0 space-y-3">
               <div className="grid grid-cols-2 gap-2 md:grid-cols-5" data-testid="caller-kpis">
                 <KpiCard testId="kpi-calls" label="Total Calls" value={summary.total_calls ?? 0} />
                 <KpiCard testId="kpi-interested" label="Interested" value={summary.total_interested ?? 0} accent="blue" />
@@ -328,7 +414,7 @@ export default function Reports() {
               />
             </TabsContent>
 
-            <TabsContent value="affiliate" className="mt-3 space-y-3">
+            <TabsContent value="affiliate" className="mt-0 space-y-3">
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="affiliate-kpis">
                 <KpiCard testId="kpi-aff-clients" label="Clients" value={summary.total_clients ?? 0} />
                 <KpiCard testId="kpi-aff-ftd" label="FTD" value={summary.total_ftd ?? 0} accent="amber" />
@@ -371,7 +457,7 @@ export default function Reports() {
               />
             </TabsContent>
 
-            <TabsContent value="company" className="mt-3 space-y-3">
+            <TabsContent value="company" className="mt-0 space-y-3">
               <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="company-kpis">
                 <KpiCard testId="kpi-co-responses" label="Responses logged" value={summary.responses_logged ?? 0} hint={`${summary.connect_rate ?? 0}% connect`} />
                 <KpiCard testId="kpi-co-conv-resp" label="Converted responses" value={summary.converted_responses ?? 0} hint={`${summary.converted_response_share ?? 0}% share`} accent="amber" />
@@ -444,8 +530,7 @@ export default function Reports() {
                 ]}
               />
             </TabsContent>
-          </>
-        )}
+        </LoadingRegion>
       </Tabs>
     </div>
   )

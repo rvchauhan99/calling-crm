@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api, { formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common";
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingOverlay } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -15,15 +15,20 @@ import { Plus, UsersRound, Pencil, Trash2 } from "lucide-react";
 
 export default function Teams() {
   const { can } = useAuth();
-  const [teams, setTeams] = useState(null);
+  const [teams, setTeams] = useState(null)
+  const [loading, setLoading] = useState(true);
   const [users, setUsers] = useState([]);
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", supervisor_id: "", member_ids: [] });
 
   const load = useCallback(async () => {
-    try { const { data } = await api.get("/teams"); setTeams(data.teams); }
-    catch { setTeams([]); }
+    setLoading(true);
+    try {
+      const { data } = await api.get("/teams");
+      setTeams(data.teams);
+    } catch { setTeams([]); }
+    finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get("/users").then((r) => setUsers(r.data.users)).catch(() => {}); }, []);
@@ -44,11 +49,21 @@ export default function Teams() {
   };
   const toggleMember = (id) => setForm((f) => ({ ...f, member_ids: f.member_ids.includes(id) ? f.member_ids.filter((x) => x !== id) : [...f.member_ids, id] }));
 
-  if (!teams) return <PageLoader />;
+  
   const callers = users.filter((u) => u.user_type === "caller");
 
+  if (teams === null) {
+    return (
+      <div data-testid="teams-page">
+        <PageLoader />
+      </div>
+    )
+  }
+
   return (
-    <div data-testid="teams-page">
+    <div data-testid="teams-page" className="relative">
+      {loading && <LoadingOverlay testId="teams-loading-overlay" />}
+      <div className={loading ? "pointer-events-none opacity-60" : undefined}>
       <PageHeader title="Teams" subtitle="Group callers under supervisors for TEAM-scoped data"
         actions={can("teams:create") && <Button className="bg-sky-500 hover:bg-sky-600" onClick={openNew} data-testid="new-team-btn"><Plus size={16} className="mr-1.5" /> New Team</Button>} />
 
@@ -78,6 +93,7 @@ export default function Teams() {
           ))}
         </div>
       )}
+      </div>
 
       <Dialog open={show} onOpenChange={setShow}>
         <DialogContent className="bg-white" data-testid="team-dialog">

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api, { API, getToken, formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money, StatCard } from "@/components/common";
+import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money, StatCard, LoadingRegion } from "@/components/common";
 import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,6 +23,7 @@ function uuid() {
 export default function Ledger() {
   const { can } = useAuth();
   const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [clients, setClients] = useState([]);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
@@ -30,8 +31,13 @@ export default function Ledger() {
   const [form, setForm] = useState({ client_id: "", type: "credit", amount: "", category: "deposit", description: "" });
 
   const load = useCallback(async () => {
-    const { data } = await api.get(`/ledger?page=${page}&page_size=${pageSize}`);
-    setData(data);
+    setLoading(true);
+    try {
+      const { data } = await api.get(`/ledger?page=${page}&page_size=${pageSize}`);
+      setData(data);
+    } finally {
+      setLoading(false);
+    }
   }, [page, pageSize]);
   useEffect(() => { load().catch(() => {}); }, [load]);
   const loadClients = useCallback(async () => {
@@ -93,8 +99,8 @@ export default function Ledger() {
       )}
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {!data ? <div className="p-4"><TableSkeleton /></div> :
-          data.entries.length === 0 ? (
+        <LoadingRegion loading={loading} hasData={!!data} testId="ledger-results" skeleton={<TableSkeleton />}>
+          {data && (data.entries.length === 0 ? (
             <EmptyState icon={Wallet} title="No ledger entries" description="Posted transactions appear here." testid="ledger-empty" />
           ) : (
             <Table>
@@ -119,7 +125,8 @@ export default function Ledger() {
                 ))}
               </TableBody>
             </Table>
-          )}
+          ))}
+        </LoadingRegion>
       </div>
 
       {data && (

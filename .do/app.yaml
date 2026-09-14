@@ -9,7 +9,7 @@ services:
       deploy_on_push: true
     http_port: 8080
     instance_count: 1
-    instance_size_slug: basic-xxs
+    instance_size_slug: basic-xs
     run_command: python server.py
     health_check:
       http_path: /api/health

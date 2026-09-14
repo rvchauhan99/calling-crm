@@ -1,9 +1,11 @@
 """Google Sheet lead sync: URL parse, CSV fetch, mapping, insert, scoped auto-assign."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import logging
+import os
 import re
 from datetime import timedelta
 from typing import Any, Optional
@@ -24,9 +26,12 @@ from lead_sources import source_names
 logger = logging.getLogger(__name__)
 
 SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
-MIN_POLL_SECONDS = 60
+MIN_POLL_SECONDS = max(60, int(os.environ.get("SHEET_POLL_MIN_SECONDS", "60") or "60"))
 DEFAULT_POLL_SECONDS = 120
 SYNC_LOCK_SECONDS = 300
+MAX_SHEET_BYTES = 10 * 1024 * 1024
+MAX_SHEET_ROWS = 50_000
+SYNC_CHUNK_SIZE = 500
 
 META_COLUMN_MAP = {
     "name": "full_name",
@@ -248,8 +253,8 @@ def map_row(row: dict, column_map: dict, preset: str) -> Optional[dict]:
     }
 
 
-def parse_csv_rows(content: str) -> tuple[list[str], list[dict]]:
-    """Parse CSV text into headers and normalized row dicts."""
+def parse_csv_rows(content: str, *, max_rows: int = MAX_SHEET_ROWS) -> tuple[list[str], list[dict]]:
+    """Parse CSV text into headers and normalized row dicts. Caps rows to protect memory."""
     text = (content or "").strip()
     if not text:
         return [], []
@@ -260,6 +265,10 @@ def parse_csv_rows(content: str) -> tuple[list[str], list[dict]]:
         row = {_norm_header(k): (v or "").strip() for k, v in raw.items() if k is not None}
         if any(row.values()):
             rows.append(row)
+        if len(rows) > max_rows:
+            raise SheetParseError(
+                f"Sheet has more than {max_rows:,} data rows — split the sheet or raise the limit"
+            )
     return headers, rows
 
 
@@ -276,7 +285,18 @@ async def fetch_sheet_csv(spreadsheet_id: str, gid: str = "0", *, client: Option
         if resp.status_code >= 400:
             raise SheetAccessError(f"Google returned HTTP {resp.status_code}")
         content_type = (resp.headers.get("content-type") or "").lower()
-        text = resp.text
+        # Prefer Content-Length; fall back to body size after download
+        cl = resp.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > MAX_SHEET_BYTES:
+            raise SheetParseError(
+                f"Sheet CSV exceeds {MAX_SHEET_BYTES // (1024 * 1024)} MB limit"
+            )
+        raw = resp.content
+        if len(raw) > MAX_SHEET_BYTES:
+            raise SheetParseError(
+                f"Sheet CSV exceeds {MAX_SHEET_BYTES // (1024 * 1024)} MB limit"
+            )
+        text = raw.decode(resp.encoding or "utf-8", errors="replace")
         if "text/html" in content_type and "<html" in text[:500].lower():
             raise SheetAccessError(
                 "Cannot access sheet — share it as 'Anyone with the link can view'"
@@ -292,10 +312,11 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
     if not lead_ids:
         return 0
     from auto_assign import plan_equal_assignments
+    from pymongo import UpdateOne
 
     agents = await db.users.find(
         {"companyId": COMPANY_ID, "user_type": "caller", "active": True},
-        {"_id": 0},
+        {"_id": 0, "id": 1, "name": 1, "daily_quota": 1},
     ).to_list(100)
     if not agents:
         return 0
@@ -308,7 +329,7 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
             "is_client": False,
             "assigned_to": None,
         },
-        {"_id": 0},
+        {"_id": 0, "id": 1},
     ).to_list(len(lead_ids))
     # Preserve insert order from lead_ids
     by_id = {l["id"]: l for l in pool}
@@ -323,7 +344,7 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
         )
     by_agent = plan_equal_assignments(agents, assigned_today_map, len(ordered))
     idx = 0
-    total = 0
+    ops = []
     for row in by_agent:
         need = int(row.get("assigned") or 0)
         for _ in range(need):
@@ -331,7 +352,7 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
                 break
             lead = ordered[idx]
             idx += 1
-            await db.leads.update_one(
+            ops.append(UpdateOne(
                 {"id": lead["id"]},
                 {"$set": {
                     "assigned_to": row["agent_id"],
@@ -339,9 +360,13 @@ async def auto_assign_lead_ids(lead_ids: list[str]) -> int:
                     "owner_id": row["agent_id"],
                     "assigned_date": today,
                 }},
-            )
-            total += 1
-    return total
+            ))
+    if not ops:
+        return 0
+    for i in range(0, len(ops), SYNC_CHUNK_SIZE):
+        await db.leads.bulk_write(ops[i:i + SYNC_CHUNK_SIZE], ordered=True)
+        await asyncio.sleep(0)
+    return len(ops)
 
 
 async def try_acquire_sync_lock(source_id: str) -> bool:
@@ -409,7 +434,13 @@ async def inspect_sheet(
     spreadsheet_id, gid = parse_sheet_url(sheet_url)
     if csv_text is None:
         csv_text = await fetch_sheet_csv(spreadsheet_id, gid)
-    headers, _rows = parse_csv_rows(csv_text)
+    # Headers only — avoid materializing all rows for inspect
+    text = (csv_text or "").strip()
+    if not text:
+        headers = []
+    else:
+        reader = csv.DictReader(io.StringIO(text))
+        headers = [_norm_header(h) for h in (reader.fieldnames or [])]
     suggested = suggest_column_map(headers, preset or "meta_lead_ads")
     return {
         "spreadsheet_id": spreadsheet_id,
@@ -485,6 +516,7 @@ async def sync_source(
             if lead_source not in allowed:
                 lead_source = "Import"
 
+            candidates: list[dict] = []
             for row in rows:
                 mapped = map_row(row, cmap, preset)
                 if mapped is None:
@@ -494,58 +526,91 @@ async def sync_source(
                     else:
                         result["invalid"] += 1
                     continue
+                candidates.append(mapped)
 
-                external_id = mapped.get("external_id")
-                if external_id:
-                    existing_ext = await db.leads.find_one({
-                        "companyId": COMPANY_ID,
-                        "sheet_source_id": source_id,
-                        "external_id": external_id,
-                    })
-                    if existing_ext:
+            seen_phones: set[str] = set()
+            seen_ext: set[str] = set()
+            for offset in range(0, len(candidates), SYNC_CHUNK_SIZE):
+                chunk = candidates[offset:offset + SYNC_CHUNK_SIZE]
+                phones = [m["phone"] for m in chunk if m.get("phone")]
+                ext_ids = [m["external_id"] for m in chunk if m.get("external_id")]
+
+                existing_ext: set[str] = set()
+                if ext_ids:
+                    async for doc in db.leads.find(
+                        {
+                            "companyId": COMPANY_ID,
+                            "sheet_source_id": source_id,
+                            "external_id": {"$in": ext_ids},
+                        },
+                        {"_id": 0, "external_id": 1},
+                    ):
+                        if doc.get("external_id"):
+                            existing_ext.add(doc["external_id"])
+
+                existing_phones: set[str] = set()
+                if phones:
+                    async for doc in db.leads.find(
+                        {"companyId": COMPANY_ID, "phone": {"$in": phones}},
+                        {"_id": 0, "phone": 1},
+                    ):
+                        if doc.get("phone"):
+                            existing_phones.add(doc["phone"])
+
+                to_insert = []
+                now = now_iso()
+                for mapped in chunk:
+                    external_id = mapped.get("external_id")
+                    phone = mapped["phone"]
+                    if external_id and (external_id in existing_ext or external_id in seen_ext):
+                        result["duplicates"] += 1
+                        continue
+                    if phone in existing_phones or phone in seen_phones:
                         result["duplicates"] += 1
                         continue
 
-                if await db.leads.find_one({
-                    "companyId": COMPANY_ID,
-                    "phone": mapped["phone"],
-                }):
-                    result["duplicates"] += 1
-                    continue
+                    lid = new_id()
+                    doc = {
+                        "id": lid,
+                        "companyId": COMPANY_ID,
+                        "name": mapped["name"],
+                        "phone": phone,
+                        "email": mapped["email"],
+                        "source": lead_source,
+                        "city": mapped.get("city") or "",
+                        "status": "active",
+                        "assigned_to": None,
+                        "assigned_name": None,
+                        "owner_id": None,
+                        "disposition_id": None,
+                        "disposition_name": None,
+                        "carry_forward": True,
+                        "pipeline_stage": "New",
+                        "custom_fields": mapped.get("custom_fields") or {},
+                        "follow_up_at": None,
+                        "is_client": False,
+                        "client_id": None,
+                        "assigned_date": None,
+                        "last_notes": None,
+                        "last_notes_at": None,
+                        "external_id": external_id,
+                        "sheet_source_id": source_id,
+                        "sheet_source_name": source.get("name"),
+                        "created_at": now,
+                        "updated_at": now,
+                    }
+                    to_insert.append(doc)
+                    created_ids.append(lid)
+                    result["created"] += 1
+                    seen_phones.add(phone)
+                    existing_phones.add(phone)
+                    if external_id:
+                        seen_ext.add(external_id)
+                        existing_ext.add(external_id)
 
-                lid = new_id()
-                doc = {
-                    "id": lid,
-                    "companyId": COMPANY_ID,
-                    "name": mapped["name"],
-                    "phone": mapped["phone"],
-                    "email": mapped["email"],
-                    "source": lead_source,
-                    "city": mapped.get("city") or "",
-                    "status": "active",
-                    "assigned_to": None,
-                    "assigned_name": None,
-                    "owner_id": None,
-                    "disposition_id": None,
-                    "disposition_name": None,
-                    "carry_forward": True,
-                    "pipeline_stage": "New",
-                    "custom_fields": mapped.get("custom_fields") or {},
-                    "follow_up_at": None,
-                    "is_client": False,
-                    "client_id": None,
-                    "assigned_date": None,
-                    "last_notes": None,
-                    "last_notes_at": None,
-                    "external_id": external_id,
-                    "sheet_source_id": source_id,
-                    "sheet_source_name": source.get("name"),
-                    "created_at": now_iso(),
-                    "updated_at": now_iso(),
-                }
-                await db.leads.insert_one(dict(doc))
-                created_ids.append(lid)
-                result["created"] += 1
+                if to_insert:
+                    await db.leads.insert_many(to_insert)
+                await asyncio.sleep(0)
 
             if source.get("auto_assign") and created_ids:
                 result["assigned"] = await auto_assign_lead_ids(created_ids)

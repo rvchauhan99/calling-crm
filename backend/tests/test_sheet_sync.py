@@ -65,6 +65,25 @@ class TestSheetColumnMapping:
         with pytest.raises(ValueError):
             validate_column_map({"name": "", "phone": "phone"})
 
+    def test_sheet_csv_row_cap(self):
+        import sys
+        from pathlib import Path
+        from dotenv import load_dotenv
+        root = Path(__file__).resolve().parents[1]
+        load_dotenv(root / ".env")
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from sheet_sync import parse_csv_rows, SheetParseError
+
+        header = "name,phone\n"
+        # 6 data rows with max_rows=5 must fail
+        body = header + "".join(f"Lead {i},900000000{i}\n" for i in range(6))
+        with pytest.raises(SheetParseError, match="more than 5"):
+            parse_csv_rows(body, max_rows=5)
+        ok_headers, ok_rows = parse_csv_rows(header + "A,9111111111\nB,9222222222\n", max_rows=5)
+        assert ok_headers == ["name", "phone"]
+        assert len(ok_rows) == 2
+
     def test_inspect_with_inline_csv(self, admin):
         r = admin.post(
             f"{BASE_URL}/api/sheet-sources/inspect",

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api, { formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common";
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,7 +21,8 @@ const empty = { name: "", email: "", password: "", role_id: "", user_type: "call
 
 export default function Users() {
   const { can } = useAuth();
-  const [users, setUsers] = useState(null);
+  const [users, setUsers] = useState(null)
+  const [loading, setLoading] = useState(true);
   const [roles, setRoles] = useState([]);
   const [tab, setTab] = useState("all");
   const [show, setShow] = useState(false);
@@ -29,11 +30,13 @@ export default function Users() {
   const [form, setForm] = useState(empty);
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
       const q = tab === "all" ? "" : `?user_type=${tab}`;
       const { data } = await api.get(`/users${q}`);
       setUsers(data.users);
     } catch { setUsers([]); }
+    finally { setLoading(false); }
   }, [tab]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get("/roles").then((r) => setRoles(r.data.roles)).catch(() => {}); }, []);
@@ -54,7 +57,15 @@ export default function Users() {
     catch (e) { toast.error(formatApiError(e.response?.data?.detail)); }
   };
 
-  if (!users) return <PageLoader />;
+  
+
+  if (users === null) {
+    return (
+      <div data-testid="users-page">
+        <PageLoader />
+      </div>
+    )
+  }
 
   return (
     <div data-testid="users-page">
@@ -71,6 +82,7 @@ export default function Users() {
       </Tabs>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <LoadingRegion loading={loading} hasData={true} testId="users-page-results">
         {users.length === 0 ? (
           <EmptyState icon={IdCard} title="No users" description="Add callers, affiliates or admins." testid="users-empty" />
         ) : (
@@ -102,6 +114,7 @@ export default function Users() {
             </TableBody>
           </Table>
         )}
+        </LoadingRegion>
       </div>
 
       <Dialog open={show} onOpenChange={setShow}>

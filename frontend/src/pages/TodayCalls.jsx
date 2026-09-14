@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from "react"
 import api, { formatApiError } from "@/lib/api"
-import { EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { EmptyState, PageLoader, StatusPill, LoadingOverlay, PageHeader } from "@/components/common"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LastRemarks } from "@/components/leads/LastRemarks"
@@ -51,6 +51,7 @@ const DISPLAY_SECTIONS = [
 export default function TodayCalls() {
   const { enabled: telephonyEnabled } = useTelephonyEnabled()
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [dispositions, setDispositions] = useState([])
   const [active, setActive] = useState(null)
   const [lead360Id, setLead360Id] = useState(null)
@@ -68,9 +69,14 @@ export default function TodayCalls() {
   const acwFocusPending = useRef(false)
 
   const load = useCallback(async () => {
-    const [tc, ds] = await Promise.all([api.get("/today-calls"), api.get("/dispositions")])
-    setData(tc.data)
-    setDispositions((ds.data.dispositions || []).filter((d) => d.active))
+    setLoading(true)
+    try {
+      const [tc, ds] = await Promise.all([api.get("/today-calls"), api.get("/dispositions")])
+      setData(tc.data)
+      setDispositions((ds.data.dispositions || []).filter((d) => d.active))
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -244,7 +250,21 @@ export default function TodayCalls() {
     }
   }, [acwId, visibleBuckets, bucketFilter])
 
-  if (!data) return <PageLoader />
+  if (!data && loading) {
+    return (
+      <div data-testid="today-calls-page">
+        <PageHeader title="Today Calls" subtitle="Loading queue…" />
+        <PageLoader />
+      </div>
+    )
+  }
+  if (!data) {
+    return (
+      <div data-testid="today-calls-page">
+        <PageHeader title="Today Calls" subtitle="Unable to load" />
+      </div>
+    )
+  }
   const counts = data.counts || {}
   const acwCount = data.tab_counts?.acw_pending ?? (acwId ? 1 : 0)
   const overdueCount = counts.overdue || 0
@@ -269,7 +289,9 @@ export default function TodayCalls() {
   ]
 
   return (
-    <div data-testid="today-calls-page" className="space-y-1.5">
+    <div data-testid="today-calls-page" className="relative space-y-1.5">
+      {loading && <LoadingOverlay testId="today-calls-loading-overlay" />}
+      <div className={cn("space-y-1.5", loading && "pointer-events-none opacity-60")}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="min-w-0">
           <h1 className="font-display text-lg font-bold text-slate-900">Today Calls</h1>
@@ -704,6 +726,8 @@ export default function TodayCalls() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      </div>
 
       <Lead360Sheet
         leadId={lead360Id}

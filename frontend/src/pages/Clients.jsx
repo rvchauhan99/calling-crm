@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money } from "@/components/common"
+import { PageHeader, EmptyState, TableSkeleton, StatusPill, Money, LoadingRegion } from "@/components/common"
 import { TablePagination } from "@/components/TablePagination"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { usePageParams } from "@/hooks/usePageParams"
@@ -29,6 +29,7 @@ export default function Clients() {
   const { can } = useAuth()
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [tabCounts, setTabCounts] = useState(null)
   const [detail, setDetail] = useState(null)
   const [note, setNote] = useState("")
@@ -53,17 +54,22 @@ export default function Clients() {
   }
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams()
-    if (search) p.set("search", search)
-    p.set("status", statusTab)
-    p.set("page", page)
-    p.set("page_size", pageSize)
-    const [{ data: list }, { data: counts }] = await Promise.all([
-      api.get(`/clients?${p.toString()}`),
-      api.get("/clients/tab-counts"),
-    ])
-    setData(list)
-    setTabCounts(counts)
+    setLoading(true)
+    try {
+      const p = new URLSearchParams()
+      if (search) p.set("search", search)
+      p.set("status", statusTab)
+      p.set("page", page)
+      p.set("page_size", pageSize)
+      const [{ data: list }, { data: counts }] = await Promise.all([
+        api.get(`/clients?${p.toString()}`),
+        api.get("/clients/tab-counts"),
+      ])
+      setData(list)
+      setTabCounts(counts)
+    } finally {
+      setLoading(false)
+    }
   }, [search, page, pageSize, statusTab])
 
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -176,8 +182,8 @@ export default function Clients() {
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {!data ? <div className="p-4"><TableSkeleton /></div> :
-          data.clients.length === 0 ? (
+        <LoadingRegion loading={loading} hasData={!!data} testId="clients-results" skeleton={<TableSkeleton />}>
+          {data && (data.clients.length === 0 ? (
             <EmptyState
               icon={UserCog}
               title="No clients yet"
@@ -214,7 +220,8 @@ export default function Clients() {
                 ))}
               </TableBody>
             </Table>
-          )}
+          ))}
+        </LoadingRegion>
       </div>
 
       {data && (

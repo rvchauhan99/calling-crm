@@ -1,4 +1,5 @@
 """Reports, dashboards (computed aggregations, IST), CSV export, audit log."""
+import asyncio
 import io
 import csv
 from datetime import timedelta, timezone, datetime, time, date
@@ -6,7 +7,8 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc,
-                  live_client_filter, live_ledger_filter, reportable_calls_filter, escape_regex)
+                  live_client_filter, live_ledger_filter, reportable_calls_filter, escape_regex,
+                  clamp_page_size)
 from lead_sources import source_names
 from caller_sales import sales_disp_counts
 
@@ -66,6 +68,30 @@ def apply_created_range(q: dict, from_d: Optional[date], to_d: Optional[date]) -
         rng["$lte"] = hi
     q["created_at"] = rng
     return q
+
+
+async def _agg_groups(collection, match: dict, group_id, extra: Optional[dict] = None, limit: int = 500):
+    """Run $match + $group; returns list of {_id, count, ...extra}."""
+    group_stage = {"_id": group_id, "count": {"$sum": 1}}
+    if extra:
+        group_stage.update(extra)
+    cursor = collection.aggregate([{"$match": match}, {"$group": group_stage}])
+    return await cursor.to_list(limit)
+
+
+async def _ledger_type_totals(client_ids: list) -> tuple[float, float]:
+    if not client_ids:
+        return 0.0, 0.0
+    credit = debit = 0.0
+    async for row in db.ledger.aggregate([
+        {"$match": {"client_id": {"$in": client_ids}, **live_ledger_filter()}},
+        {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}},
+    ]):
+        if row["_id"] == "credit":
+            credit = float(row.get("total") or 0)
+        elif row["_id"] == "debit":
+            debit = float(row.get("total") or 0)
+    return round(credit, 2), round(debit, 2)
 
 
 def in_range(iso_str, from_d: Optional[date], to_d: Optional[date]) -> bool:
@@ -170,63 +196,60 @@ async def dashboard(
     today = ist_today()
     trend_from = from_d or date(today.year, today.month, 1)
     trend_to = to_d or today
+    now_iso_cmp = now_utc().isoformat()
 
-    leads = await db.leads.find(lq, {"_id": 0}).to_list(20000)
-    calls = await db.calls.find(cq, {"_id": 0}).to_list(50000)
+    # KPIs via counts (no full document materialization)
+    total_leads = await db.leads.count_documents(lq)
+    active_leads = await db.leads.count_documents({**lq, "status": "active"})
+    converted_leads = await db.leads.count_documents({**lq, "is_client": True})
+    unassigned_leads = 0 if is_own else await db.leads.count_documents({**lq, "assigned_to": None})
+    overdue_followups = await db.leads.count_documents({
+        **lq, "status": "active", "follow_up_at": {"$ne": None, "$lt": now_iso_cmp},
+    })
+    with_response = await db.leads.count_documents({
+        **lq, "disposition_name": {"$nin": [None, ""]},
+    })
+    carry_forward_count = await db.leads.count_documents({**lq, "carry_forward": True})
 
-    # Clients / ledger stay scope-based (not date-filtered on lead create for affiliate KPIs)
     total_clients = await db.clients.count_documents(clq)
     ftd_clients = await db.clients.count_documents({**clq, "ftd_at": {"$ne": None}})
     client_ids = [c["id"] for c in await db.clients.find(clq, {"_id": 0, "id": 1}).to_list(5000)]
-    ledger = await db.ledger.find(
-        {"client_id": {"$in": client_ids}, **live_ledger_filter()}, {"_id": 0},
-    ).to_list(100000)
-    credit = round(sum(e["amount"] for e in ledger if e["type"] == "credit"), 2)
-    debit = round(sum(e["amount"] for e in ledger if e["type"] == "debit"), 2)
-
-    total_leads = len(leads)
-    active_leads = sum(1 for l in leads if l.get("status") == "active")
-    converted_leads = sum(1 for l in leads if l.get("is_client"))
-    unassigned_leads = 0 if is_own else sum(1 for l in leads if not l.get("assigned_to"))
-    now_iso_cmp = now_utc().isoformat()
-    overdue_followups = sum(
-        1 for l in leads
-        if l.get("follow_up_at") and l.get("status") == "active" and l["follow_up_at"] < now_iso_cmp
-    )
+    credit, debit = await _ledger_type_totals(client_ids)
 
     total_calls_all = await db.calls.count_documents(
         {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
     )
-    calls_in_range = len(calls)
-    durations = [c.get("duration") or 0 for c in calls]
-    avg_call_duration = round(sum(durations) / len(durations), 1) if durations else 0.0
+    calls_in_range = await db.calls.count_documents(cq)
+    avg_row = await db.calls.aggregate([
+        {"$match": cq},
+        {"$group": {"_id": None, "avg": {"$avg": "$duration"}, "n": {"$sum": 1}}},
+    ]).to_list(1)
+    avg_call_duration = round(float(avg_row[0]["avg"] or 0), 1) if avg_row and avg_row[0].get("n") else 0.0
 
-    # calls today (IST) within scope (unfiltered by date params for KPI hint)
-    calls_today = 0
-    today_s = today.isoformat()
-    for c in await db.calls.find(
-        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
-        {"_id": 0, "created_at": 1},
-    ).to_list(100000):
-        if ist_date(c.get("created_at")) == today_s:
-            calls_today += 1
+    today_lo, today_hi = date_bounds_iso(today, today)
+    calls_today_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
+    if today_lo or today_hi:
+        calls_today_q["created_at"] = {}
+        if today_lo:
+            calls_today_q["created_at"]["$gte"] = today_lo
+        if today_hi:
+            calls_today_q["created_at"]["$lte"] = today_hi
+    calls_today = await db.calls.count_documents(calls_today_q)
 
     conv_rate = round((converted_leads / total_leads * 100) if total_leads else 0, 1)
 
-    # Status breakdown
-    status_counts = {}
-    for l in leads:
-        s = l.get("status") or "unknown"
-        status_counts[s] = status_counts.get(s, 0) + 1
-    status_breakdown = [{"status": k, "count": v} for k, v in sorted(status_counts.items(), key=lambda x: -x[1])]
+    # Status / pipeline / disposition / source via $group
+    status_rows = await _agg_groups(db.leads, lq, {"$ifNull": ["$status", "unknown"]})
+    status_breakdown = sorted(
+        [{"status": r["_id"], "count": r["count"]} for r in status_rows],
+        key=lambda x: -x["count"],
+    )
 
-    # Pipeline funnel
+    stage_rows = await _agg_groups(db.leads, lq, {"$ifNull": ["$pipeline_stage", "New"]})
     stage_counts = {s: 0 for s in PIPELINE_STAGES}
-    for l in leads:
-        st = l.get("pipeline_stage") or "New"
-        if st not in stage_counts:
-            stage_counts[st] = 0
-        stage_counts[st] += 1
+    for r in stage_rows:
+        st = r["_id"] or "New"
+        stage_counts[st] = stage_counts.get(st, 0) + r["count"]
     pipeline_funnel = []
     prev = None
     for st in PIPELINE_STAGES:
@@ -235,34 +258,29 @@ async def dashboard(
         pipeline_funnel.append({"stage": st, "count": cnt, "rate_from_prev": rate})
         prev = cnt if cnt else prev
 
-    # Disposition mix (from filtered calls)
-    disp_mix = {}
-    for c in calls:
-        d = c.get("disposition_name") or "Unknown"
-        disp_mix[d] = disp_mix.get(d, 0) + 1
-    disposition_mix = [{"name": k, "value": v} for k, v in sorted(disp_mix.items(), key=lambda x: -x[1])]
+    disp_rows = await _agg_groups(db.calls, cq, {"$ifNull": ["$disposition_name", "Unknown"]})
+    disposition_mix = sorted(
+        [{"name": r["_id"], "value": r["count"]} for r in disp_rows],
+        key=lambda x: -x["value"],
+    )
 
-    # Lead last-response breakdown (primary Responses analysis)
-    lead_disp_counts = {}
-    for l in leads:
-        d = l.get("disposition_name") or "__none__"
-        lead_disp_counts[d] = lead_disp_counts.get(d, 0) + 1
+    lead_disp_rows = await _agg_groups(
+        db.leads, lq, {"$ifNull": ["$disposition_name", "__none__"]},
+    )
     lead_disposition_breakdown = []
-    for name, cnt in sorted(lead_disp_counts.items(), key=lambda x: -x[1]):
+    for r in sorted(lead_disp_rows, key=lambda x: -x["count"]):
+        name = r["_id"]
         lead_disposition_breakdown.append({
             "name": name,
             "label": "No response" if name == "__none__" else name,
-            "count": cnt,
-            "pct": round((cnt / total_leads * 100) if total_leads else 0, 1),
+            "count": r["count"],
+            "pct": round((r["count"] / total_leads * 100) if total_leads else 0, 1),
         })
 
-    converted_by_response = sum(1 for l in leads if l.get("is_client"))
-    with_response = sum(1 for l in leads if l.get("disposition_name"))
-    carry_forward_count = sum(1 for l in leads if l.get("carry_forward") is True)
     top_response = lead_disposition_breakdown[0] if lead_disposition_breakdown else None
     response_conversion = {
         "converted_leads": converted_leads,
-        "converted_by_response": converted_by_response,
+        "converted_by_response": converted_leads,
         "converted_share_pct": round((converted_leads / total_leads * 100) if total_leads else 0, 1),
         "leads_with_response": with_response,
         "response_coverage_pct": round((with_response / total_leads * 100) if total_leads else 0, 1),
@@ -272,123 +290,159 @@ async def dashboard(
         "top_response_count": top_response["count"] if top_response else 0,
     }
 
-    # Source breakdown
-    source_map = {}
-    for l in leads:
-        s = l.get("source") or "Unknown"
-        if s not in source_map:
-            source_map[s] = {"source": s, "leads": 0, "conversions": 0}
-        source_map[s]["leads"] += 1
-        if l.get("is_client"):
-            source_map[s]["conversions"] += 1
+    source_rows = await _agg_groups(
+        db.leads, lq, {"$ifNull": ["$source", "Unknown"]},
+        extra={"conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}}},
+    )
     source_breakdown = []
-    for row in source_map.values():
-        row["conversion_rate"] = round((row["conversions"] / row["leads"] * 100) if row["leads"] else 0, 1)
-        source_breakdown.append(row)
+    for r in source_rows:
+        leads_n = r["count"]
+        conv_n = r.get("conversions") or 0
+        source_breakdown.append({
+            "source": r["_id"],
+            "leads": leads_n,
+            "conversions": conv_n,
+            "conversion_rate": round((conv_n / leads_n * 100) if leads_n else 0, 1),
+        })
     source_breakdown.sort(key=lambda x: -x["leads"])
 
-    # Agent performance
+    # Agent performance: two light aggregations
     agent_map = {}
-    for l in leads:
-        aid = l.get("assigned_to")
+    lead_agent_rows = await db.leads.aggregate([
+        {"$match": {**lq, "assigned_to": {"$ne": None}}},
+        {"$group": {
+            "_id": "$assigned_to",
+            "name": {"$first": "$assigned_name"},
+            "leads": {"$sum": 1},
+            "conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}},
+        }},
+    ]).to_list(500)
+    for r in lead_agent_rows:
+        aid = r["_id"]
+        if not aid:
+            continue
+        agent_map[aid] = {
+            "agent_id": aid,
+            "name": r.get("name") or "Unknown",
+            "leads": r["leads"],
+            "calls": 0,
+            "conversions": r.get("conversions") or 0,
+        }
+    call_agent_rows = await db.calls.aggregate([
+        {"$match": {**cq, "agent_id": {"$ne": None}}},
+        {"$group": {
+            "_id": "$agent_id",
+            "name": {"$first": "$agent_name"},
+            "calls": {"$sum": 1},
+        }},
+    ]).to_list(500)
+    for r in call_agent_rows:
+        aid = r["_id"]
         if not aid:
             continue
         if aid not in agent_map:
             agent_map[aid] = {
                 "agent_id": aid,
-                "name": l.get("assigned_name") or "Unknown",
-                "leads": 0, "calls": 0, "conversions": 0,
+                "name": r.get("name") or "Unknown",
+                "leads": 0,
+                "calls": 0,
+                "conversions": 0,
             }
-        agent_map[aid]["leads"] += 1
-        if l.get("is_client"):
-            agent_map[aid]["conversions"] += 1
-    for c in calls:
-        aid = c.get("agent_id")
-        if not aid:
-            continue
-        if aid not in agent_map:
-            agent_map[aid] = {
-                "agent_id": aid,
-                "name": c.get("agent_name") or "Unknown",
-                "leads": 0, "calls": 0, "conversions": 0,
-            }
-        agent_map[aid]["calls"] += 1
-        if not agent_map[aid]["name"] or agent_map[aid]["name"] == "Unknown":
-            agent_map[aid]["name"] = c.get("agent_name") or agent_map[aid]["name"]
+        agent_map[aid]["calls"] = r["calls"]
+        if (not agent_map[aid]["name"] or agent_map[aid]["name"] == "Unknown") and r.get("name"):
+            agent_map[aid]["name"] = r["name"]
     agent_performance = []
     for row in agent_map.values():
-        row["conversion_rate"] = round((row["conversions"] / row["leads"] * 100) if row["leads"] else 0, 1)
+        row["conversion_rate"] = round(
+            (row["conversions"] / row["leads"] * 100) if row["leads"] else 0, 1,
+        )
         agent_performance.append(row)
     agent_performance.sort(key=lambda x: (-x["conversions"], -x["calls"], -x["leads"]))
 
-    # Daily trend (leads + calls) for range
+    # Daily trend — stream only created_at within trend window (IST bucketing in Python)
     daily = {}
-    cursor = trend_from
-    while cursor <= trend_to:
-        daily[cursor.isoformat()] = {"date": cursor.isoformat(), "leads": 0, "calls": 0}
-        cursor += timedelta(days=1)
+    cursor_d = trend_from
+    while cursor_d <= trend_to:
+        daily[cursor_d.isoformat()] = {"date": cursor_d.isoformat(), "leads": 0, "calls": 0}
+        cursor_d += timedelta(days=1)
         if len(daily) > 120:
             break
-    for l in leads:
+    trend_lq = dict(lq)
+    trend_cq = dict(cq)
+    apply_created_range(trend_lq, trend_from, trend_to)
+    apply_created_range(trend_cq, trend_from, trend_to)
+    async for l in db.leads.find(trend_lq, {"_id": 0, "created_at": 1}):
         d = ist_date(l.get("created_at"))
         if d in daily:
             daily[d]["leads"] += 1
-    for c in calls:
+    async for c in db.calls.find(trend_cq, {"_id": 0, "created_at": 1}):
         d = ist_date(c.get("created_at"))
         if d in daily:
             daily[d]["calls"] += 1
     daily_trend = list(daily.values())
 
-    # Backward-compatible calls_trend (last 7 IST days, scope-only)
+    # calls_trend: last 7 IST days — date-bounded, not full history scan
     seven = {}
     for i in range(6, -1, -1):
         d = (today - timedelta(days=i)).isoformat()
         seven[d] = 0
-    scoped_calls_for_week = await db.calls.find(
-        {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope},
-        {"_id": 0, "created_at": 1},
-    ).to_list(100000)
-    for c in scoped_calls_for_week:
+    week_from = today - timedelta(days=6)
+    week_q = {"companyId": COMPANY_ID, **reportable_calls_filter(), **call_scope}
+    apply_created_range(week_q, week_from, today)
+    async for c in db.calls.find(week_q, {"_id": 0, "created_at": 1}):
         d = ist_date(c.get("created_at"))
         if d in seven:
             seven[d] += 1
     calls_trend = [{"date": k[5:], "calls": v} for k, v in seven.items()]
 
-    # Aging / SLA on active leads in filter set
+    # Aging / SLA — stream active leads in chunks (bounded RAM) + last-call $group
     aging = {"overdue_followup": 0, "no_call_3d": 0, "no_call_7d": 0, "no_call_14d": 0}
-    lead_last_call = {}
-    lead_ids = [l["id"] for l in leads]
-    if lead_ids:
-        for c in await db.calls.find(
-            {
-                "companyId": COMPANY_ID,
-                "lead_id": {"$in": lead_ids},
-                **reportable_calls_filter(),
-            },
-            {"_id": 0, "lead_id": 1, "created_at": 1},
-        ).to_list(100000):
-            lid = c.get("lead_id")
-            ca = c.get("created_at") or ""
-            if lid and ca >= lead_last_call.get(lid, ""):
-                lead_last_call[lid] = ca
-    for l in leads:
-        if l.get("status") != "active":
-            continue
-        if l.get("follow_up_at") and l["follow_up_at"] < now_iso_cmp:
-            aging["overdue_followup"] += 1
-        last = lead_last_call.get(l["id"])
-        created = l.get("created_at")
-        ref = last or created
-        ref_d = ist_date(ref)
-        if not ref_d:
-            continue
-        age_days = (today - date.fromisoformat(ref_d)).days
-        if age_days >= 14:
-            aging["no_call_14d"] += 1
-        elif age_days >= 7:
-            aging["no_call_7d"] += 1
-        elif age_days >= 3:
-            aging["no_call_3d"] += 1
+    CHUNK = 2000
+    chunk: list = []
+
+    async def _flush_aging_chunk(items: list):
+        if not items:
+            return
+        lead_ids = [l["id"] for l in items if l.get("id")]
+        lead_last_call = {}
+        if lead_ids:
+            async for row in db.calls.aggregate([
+                {"$match": {
+                    "companyId": COMPANY_ID,
+                    "lead_id": {"$in": lead_ids},
+                    **reportable_calls_filter(),
+                }},
+                {"$group": {"_id": "$lead_id", "last": {"$max": "$created_at"}}},
+            ]):
+                if row.get("_id") and row.get("last"):
+                    lead_last_call[row["_id"]] = row["last"]
+        for l in items:
+            if l.get("follow_up_at") and l["follow_up_at"] < now_iso_cmp:
+                aging["overdue_followup"] += 1
+            last = lead_last_call.get(l["id"])
+            created = l.get("created_at")
+            ref = last or created
+            ref_d = ist_date(ref)
+            if not ref_d:
+                continue
+            age_days = (today - date.fromisoformat(ref_d)).days
+            if age_days >= 14:
+                aging["no_call_14d"] += 1
+            elif age_days >= 7:
+                aging["no_call_7d"] += 1
+            elif age_days >= 3:
+                aging["no_call_3d"] += 1
+
+    async for l in db.leads.find(
+        {**lq, "status": "active"},
+        {"_id": 0, "id": 1, "follow_up_at": 1, "created_at": 1},
+    ):
+        chunk.append(l)
+        if len(chunk) >= CHUNK:
+            await _flush_aging_chunk(chunk)
+            chunk = []
+            await asyncio.sleep(0)
+    await _flush_aging_chunk(chunk)
     aging_sla = [
         {"bucket": "Overdue follow-ups", "count": aging["overdue_followup"]},
         {"bucket": "No call 3–6 days", "count": aging["no_call_3d"]},
@@ -486,19 +540,152 @@ def _created_at_clause(from_d, to_d):
     return {"created_at": clause}
 
 
+def _lead_attr_filters_active(
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+) -> bool:
+    return bool(status or source or stage or disposition or assignment_status or assigned_to)
+
+
+def _apply_lead_attr_filters(
+    lq: dict,
+    *,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    is_own: bool = False,
+    principal_id: Optional[str] = None,
+    apply_assignment: bool = True,
+) -> dict:
+    """Apply dashboard-parity lead attribute filters onto a Mongo match dict."""
+    statuses = csv_list(status)
+    sources = csv_list(source)
+    stages = csv_list(stage)
+    dispositions_f = csv_list(disposition)
+
+    if apply_assignment:
+        if is_own and principal_id:
+            lq["assigned_to"] = principal_id
+        else:
+            if assigned_to:
+                lq["assigned_to"] = assigned_to
+            elif assignment_status == "unassigned":
+                lq["assigned_to"] = None
+            elif assignment_status == "assigned":
+                lq["assigned_to"] = {"$ne": None}
+
+    if statuses:
+        lq["status"] = {"$in": statuses} if len(statuses) > 1 else statuses[0]
+    if sources:
+        lq["source"] = {"$in": sources} if len(sources) > 1 else sources[0]
+    if stages:
+        lq["pipeline_stage"] = {"$in": stages} if len(stages) > 1 else stages[0]
+    if dispositions_f:
+        if "__none__" in dispositions_f and len(dispositions_f) == 1:
+            lq["disposition_name"] = None
+        elif "__none__" in dispositions_f:
+            others = [d for d in dispositions_f if d != "__none__"]
+            lq["$or"] = [{"disposition_name": None}, {"disposition_name": {"$in": others}}]
+        else:
+            lq["disposition_name"] = (
+                {"$in": dispositions_f} if len(dispositions_f) > 1 else dispositions_f[0]
+            )
+    return lq
+
+
+def _lead_lookup_match(
+    *,
+    date_q: dict,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
+    is_own: bool = False,
+    principal_id: Optional[str] = None,
+    apply_assignment: bool = True,
+) -> dict:
+    lead_match = {
+        "$expr": {"$eq": ["$id", "$$lid"]},
+        "companyId": COMPANY_ID,
+        **date_q,
+    }
+    _apply_lead_attr_filters(
+        lead_match,
+        status=status,
+        source=source,
+        stage=stage,
+        disposition=disposition,
+        assignment_status=assignment_status,
+        assigned_to=assigned_to,
+        is_own=is_own,
+        principal_id=principal_id,
+        apply_assignment=apply_assignment,
+    )
+    return lead_match
+
+
+def _agg_calls_by_disposition(match_q: dict, lead_match: Optional[dict] = None):
+    """Aggregate calls by disposition/outcome; optionally restrict via lead $lookup."""
+    pipeline = [{"$match": match_q}]
+    if lead_match is not None:
+        pipeline.extend([
+            {"$lookup": {
+                "from": "leads",
+                "let": {"lid": "$lead_id"},
+                "pipeline": [
+                    {"$match": lead_match},
+                    {"$project": {"_id": 1}},
+                    {"$limit": 1},
+                ],
+                "as": "_lead",
+            }},
+            {"$match": {"_lead.0": {"$exists": True}}},
+        ])
+    pipeline.append({
+        "$group": {
+            "_id": {
+                "disposition_name": {"$ifNull": ["$disposition_name", "Unknown"]},
+                "outcome": "$outcome",
+            },
+            "n": {"$sum": 1},
+        },
+    })
+    return db.calls.aggregate(pipeline)
+
+
 @router.get("/reports/caller")
 async def caller_report(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     assigned_to: Optional[str] = None,
+    status: Optional[str] = None,
+    source: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
     principal: dict = Depends(require("reports:view")),
 ):
     from_d, to_d = _report_date_range(from_date, to_date)
     date_q = _created_at_clause(from_d, to_d)
     scope = await scope_filter(principal, "agent_id")
+    is_own = principal.get("data_scope") == "OWN"
+    lead_attrs_on = _lead_attr_filters_active(
+        status, source, stage, disposition, assignment_status, None,
+    )
     agents = await db.users.find({"companyId": COMPANY_ID, "user_type": "caller"}, {"_id": 0}).to_list(500)
     if assigned_to:
         agents = [a for a in agents if a["id"] == assigned_to]
+    if is_own:
+        agents = [a for a in agents if a["id"] == principal["id"]]
     disp_meta = {
         d["name"]: d
         for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
@@ -506,18 +693,36 @@ async def caller_report(
     rows = []
     for a in agents:
         aq = {"companyId": COMPANY_ID, "agent_id": a["id"], **reportable_calls_filter(), **date_q}
-        calls_list = await db.calls.find(aq, {"_id": 0, "disposition_name": 1, "outcome": 1}).to_list(50000)
-        calls = len(calls_list)
-        connected = sum(1 for c in calls_list if c.get("outcome") == "connected")
+        lead_match = None
+        if lead_attrs_on:
+            lead_match = _lead_lookup_match(
+                date_q=date_q,
+                status=status,
+                source=source,
+                stage=stage,
+                disposition=disposition,
+                assignment_status=assignment_status,
+                apply_assignment=True,
+            )
+            # Per-agent rows already imply assignment to this agent
+            if assignment_status != "unassigned":
+                lead_match["assigned_to"] = a["id"]
+        # Aggregate disposition/outcome counts instead of loading up to 50k call docs
         disp_counts = {}
-        for c in calls_list:
-            dn = c.get("disposition_name") or "Unknown"
-            disp_counts[dn] = disp_counts.get(dn, 0) + 1
+        connected = 0
+        calls = 0
+        async for row in _agg_calls_by_disposition(aq, lead_match):
+            n = int(row.get("n") or 0)
+            calls += n
+            key = row["_id"] or {}
+            dn = key.get("disposition_name") or "Unknown"
+            disp_counts[dn] = disp_counts.get(dn, 0) + n
+            if key.get("outcome") == "connected":
+                connected += n
         top_disp = max(disp_counts.items(), key=lambda x: x[1])[0] if disp_counts else None
         converted_disp_calls = sum(
-            1 for c in calls_list
-            if c.get("disposition_name") == "Converted"
-            or (c.get("disposition_name") and disp_meta.get(c["disposition_name"], {}).get("converts_to_client"))
+            n for dn, n in disp_counts.items()
+            if dn == "Converted" or (dn and disp_meta.get(dn, {}).get("converts_to_client"))
         )
         sales = sales_disp_counts(disp_counts)
         interested = sales["interested"]
@@ -525,8 +730,21 @@ async def caller_report(
         deposite = sales["deposite"]
         conversion_ratio = round((deposite / calls * 100) if calls else 0, 1)
         lq = {"companyId": COMPANY_ID, "assigned_to": a["id"], **date_q}
-        leads = await db.leads.count_documents(lq)
-        converted = await db.leads.count_documents({**lq, "is_client": True})
+        _apply_lead_attr_filters(
+            lq,
+            status=status,
+            source=source,
+            stage=stage,
+            disposition=disposition,
+            assignment_status=assignment_status,
+            apply_assignment=False,
+        )
+        if assignment_status == "unassigned":
+            leads = 0
+            converted = 0
+        else:
+            leads = await db.leads.count_documents(lq)
+            converted = await db.leads.count_documents({**lq, "is_client": True})
         rows.append({
             "agent_id": a["id"],
             "name": a["name"],
@@ -613,19 +831,33 @@ async def affiliate_report(
         q["id"] = principal["id"]
     elif principal.get("data_scope") != "ALL":
         return empty
-    affs = await db.users.find(q, {"_id": 0}).to_list(500)
+    affs = await db.users.find(q, {"_id": 0, "id": 1, "name": 1}).to_list(500)
     rows = []
     for a in affs:
         cq = {"companyId": COMPANY_ID, "affiliate_id": a["id"], **live_client_filter(), **date_q}
-        clients = await db.clients.find(cq, {"_id": 0}).to_list(5000)
-        ftd = sum(1 for c in clients if c.get("ftd_at") and (not from_d and not to_d or in_range(c.get("ftd_at"), from_d, to_d)))
-        deposits = round(sum(c.get("balance", 0) for c in clients), 2)
+        clients_n = await db.clients.count_documents(cq)
+        bal_rows = await db.clients.aggregate([
+            {"$match": cq},
+            {"$group": {"_id": None, "total": {"$sum": {"$ifNull": ["$balance", 0]}}}},
+        ]).to_list(1)
+        deposits = round(float(bal_rows[0]["total"]), 2) if bal_rows else 0.0
+        ftd_q = {**cq, "ftd_at": {"$ne": None}}
+        if from_d or to_d:
+            flo, fhi = date_bounds_iso(from_d, to_d)
+            ftd_q["ftd_at"] = {"$ne": None}
+            if flo or fhi:
+                ftd_q["ftd_at"] = {}
+                if flo:
+                    ftd_q["ftd_at"]["$gte"] = flo
+                if fhi:
+                    ftd_q["ftd_at"]["$lte"] = fhi
+        ftd = await db.clients.count_documents(ftd_q)
         rows.append({
             "affiliate_id": a["id"],
             "name": a["name"],
-            "clients": len(clients),
+            "clients": clients_n,
             "ftd": ftd,
-            "ftd_rate": round((ftd / len(clients) * 100) if clients else 0, 1),
+            "ftd_rate": round((ftd / clients_n * 100) if clients_n else 0, 1),
             "total_balance": deposits,
         })
     rows.sort(key=lambda x: (-x["ftd"], -x["clients"]))
@@ -651,72 +883,102 @@ async def company_report(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
     source: Optional[str] = None,
+    status: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
+    assigned_to: Optional[str] = None,
     principal: dict = Depends(require("reports:view")),
 ):
     from_d, to_d = _report_date_range(from_date, to_date)
     date_q = _created_at_clause(from_d, to_d)
+    is_own = principal.get("data_scope") == "OWN"
     q = {"companyId": COMPANY_ID, **date_q}
-    if source:
-        q["source"] = source
-    sources = {}
-    async for l in db.leads.find(q, {"_id": 0, "source": 1, "is_client": 1}):
-        s = l.get("source") or "Unknown"
-        if s not in sources:
-            sources[s] = {"source": s, "leads": 0, "conversions": 0}
-        sources[s]["leads"] += 1
-        if l.get("is_client"):
-            sources[s]["conversions"] += 1
-    for s in sources.values():
-        s["conversion_rate"] = round((s["conversions"] / s["leads"] * 100) if s["leads"] else 0, 1)
-    rows = sorted(sources.values(), key=lambda x: -x["leads"])
+    _apply_lead_attr_filters(
+        q,
+        status=status,
+        source=source,
+        stage=stage,
+        disposition=disposition,
+        assignment_status=assignment_status,
+        assigned_to=assigned_to,
+        is_own=is_own,
+        principal_id=principal.get("id"),
+    )
+    source_rows = await _agg_groups(
+        db.leads, q, {"$ifNull": ["$source", "Unknown"]},
+        extra={"conversions": {"$sum": {"$cond": [{"$eq": ["$is_client", True]}, 1, 0]}}},
+    )
+    rows = []
+    for r in source_rows:
+        leads_n = r["count"]
+        conv_n = r.get("conversions") or 0
+        rows.append({
+            "source": r["_id"],
+            "leads": leads_n,
+            "conversions": conv_n,
+            "conversion_rate": round((conv_n / leads_n * 100) if leads_n else 0, 1),
+        })
+    rows.sort(key=lambda x: -x["leads"])
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
 
     cq = {"companyId": COMPANY_ID, **reportable_calls_filter(), **date_q}
-    if source:
-        # Limit calls to leads matching source when filter set
-        lead_ids = [
-            l["id"] for l in await db.leads.find(
-                {"companyId": COMPANY_ID, "source": source, **date_q},
-                {"_id": 0, "id": 1},
-            ).to_list(20000)
-        ]
-        if lead_ids:
-            cq["lead_id"] = {"$in": lead_ids}
-        else:
-            cq["lead_id"] = "__none__"
+    if is_own:
+        cq["agent_id"] = principal["id"]
+    elif assigned_to:
+        cq["agent_id"] = assigned_to
     disp_meta = {
         d["name"]: d
         for d in await db.dispositions.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)
     }
-    call_docs = await db.calls.find(cq, {"_id": 0, "disposition_name": 1, "outcome": 1}).to_list(50000)
-    disp_counts = {}
+    # per disposition: count + connected via aggregation (no 50k doc materialization)
+    per_disp = {}
     connected = 0
     converted_responses = 0
-    for c in call_docs:
-        dn = c.get("disposition_name") or "Unknown"
-        disp_counts[dn] = disp_counts.get(dn, 0) + 1
-        if c.get("outcome") == "connected":
-            connected += 1
+    responses_logged = 0
+
+    lead_attrs_on = _lead_attr_filters_active(
+        status, source, stage, disposition, assignment_status, assigned_to if not is_own else None,
+    )
+    lead_match = None
+    if lead_attrs_on:
+        lead_match = _lead_lookup_match(
+            date_q=date_q,
+            status=status,
+            source=source,
+            stage=stage,
+            disposition=disposition,
+            assignment_status=assignment_status,
+            assigned_to=assigned_to,
+            is_own=is_own,
+            principal_id=principal.get("id"),
+        )
+    agg_cursor = _agg_calls_by_disposition(cq, lead_match)
+
+    async for row in agg_cursor:
+        n = int(row.get("n") or 0)
+        responses_logged += n
+        key = row["_id"] or {}
+        dn = key.get("disposition_name") or "Unknown"
+        bucket = per_disp.setdefault(dn, {"count": 0, "connected": 0})
+        bucket["count"] += n
+        if key.get("outcome") == "connected":
+            bucket["connected"] += n
+            connected += n
         if dn == "Converted" or disp_meta.get(dn, {}).get("converts_to_client"):
-            converted_responses += 1
-    responses_logged = len(call_docs)
+            converted_responses += n
     disposition_breakdown = [
         {
             "name": k,
-            "count": v,
-            "pct": round((v / responses_logged * 100) if responses_logged else 0, 1),
-            "connected": sum(
-                1 for c in call_docs
-                if (c.get("disposition_name") or "Unknown") == k and c.get("outcome") == "connected"
-            ),
-            "conversions": sum(
-                1 for c in call_docs
-                if (c.get("disposition_name") or "Unknown") == k
-                and (k == "Converted" or disp_meta.get(k, {}).get("converts_to_client"))
+            "count": v["count"],
+            "pct": round((v["count"] / responses_logged * 100) if responses_logged else 0, 1),
+            "connected": v["connected"],
+            "conversions": (
+                v["count"] if (k == "Converted" or disp_meta.get(k, {}).get("converts_to_client")) else 0
             ),
         }
-        for k, v in sorted(disp_counts.items(), key=lambda x: -x[1])
+        for k, v in sorted(per_disp.items(), key=lambda x: -x[1]["count"])
     ]
     summary = {
         "total_leads": total_leads,
@@ -739,6 +1001,7 @@ async def company_report(
 
 
 def _csv_response(rows, fieldnames, filename):
+    """Sync CSV for small in-memory row lists (report summaries)."""
     buf = io.StringIO()
     w = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
     w.writeheader()
@@ -749,6 +1012,33 @@ def _csv_response(rows, fieldnames, filename):
                              headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 
+async def _csv_stream_from_cursor(cursor, fieldnames, filename, row_map=None, max_rows: int = 50000):
+    """Stream CSV rows from an async Mongo cursor without materializing the full list."""
+    async def gen():
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+        n = 0
+        async for doc in cursor:
+            row = row_map(doc) if row_map else doc
+            w.writerow(row)
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+            n += 1
+            if n >= max_rows:
+                break
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 @router.get("/reports/export")
 async def export_report(
     kind: str = Query("caller"),
@@ -756,11 +1046,23 @@ async def export_report(
     to_date: Optional[str] = Query(None, alias="to"),
     assigned_to: Optional[str] = None,
     source: Optional[str] = None,
+    status: Optional[str] = None,
+    stage: Optional[str] = None,
+    disposition: Optional[str] = None,
+    assignment_status: Optional[str] = None,
     principal: dict = Depends(require("reports:export")),
 ):
     if kind == "caller":
         data = (await caller_report(
-            from_date=from_date, to_date=to_date, assigned_to=assigned_to, principal=principal
+            from_date=from_date,
+            to_date=to_date,
+            assigned_to=assigned_to,
+            status=status,
+            source=source,
+            stage=stage,
+            disposition=disposition,
+            assignment_status=assignment_status,
+            principal=principal,
         ))["rows"]
         return _csv_response(
             data,
@@ -773,7 +1075,15 @@ async def export_report(
             data, ["name", "clients", "ftd", "ftd_rate", "total_balance"], "affiliate_report.csv"
         )
     data = (await company_report(
-        from_date=from_date, to_date=to_date, source=source, principal=principal
+        from_date=from_date,
+        to_date=to_date,
+        source=source,
+        status=status,
+        stage=stage,
+        disposition=disposition,
+        assignment_status=assignment_status,
+        assigned_to=assigned_to,
+        principal=principal,
     ))["rows"]
     return _csv_response(data, ["source", "leads", "conversions", "conversion_rate"], "company_report.csv")
 
@@ -805,28 +1115,40 @@ async def export_calls(
             q["created_at"]["$gte"] = lo
         if hi:
             q["created_at"]["$lte"] = hi
-    calls = await db.calls.find(q, {"_id": 0}).sort("created_at", -1).to_list(50000)
-    return _csv_response(calls, ["created_at", "agent_name", "lead_name", "lead_phone",
-                                 "disposition_name", "outcome", "duration", "notes"], "call_history.csv")
+    fields = ["created_at", "agent_name", "lead_name", "lead_phone",
+              "disposition_name", "outcome", "duration", "notes"]
+    proj = {"_id": 0, **{f: 1 for f in fields}}
+    cursor = db.calls.find(q, proj).sort("created_at", -1)
+    return await _csv_stream_from_cursor(cursor, fields, "call_history.csv")
 
 
 @router.get("/ledger/export")
 async def export_ledger(principal: dict = Depends(require("ledger:export"))):
     cfilter = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
-    client_ids = [c["id"] for c in await db.clients.find(cfilter, {"_id": 0, "id": 1}).to_list(5000)]
-    cmap = {c["id"]: c["name"] for c in await db.clients.find(cfilter, {"_id": 0}).to_list(5000)}
-    entries = await db.ledger.find(
-        {"client_id": {"$in": client_ids}, **live_ledger_filter()}, {"_id": 0},
-    ).sort("created_at", -1).to_list(50000)
-    for e in entries:
-        e["client_name"] = cmap.get(e["client_id"])
-    return _csv_response(entries, ["created_at", "client_name", "type", "amount",
-                                   "balance_after", "category", "description", "created_by_name"], "ledger.csv")
+    clients = await db.clients.find(cfilter, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    client_ids = [c["id"] for c in clients]
+    cmap = {c["id"]: c["name"] for c in clients}
+    fields = ["created_at", "client_name", "type", "amount",
+              "balance_after", "category", "description", "created_by_name"]
+    proj = {"_id": 0, "client_id": 1, "created_at": 1, "type": 1, "amount": 1,
+            "balance_after": 1, "category": 1, "description": 1, "created_by_name": 1}
+    cursor = db.ledger.find(
+        {"client_id": {"$in": client_ids}, **live_ledger_filter()}, proj,
+    ).sort("created_at", -1)
+
+    def row_map(e):
+        out = {k: e.get(k) for k in fields if k != "client_name"}
+        out["client_name"] = cmap.get(e.get("client_id"))
+        return out
+
+    return await _csv_stream_from_cursor(cursor, fields, "ledger.csv", row_map=row_map)
 
 
 @router.get("/audit")
 async def audit_log(search: Optional[str] = None, page: int = 1, page_size: int = 40,
                     principal: dict = Depends(require("audit:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 40)
     q = {"companyId": COMPANY_ID}
     if search:
         safe = escape_regex(search)

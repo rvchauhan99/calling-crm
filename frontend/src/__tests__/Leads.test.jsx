@@ -221,4 +221,50 @@ describe("Leads role visibility", () => {
       expect(screen.getByText("Agent: Joslin")).toBeInTheDocument()
     })
   })
+
+  it("shows Updating overlay while refetching leads", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      dataScope: "OWN",
+      user: { id: "agent-1", user_type: "caller" },
+    })
+    __setMockSearchParams(new URLSearchParams())
+
+    let resolveSecond
+    let callCount = 0
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/leads?")) {
+        callCount += 1
+        if (callCount === 1) {
+          return Promise.resolve({ data: mockLeadsResponse })
+        }
+        return new Promise((resolve) => {
+          resolveSecond = () => resolve({ data: mockLeadsResponse })
+        })
+      }
+      if (url === "/leads/tab-counts") {
+        return Promise.resolve({ data: { unassigned: 0, assigned: 1 } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({ data: { stages: ["New"], dispositions: [] } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    const { rerender } = render(<Leads />)
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-row-lead-1")).toBeInTheDocument()
+    })
+
+    __setMockSearchParams(new URLSearchParams("status=active"))
+    rerender(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-results-overlay")).toBeInTheDocument()
+    })
+    resolveSecond()
+    await waitFor(() => {
+      expect(screen.queryByTestId("leads-results-overlay")).not.toBeInTheDocument()
+    })
+  })
 })

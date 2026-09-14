@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingOverlay } from "@/components/common"
 import { TablePagination } from "@/components/TablePagination"
 import { usePageParams } from "@/hooks/usePageParams"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
@@ -45,6 +45,7 @@ export default function Followups() {
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
   const filter = FILTERS.some((f) => f.id === params.get("bucket")) ? params.get("bucket") : "all"
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [dispositions, setDispositions] = useState([])
   const [acwId, setAcwId] = useState(null)
   const [active, setActive] = useState(null)
@@ -63,12 +64,17 @@ export default function Followups() {
   }, [])
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams()
-    p.set("page", String(page))
-    p.set("page_size", String(pageSize))
-    if (filter && filter !== "all") p.set("bucket", filter)
-    const { data: fu } = await api.get(`/followups?${p.toString()}`)
-    setData(fu)
+    setLoading(true)
+    try {
+      const p = new URLSearchParams()
+      p.set("page", String(page))
+      p.set("page_size", String(pageSize))
+      if (filter && filter !== "all") p.set("bucket", filter)
+      const { data: fu } = await api.get(`/followups?${p.toString()}`)
+      setData(fu)
+    } finally {
+      setLoading(false)
+    }
   }, [page, pageSize, filter])
 
   useEffect(() => { loadMeta().catch(() => {}) }, [loadMeta])
@@ -142,13 +148,29 @@ export default function Followups() {
     loadMeta()
   }
 
-  if (!data) return <PageLoader />
+  if (!data && loading) {
+    return (
+      <div data-testid="followups-page">
+        <PageHeader title="Follow-ups" subtitle="Scheduled callbacks" />
+        <PageLoader />
+      </div>
+    )
+  }
+  if (!data) {
+    return (
+      <div data-testid="followups-page">
+        <PageHeader title="Follow-ups" subtitle="Unable to load" />
+      </div>
+    )
+  }
 
   const list = data.followups || []
   const total = Number(data.total) || 0
 
   return (
-    <div data-testid="followups-page">
+    <div data-testid="followups-page" className="relative">
+      {loading && <LoadingOverlay testId="followups-loading-overlay" />}
+      <div className={cn(loading && "pointer-events-none opacity-60")}>
       <PageHeader
         title="Follow-ups"
         subtitle={`${total} scheduled callbacks`}
@@ -265,6 +287,7 @@ export default function Followups() {
         onPageChange={setPage}
         onPageSizeChange={setPageSize}
       />
+      </div>
 
       <Dialog open={!!active} onOpenChange={(o) => !o && setActive(null)}>
         <DialogContent className="bg-white" data-testid="log-call-dialog">

@@ -117,7 +117,12 @@ describe("Reports page", () => {
       }
       if (url === "/dashboard/filter-options") {
         return Promise.resolve({
-          data: { agents: [{ id: "a1", name: "Rohan" }], sources: ["Manual"] },
+          data: {
+            agents: [{ id: "a1", name: "Rohan" }],
+            sources: ["Manual"],
+            stages: ["New"],
+            dispositions: [{ id: "d1", name: "Interested" }],
+          },
         })
       }
       return Promise.resolve({ data: {} })
@@ -128,6 +133,7 @@ describe("Reports page", () => {
     useAuth.mockReturnValue({
       can: (p) => p === "reports:export",
       user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
     })
 
     render(<Reports />)
@@ -146,6 +152,7 @@ describe("Reports page", () => {
     useAuth.mockReturnValue({
       can: () => false,
       user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
     })
 
     render(<Reports />)
@@ -174,6 +181,7 @@ describe("Reports page", () => {
     useAuth.mockReturnValue({
       can: () => false,
       user: { id: "aff-1", user_type: "affiliate" },
+      dataScope: "OWN",
     })
 
     render(<Reports />)
@@ -192,6 +200,7 @@ describe("Reports page", () => {
     useAuth.mockReturnValue({
       can: () => false,
       user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
     })
 
     render(<Reports />)
@@ -209,5 +218,48 @@ describe("Reports page", () => {
       const calls = api.get.mock.calls.map((c) => c[0])
       expect(calls.some((u) => typeof u === "string" && u.includes("/reports/caller?") && u.includes("from="))).toBe(true)
     })
+  })
+
+  it("renders Leads-parity filters and keeps Today preset after Apply", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
+    })
+
+    render(<Reports />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("reports-filters")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("filter-status")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-stage")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-source")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-assignment")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-agent")).toBeInTheDocument()
+
+    await act(async () => {
+      screen.getByTestId("reports-apply").click()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("preset-today").className).toMatch(/bg-sky-500/)
+    })
+  })
+
+  it("hides lead filters for affiliate users (date-only)", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      user: { id: "aff-1", user_type: "affiliate" },
+      dataScope: "OWN",
+    })
+
+    render(<Reports />)
+    await waitFor(() => {
+      expect(screen.getByTestId("filter-from")).toBeInTheDocument()
+      expect(screen.getByTestId("affiliate-kpis")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("filter-status")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("filter-agent")).not.toBeInTheDocument()
   })
 })

@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { API, getToken } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, TableSkeleton, StatusPill, LoadingRegion } from "@/components/common"
 import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
@@ -17,12 +17,15 @@ import {
 } from "@/components/ui/table"
 import { History, Search, Download } from "lucide-react"
 import { monthStartISO, todayISO } from "@/components/dashboard/atoms"
+import { matchDatePresetId } from "@/components/filters/datePresets"
+import { cn } from "@/lib/utils"
 
 export default function CallHistory() {
   const { can, dataScope } = useAuth()
   const isOwnScope = dataScope === "OWN"
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [dispositions, setDispositions] = useState([])
   const [agents, setAgents] = useState([])
   const [lead360Id, setLead360Id] = useState(null)
@@ -54,17 +57,22 @@ export default function CallHistory() {
   }
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams()
-    if (search) p.set("search", search)
-    if (disposition) p.set("disposition", disposition)
-    if (!isOwnScope && agentId) p.set("agent_id", agentId)
-    if (from) p.set("from", from)
-    if (to) p.set("to", to)
-    if (sort) p.set("sort", sort)
-    p.set("page", page)
-    p.set("page_size", pageSize)
-    const { data: d } = await api.get(`/call-history?${p.toString()}`)
-    setData(d)
+    setLoading(true)
+    try {
+      const p = new URLSearchParams()
+      if (search) p.set("search", search)
+      if (disposition) p.set("disposition", disposition)
+      if (!isOwnScope && agentId) p.set("agent_id", agentId)
+      if (from) p.set("from", from)
+      if (to) p.set("to", to)
+      if (sort) p.set("sort", sort)
+      p.set("page", page)
+      p.set("page_size", pageSize)
+      const { data: d } = await api.get(`/call-history?${p.toString()}`)
+      setData(d)
+    } finally {
+      setLoading(false)
+    }
   }, [search, disposition, agentId, from, to, sort, page, pageSize, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -108,6 +116,8 @@ export default function CallHistory() {
     }
     return list
   }, [search, disposition, agentId, from, to, sort, isOwnScope, agents, setParam])
+
+  const isMonthPreset = matchDatePresetId(from, to) === "month"
 
   return (
     <div data-testid="call-history-page">
@@ -188,9 +198,9 @@ export default function CallHistory() {
             <FilterField label=" " className="w-auto">
               <Button
                 type="button"
-                variant="outline"
+                variant={isMonthPreset ? "default" : "outline"}
                 size="sm"
-                className="h-8"
+                className={cn("h-8", isMonthPreset && "bg-sky-500 hover:bg-sky-600")}
                 onClick={() => {
                   setParam("from", monthStartISO())
                   setParam("to", todayISO())
@@ -207,8 +217,8 @@ export default function CallHistory() {
       />
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {!data ? <div className="p-4"><TableSkeleton /></div> :
-          data.calls.length === 0 ? (
+        <LoadingRegion loading={loading} hasData={!!data} testId="call-history-results" skeleton={<TableSkeleton />}>
+          {data && (data.calls.length === 0 ? (
             <EmptyState icon={History} title="No call activity" description="Logged calls will appear here." testid="calls-empty" />
           ) : (
             <Table>
@@ -240,7 +250,8 @@ export default function CallHistory() {
                 ))}
               </TableBody>
             </Table>
-          )}
+          ))}
+        </LoadingRegion>
       </div>
 
       {data && (

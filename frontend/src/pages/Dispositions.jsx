@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -32,13 +32,19 @@ const empty = {
 export default function Dispositions() {
   const { can } = useAuth()
   const [list, setList] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [show, setShow] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(empty)
 
   const load = useCallback(async () => {
-    const { data } = await api.get("/dispositions")
+    setLoading(true)
+    try {const { data } = await api.get("/dispositions")
     setList(data.dispositions)
+  
+    } finally {
+      setLoading(false)
+    }
   }, [])
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -83,7 +89,15 @@ export default function Dispositions() {
     load()
   }
 
-  if (!list) return <PageLoader />
+  
+
+  if (list === null) {
+    return (
+      <div data-testid="dispositions-page">
+        <PageLoader />
+      </div>
+    )
+  }
 
   return (
     <div data-testid="dispositions-page">
@@ -98,6 +112,7 @@ export default function Dispositions() {
       />
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <LoadingRegion loading={loading} hasData={true} testId="dispositions-page-results">
         {list.length === 0 ? (
           <EmptyState icon={ListChecks} title="No dispositions" description="Create call outcome slots agents can select." testid="disp-empty" />
         ) : (
@@ -170,6 +185,7 @@ export default function Dispositions() {
             </TableBody>
           </Table>
         )}
+        </LoadingRegion>
       </div>
 
       <Dialog open={show} onOpenChange={setShow}>

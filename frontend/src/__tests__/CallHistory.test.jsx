@@ -58,6 +58,19 @@ describe("CallHistory filters", () => {
     expect(screen.getByText("Disposition")).toBeInTheDocument()
   })
 
+  it("highlights This month when range matches month preset", async () => {
+    const { monthStartISO, todayISO } = require("@/components/dashboard/atoms")
+    __setMockSearchParams(new URLSearchParams({
+      from: monthStartISO(),
+      to: todayISO(),
+    }))
+    render(<CallHistory />)
+    await waitFor(() => {
+      expect(screen.getByTestId("call-preset-month")).toBeInTheDocument()
+    })
+    expect(screen.getByTestId("call-preset-month").className).toMatch(/bg-sky-500/)
+  })
+
   it("opens lead 360 when phone is clicked", async () => {
     const user = userEvent.setup()
     api.get.mockImplementation((url) => {

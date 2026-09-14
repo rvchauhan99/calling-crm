@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { API, getToken, formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, TableSkeleton, StatusPill, LoadingRegion } from "@/components/common"
 import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination"
 import { AutoAssignDialog } from "@/components/leads/AutoAssignDialog"
 import { LeadImportDialog } from "@/components/leads/LeadImportDialog"
@@ -43,6 +43,7 @@ export default function Leads() {
   const isOwnScope = dataScope === "OWN"
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [tabCounts, setTabCounts] = useState(null)
   const [filterOptions, setFilterOptions] = useState(null)
   const [selected, setSelected] = useState([])
@@ -113,24 +114,29 @@ export default function Leads() {
   }, [])
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams()
-    if (search) p.set("search", search)
-    if (status) p.set("status", status)
-    if (stage) p.set("stage", stage)
-    if (source) p.set("source", source)
-    if (disposition) p.set("disposition", disposition)
-    if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
-    if (sort && sort !== "created_at_desc") p.set("sort", sort)
-    else if (sort) p.set("sort", sort)
-    if (!isOwnScope) {
-      p.set("assignment_status", tab === "assigned" ? "assigned" : "unassigned")
+    setLoading(true)
+    try {
+      const p = new URLSearchParams()
+      if (search) p.set("search", search)
+      if (status) p.set("status", status)
+      if (stage) p.set("stage", stage)
+      if (source) p.set("source", source)
+      if (disposition) p.set("disposition", disposition)
+      if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
+      if (sort && sort !== "created_at_desc") p.set("sort", sort)
+      else if (sort) p.set("sort", sort)
+      if (!isOwnScope) {
+        p.set("assignment_status", tab === "assigned" ? "assigned" : "unassigned")
+      }
+      p.set("page", page)
+      p.set("page_size", pageSize)
+      const { data: listData } = await api.get(`/leads?${p.toString()}`)
+      setData(listData)
+      setSelected([])
+      loadCounts()
+    } finally {
+      setLoading(false)
     }
-    p.set("page", page)
-    p.set("page_size", pageSize)
-    const { data: listData } = await api.get(`/leads?${p.toString()}`)
-    setData(listData)
-    setSelected([])
-    loadCounts()
   }, [search, status, stage, source, disposition, assignedTo, sort, tab, page, pageSize, loadCounts, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -406,8 +412,13 @@ export default function Leads() {
       />
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {!data ? <div className="p-4"><TableSkeleton /></div> :
-          data.leads.length === 0 ? (
+        <LoadingRegion
+          loading={loading}
+          hasData={!!data}
+          testId="leads-results"
+          skeleton={<TableSkeleton />}
+        >
+          {data && (data.leads.length === 0 ? (
             <EmptyState icon={Users} title="No leads found" description={emptyDescription} testid="leads-empty" />
           ) : (
             <Table>
@@ -460,7 +471,8 @@ export default function Leads() {
                 ))}
               </TableBody>
             </Table>
-          )}
+          ))}
+        </LoadingRegion>
       </div>
 
       {data && (

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion, LoadingOverlay } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -36,6 +36,7 @@ const emptyIvr = {
 export default function TelephonyNumbers() {
   const { can } = useAuth()
   const [list, setList] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [status, setStatus] = useState(null)
   const [show, setShow] = useState(false)
   const [editing, setEditing] = useState(null)
@@ -45,12 +46,17 @@ export default function TelephonyNumbers() {
   const [ivrForm, setIvrForm] = useState(emptyIvr)
 
   const load = useCallback(async () => {
-    const [nums, st] = await Promise.all([
-      api.get("/telephony/numbers"),
-      api.get("/telephony/status").catch(() => ({ data: null })),
-    ])
-    setList(nums.data.numbers)
-    setStatus(st.data)
+    setLoading(true)
+    try {
+      const [nums, st] = await Promise.all([
+        api.get("/telephony/numbers"),
+        api.get("/telephony/status").catch(() => ({ data: null })),
+      ])
+      setList(nums.data.numbers)
+      setStatus(st.data)
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
   useEffect(() => {
@@ -164,10 +170,21 @@ export default function TelephonyNumbers() {
     })
   }
 
-  if (list === null) return <PageLoader />
+  
+
+  if (list === null) {
+    return (
+      <div className="space-y-6" data-testid="telephony-numbers-page">
+        <PageHeader title="Phone Numbers" description="Virtual DIDs, default CLI, and single-level IVR routing." />
+        <PageLoader />
+      </div>
+    )
+  }
 
   return (
-    <div className="space-y-6" data-testid="telephony-numbers-page">
+    <div className="relative space-y-6" data-testid="telephony-numbers-page">
+      {loading && <LoadingOverlay testId="telephony-loading-overlay" />}
+      <div className={loading ? "pointer-events-none space-y-6 opacity-60" : "space-y-6"}>
       <PageHeader
         title="Phone Numbers"
         description="Virtual DIDs, default CLI, and single-level IVR routing."
@@ -374,6 +391,7 @@ export default function TelephonyNumbers() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      </div>
     </div>
   )
 }

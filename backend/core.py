@@ -14,8 +14,28 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 COMPANY_ID = os.environ.get("COMPANY_ID", "default")
 JWT_ALGORITHM = "HS256"
 
-client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=8000)
+client = AsyncIOMotorClient(
+    MONGO_URL,
+    serverSelectionTimeoutMS=8000,
+    maxPoolSize=20,
+    minPoolSize=0,
+    maxIdleTimeMS=30000,
+)
 db = client[DB_NAME]
+
+# Global list pagination ceiling (matches followups); prevents huge page_size OOM.
+PAGE_SIZE_MAX = 100
+
+
+def clamp_page_size(page_size: int, default: int = 25, *, max_size: int = PAGE_SIZE_MAX) -> int:
+    """Clamp page_size into [1, max_size]; invalid/missing falls back to default then clamp."""
+    try:
+        n = int(page_size)
+    except (TypeError, ValueError):
+        n = default
+    if n < 1:
+        n = default
+    return min(max_size, max(1, n))
 
 
 def now_utc():

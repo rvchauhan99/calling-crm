@@ -10,12 +10,29 @@ class TestAffiliateScope:
     def test_affiliate_sees_referred_clients(self, affiliate, admin):
         r = affiliate.get(f"{BASE_URL}/api/clients", timeout=60)
         assert r.status_code == 200, r.text
-        aff_total = r.json()["total"]
-        adm = admin.get(f"{BASE_URL}/api/clients?page_size=500", timeout=60).json()
-        referred = [c for c in adm["clients"] if c.get("affiliate_id") == affiliate.user["id"]]
+        body = r.json()
+        aff_total = body["total"]
         assert aff_total > 0, "Affiliate sees 0 clients"
-        assert aff_total == len(referred), (
-            f"Affiliate scope mismatch: sees {aff_total} of {len(referred)} referred clients")
+        for c in body["clients"]:
+            assert c.get("affiliate_id") == affiliate.user["id"], c
+        # Cross-check against admin inventory (paginate — may exceed one page)
+        referred = 0
+        page = 1
+        while True:
+            adm = admin.get(
+                f"{BASE_URL}/api/clients?page={page}&page_size=100", timeout=60,
+            ).json()
+            referred += sum(
+                1 for c in adm["clients"] if c.get("affiliate_id") == affiliate.user["id"]
+            )
+            if page * 100 >= adm["total"] or not adm["clients"]:
+                break
+            page += 1
+            if page > 50:
+                break
+        assert aff_total == referred, (
+            f"Affiliate scope mismatch: sees {aff_total} of {referred} referred clients"
+        )
 
     def test_affiliate_dashboard_non_zero(self, affiliate):
         r = affiliate.get(f"{BASE_URL}/api/dashboard", timeout=60)

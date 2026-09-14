@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit,
-                  live_client_filter, escape_regex)
+                  live_client_filter, escape_regex, clamp_page_size)
 from lead_sources import (
     list_lead_sources,
     source_names,
@@ -26,6 +26,50 @@ from routes_reports import IST, ist_today, ist_date, parse_date, date_bounds_iso
 router = APIRouter(prefix="/api", tags=["leads"])
 
 PIPELINE_STAGES = ["New", "Contacted", "Qualified", "Proposal", "Won", "Lost"]
+
+PIPELINE_BOARD_PROJECTION = {
+    "_id": 0,
+    "id": 1,
+    "name": 1,
+    "phone": 1,
+    "email": 1,
+    "source": 1,
+    "city": 1,
+    "pipeline_stage": 1,
+    "disposition_id": 1,
+    "disposition_name": 1,
+    "carry_forward": 1,
+    "assigned_to": 1,
+    "assigned_name": 1,
+    "follow_up_at": 1,
+    "last_notes": 1,
+    "last_notes_at": 1,
+    "is_client": 1,
+    "updated_at": 1,
+    "status": 1,
+}
+
+TODAY_CALLS_PROJECTION = {
+    "_id": 0,
+    "id": 1,
+    "name": 1,
+    "phone": 1,
+    "email": 1,
+    "source": 1,
+    "city": 1,
+    "pipeline_stage": 1,
+    "disposition_id": 1,
+    "disposition_name": 1,
+    "carry_forward": 1,
+    "assigned_to": 1,
+    "assigned_name": 1,
+    "assigned_date": 1,
+    "follow_up_at": 1,
+    "last_notes": 1,
+    "last_notes_at": 1,
+    "status": 1,
+    "is_client": 1,
+}
 
 
 # ---------------- Dispositions ----------------
@@ -300,15 +344,16 @@ async def _auto_assign_plan(
     (or the full pool) equally among callers with remaining quota.
     """
     from auto_assign import plan_equal_assignments, build_by_agent_from_allocations
+    from pymongo import UpdateOne
 
     agents = await db.users.find({"companyId": COMPANY_ID, "user_type": "caller", "active": True},
-                                 {"_id": 0}).to_list(100)
+                                 {"_id": 0, "id": 1, "name": 1, "daily_quota": 1}).to_list(100)
     if not agents:
         raise HTTPException(status_code=400, detail="No active callers")
     today = now_utc().date().isoformat()
     pool = await db.leads.find(
         {"companyId": COMPANY_ID, "status": "active", "is_client": False, "assigned_to": None},
-        {"_id": 0}).to_list(5000)
+        {"_id": 0, "id": 1}).to_list(5000)
     pool_size = len(pool)
     assigned_today_map = await _agent_assigned_today_map(agents, today)
     agents_by_id = {a["id"]: a for a in agents}
@@ -345,6 +390,7 @@ async def _auto_assign_plan(
     # Execute assignments in by_agent order (deterministic name/id sort)
     total_assigned = 0
     idx = 0
+    ops = []
     for row in by_agent:
         need = int(row["assigned"])
         got = 0
@@ -356,10 +402,18 @@ async def _auto_assign_plan(
             got += 1
             total_assigned += 1
             if not dry_run:
-                await db.leads.update_one({"id": lead["id"]}, {"$set": {
-                    "assigned_to": row["agent_id"], "assigned_name": row["agent_name"],
-                    "owner_id": row["agent_id"], "assigned_date": today}})
+                ops.append(UpdateOne(
+                    {"id": lead["id"]},
+                    {"$set": {
+                        "assigned_to": row["agent_id"], "assigned_name": row["agent_name"],
+                        "owner_id": row["agent_id"], "assigned_date": today,
+                    }},
+                ))
         row["assigned"] = got
+
+    if ops:
+        for i in range(0, len(ops), 500):
+            await db.leads.bulk_write(ops[i:i + 500], ordered=True)
 
     return {
         "assigned": total_assigned,
@@ -376,6 +430,8 @@ async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
                      source: Optional[str] = None, sort: Optional[str] = None,
                      page: int = 1, page_size: int = 25,
                      principal: dict = Depends(require("leads:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 25)
     q = await _scoped_leads_query(principal)
     skip_assignment = principal.get("data_scope") == "OWN"
     _apply_lead_filters(q, search=search, status=status, disposition=disposition,
@@ -638,7 +694,7 @@ async def today_calls(principal: dict = Depends(require("today_calls:view"))):
             {"assigned_date": today_s},
             {"follow_up_at": {"$ne": None, "$lte": upcoming_end.isoformat()}},
         ],
-    }, {"_id": 0}).to_list(5000)
+    }, TODAY_CALLS_PROJECTION).to_list(5000)
 
     buckets = {"overdue": [], "due_today": [], "assigned_today": [], "upcoming": []}
     seen = set()
@@ -744,19 +800,23 @@ async def today_calls(principal: dict = Depends(require("today_calls:view"))):
     )
 
     # Called today: unique leads this principal logged a call on (IST today). Not in flat `leads`.
-    today_calls_rows = []
-    for c in await db.calls.find(
-        {"companyId": COMPANY_ID, "agent_id": principal["id"]},
+    today_lo, today_hi = date_bounds_iso(today, today)
+    called_q = {"companyId": COMPANY_ID, "agent_id": principal["id"]}
+    if today_lo or today_hi:
+        called_q["created_at"] = {}
+        if today_lo:
+            called_q["created_at"]["$gte"] = today_lo
+        if today_hi:
+            called_q["created_at"]["$lte"] = today_hi
+    today_calls_rows = await db.calls.find(
+        called_q,
         {"_id": 0, "lead_id": 1, "created_at": 1},
-    ).to_list(100000):
-        if ist_date(c.get("created_at")) == today_s and c.get("lead_id"):
-            today_calls_rows.append(c)
-    today_calls_rows.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    ).sort("created_at", -1).to_list(5000)
     called_ids = []
     seen_called = set()
     for c in today_calls_rows:
-        lid = c["lead_id"]
-        if lid in seen_called:
+        lid = c.get("lead_id")
+        if not lid or lid in seen_called:
             continue
         seen_called.add(lid)
         called_ids.append(lid)
@@ -765,7 +825,7 @@ async def today_calls(principal: dict = Depends(require("today_calls:view"))):
     if called_ids:
         lead_docs = await db.leads.find(
             {"companyId": COMPANY_ID, "id": {"$in": called_ids[:500]}},
-            {"_id": 0},
+            TODAY_CALLS_PROJECTION,
         ).to_list(500)
         by_id = {l["id"]: l for l in lead_docs}
         for lid in called_ids[:500]:
@@ -951,6 +1011,8 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
                        sort: Optional[str] = None,
                        page: int = 1, page_size: int = 30,
                        principal: dict = Depends(require("call_history:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 30)
     from_d = parse_date(from_date)
     to_d = parse_date(to_date)
     if from_date and from_d is None:
@@ -998,7 +1060,7 @@ async def pipeline(search: Optional[str] = None, source: Optional[str] = None,
         q, search=search, source=source, disposition=disposition,
         assigned_to=assigned_to, skip_assignment_status=skip_assignment,
     )
-    leads = await db.leads.find(q, {"_id": 0}).sort("updated_at", -1).to_list(2000)
+    leads = await db.leads.find(q, PIPELINE_BOARD_PROJECTION).sort("updated_at", -1).to_list(2000)
     board = {s: [] for s in PIPELINE_STAGES}
     for l in leads:
         s = l.get("pipeline_stage") or "New"
@@ -1037,7 +1099,6 @@ async def move_stage(lid: str, body: StageIn, principal: dict = Depends(require(
 
 
 # ---------------- Follow-ups ----------------
-FOLLOWUP_PAGE_SIZE_MAX = 100
 FOLLOWUP_BUCKETS = {"all", "overdue", "today", "upcoming"}
 
 
@@ -1065,7 +1126,7 @@ def _followup_at_clause(bucket: Optional[str]) -> dict:
 async def followups(page: int = 1, page_size: int = 25, bucket: Optional[str] = None,
                     principal: dict = Depends(require("followups:view"))):
     page = max(1, page)
-    page_size = min(FOLLOWUP_PAGE_SIZE_MAX, max(1, page_size))
+    page_size = clamp_page_size(page_size, 25)
     q = {
         "companyId": COMPANY_ID,
         "follow_up_at": _followup_at_clause(bucket),

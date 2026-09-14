@@ -15,6 +15,8 @@ A task is **not complete** until all five steps pass:
 
 Never skip verification because the server “might not be running” — **start services**, fix blockers, and retry.
 
+**Also always apply:** `.cursor/rules/compulsory-post-implementation-testing.mdc` — test every *related* surface (not only the edited file), including browser MCP for UI-backed APIs.
+
 ## Local Mongo pytest — always run
 
 When backend `.env` points at **local** Mongo, **run pytest without asking** (see `no-data-without-permission`).

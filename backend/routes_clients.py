@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from core import (
     db, COMPANY_ID, require, scope_filter, client_scope_filter, new_id, now_iso, audit,
-    live_client_filter, live_ledger_filter, escape_regex,
+    live_client_filter, live_ledger_filter, escape_regex, clamp_page_size,
 )
 
 router = APIRouter(prefix="/api", tags=["clients"])
@@ -49,6 +49,8 @@ class NoteIn(BaseModel):
 async def list_clients(search: Optional[str] = None, status: Optional[str] = None,
                        page: int = 1, page_size: int = 25,
                        principal: dict = Depends(require("clients:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 25)
     q = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     if status in ("active", "inactive"):
         q["status"] = status
@@ -387,6 +389,8 @@ async def _recompute_balance(client_id: str) -> float:
 @router.get("/ledger")
 async def ledger_all(page: int = 1, page_size: int = 40,
                      principal: dict = Depends(require("ledger:view"))):
+    page = max(1, page)
+    page_size = clamp_page_size(page_size, 40)
     # scope by client ownership
     cfilter = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
     client_ids = [c["id"] for c in await db.clients.find(cfilter, {"_id": 0, "id": 1}).to_list(5000)]
@@ -394,12 +398,19 @@ async def ledger_all(page: int = 1, page_size: int = 40,
     total = await db.ledger.count_documents(q)
     skip = (page - 1) * page_size
     entries = await db.ledger.find(q, {"_id": 0}).sort("created_at", -1).skip(skip).limit(page_size).to_list(page_size)
-    cmap = {c["id"]: c["name"] for c in await db.clients.find(cfilter, {"_id": 0}).to_list(5000)}
+    cmap = {
+        c["id"]: c["name"]
+        for c in await db.clients.find(cfilter, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    }
     for e in entries:
         e["client_name"] = cmap.get(e["client_id"])
     totals = {"credit": 0.0, "debit": 0.0}
-    for e in await db.ledger.find(q, {"_id": 0, "type": 1, "amount": 1}).to_list(100000):
-        totals[e["type"]] = round(totals.get(e["type"], 0) + e["amount"], 2)
+    async for row in db.ledger.aggregate([
+        {"$match": q},
+        {"$group": {"_id": "$type", "total": {"$sum": "$amount"}}},
+    ]):
+        if row["_id"] in totals:
+            totals[row["_id"]] = round(float(row.get("total") or 0), 2)
     return {"entries": entries, "total": total, "page": page, "page_size": page_size, "totals": totals}
 
 

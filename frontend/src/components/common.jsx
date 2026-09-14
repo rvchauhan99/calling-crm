@@ -57,20 +57,77 @@ export function Spinner({ className }) {
   return <Loader2 className={cn("animate-spin text-sky-500", className)} size={20} />;
 }
 
-export function PageLoader() {
+export function PageLoader({ className, testId = "page-loader" }) {
   return (
-    <div className="flex h-64 items-center justify-center">
+    <div className={cn("flex h-64 items-center justify-center", className)} data-testid={testId}>
       <Spinner className="h-7 w-7" />
     </div>
   );
 }
 
-export function TableSkeleton({ rows = 6 }) {
+export function TableSkeleton({ rows = 6, testId = "table-skeleton" }) {
   return (
-    <div className="space-y-2">
+    <div className="space-y-2 p-4" data-testid={testId}>
       {Array.from({ length: rows }).map((_, i) => (
         <div key={i} className="h-11 w-full animate-pulse rounded bg-slate-100" />
       ))}
+    </div>
+  );
+}
+
+/** Soft overlay badge shown while refetching over stale content. */
+export function LoadingOverlay({ label = "Updating…", testId = "loading-overlay" }) {
+  return (
+    <div
+      className="absolute inset-0 z-10 flex items-start justify-center pt-8"
+      data-testid={testId}
+      aria-busy="true"
+      role="status"
+    >
+      <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-sm text-slate-600 shadow-sm">
+        <Spinner className="h-4 w-4" />
+        {label}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Results region: initial skeleton/PageLoader when no data; keep children + overlay on refetch.
+ * Pass skeleton={<TableSkeleton />} for tables, or omit to use PageLoader.
+ */
+export function LoadingRegion({
+  loading,
+  hasData,
+  testId = "loading-region",
+  children,
+  skeleton,
+  className,
+  overlayLabel = "Updating…",
+  overlayTestId,
+}) {
+  if (loading && !hasData) {
+    return (
+      <div data-testid={testId} className={className}>
+        {skeleton || <PageLoader />}
+      </div>
+    );
+  }
+
+  if (!hasData) return null;
+
+  return (
+    <div
+      className={cn("relative", loading && "pointer-events-none opacity-60", className)}
+      data-testid={testId}
+    >
+      {loading && (
+        <LoadingOverlay
+          label={overlayLabel}
+          testId={overlayTestId || `${testId}-overlay`}
+        />
+      )}
+      {children}
     </div>
   );
 }

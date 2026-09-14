@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import { useSearchParams } from "react-router-dom"
 import api from "@/lib/api"
-import { PageHeader, EmptyState, TableSkeleton, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, TableSkeleton, StatusPill, LoadingRegion } from "@/components/common"
 import { TablePagination } from "@/components/TablePagination"
 import { usePageParams } from "@/hooks/usePageParams"
 import { Input } from "@/components/ui/input"
@@ -19,6 +19,7 @@ const ACTION_COLORS = {
 export default function Audit() {
   const [params, setParams] = useSearchParams()
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const search = params.get("search") || ""
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
@@ -30,6 +31,7 @@ export default function Audit() {
   }
 
   const load = useCallback(async () => {
+    setLoading(true)
     const p = new URLSearchParams()
     if (search) p.set("search", search)
     p.set("page", page)
@@ -39,6 +41,8 @@ export default function Audit() {
       setData(res)
     } catch {
       setData({ logs: [], total: 0, page_size: pageSize })
+    } finally {
+      setLoading(false)
     }
   }, [search, page, pageSize])
   useEffect(() => { load() }, [load])
@@ -53,8 +57,8 @@ export default function Audit() {
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
-        {!data ? <div className="p-4"><TableSkeleton /></div> :
-          data.logs.length === 0 ? (
+        <LoadingRegion loading={loading} hasData={!!data} testId="audit-results" skeleton={<TableSkeleton />}>
+          {data && (data.logs.length === 0 ? (
             <EmptyState icon={FileSearch} title="No audit events" description="Logins, exports, role changes and ledger edits are recorded here." testid="audit-empty" />
           ) : (
             <Table>
@@ -76,7 +80,8 @@ export default function Audit() {
                 ))}
               </TableBody>
             </Table>
-          )}
+          ))}
+        </LoadingRegion>
       </div>
 
       {data && (

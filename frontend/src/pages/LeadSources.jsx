@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, EmptyState, PageLoader, StatusPill } from "@/components/common"
+import { PageHeader, EmptyState, PageLoader, StatusPill, LoadingRegion } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -25,13 +25,19 @@ const empty = {
 export default function LeadSources() {
   const { can } = useAuth()
   const [list, setList] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [show, setShow] = useState(false)
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState(empty)
 
   const load = useCallback(async () => {
-    const { data } = await api.get("/lead-sources")
+    setLoading(true)
+    try {const { data } = await api.get("/lead-sources")
     setList(data.lead_sources)
+  
+    } finally {
+      setLoading(false)
+    }
   }, [])
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -87,7 +93,15 @@ export default function LeadSources() {
     }
   }
 
-  if (!list) return <PageLoader />
+  
+
+  if (list === null) {
+    return (
+      <div data-testid="lead-sources-page">
+        <PageLoader />
+      </div>
+    )
+  }
 
   return (
     <div data-testid="lead-sources-page">
@@ -102,6 +116,7 @@ export default function LeadSources() {
       />
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+        <LoadingRegion loading={loading} hasData={true} testId="lead-sources-page-results">
         {list.length === 0 ? (
           <EmptyState
             icon={Share2}
@@ -172,6 +187,7 @@ export default function LeadSources() {
             </TableBody>
           </Table>
         )}
+        </LoadingRegion>
       </div>
 
       <Dialog open={show} onOpenChange={setShow}>

@@ -15,7 +15,7 @@ import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
 import routes_telephony
 from seed import seed
-from sheet_sync import sync_source
+from sheet_sync import sync_source, MIN_POLL_SECONDS
 from lead_import_jobs import start_lead_import_worker, stop_lead_import_worker
 from bind_port import listen_port
 
@@ -59,7 +59,7 @@ async def _sheet_poll_loop():
                     lock_until = _parse_iso(source.get("sync_lock_until"))
                     if lock_until and lock_until > now:
                         continue
-                poll = max(60, int(source.get("poll_seconds") or 120))
+                poll = max(MIN_POLL_SECONDS, int(source.get("poll_seconds") or 120))
                 last = _parse_iso(source.get("last_synced_at"))
                 if last and (now - last).total_seconds() < poll:
                     continue

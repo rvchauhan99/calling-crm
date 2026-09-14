@@ -1,0 +1,74 @@
+---
+description: Compulsory post-implementation testing — cover every related surface (API, RTL, browser MCP) before done
+alwaysApply: true
+---
+
+# Compulsory testing after every implementation — Calling CRM
+
+A change is **not done** until you have tested **all parts related to that implementation** (not only the file you edited).
+
+## Gate (must pass before "done")
+
+1. Map **related surfaces** — callers, callees, UI pages, reports, RBAC, background jobs, deploy config touched by the change
+2. Add/update automated tests for **new or changed behavior**
+3. Run the matching verification commands until green
+4. For any user-facing path: **browser MCP** on local frontend + API
+5. Final reply includes **Verification** (and **Browser verification** when UI is in scope)
+
+Do **not** mark todos complete, say "done", or hand off until this gate passes.
+
+## Related-surface checklist (pick what applies)
+
+| If you changed… | Also verify… |
+|-----------------|--------------|
+| Dashboard / reports API | Dashboard + Reports pages in browser; KPI keys/shape tests |
+| Leads / pipeline / today-calls | Leads, Pipeline, Today Calls UI; list/clamp/pagination |
+| Sheet sync / import | Sheet Sources sync UI or API sync; caps/dedupe tests |
+| Clients / ledger | Clients + Ledger pages; totals/scope tests |
+| Auth / RBAC / menus | Login; at least one **deny** path for a restricted role |
+| `app.yaml` / deploy | `GET /api/health` smoke |
+| Frontend component only | RTL test + browser on that route |
+
+## Commands (local Mongo only for writes)
+
+**Backend** — start API if down (`npm run dev` / uvicorn `:8000`):
+
+```bash
+cd backend && source .venv/bin/activate
+export REACT_APP_BACKEND_URL=http://localhost:8000
+pytest tests/<relevant> -v --tb=short
+pytest -q
+curl -sS "$REACT_APP_BACKEND_URL/api/health"
+```
+
+**Frontend** — when `frontend/src/**` changed:
+
+```bash
+cd frontend && yarn build
+CI=true yarn test --watchAll=false
+```
+
+**Browser MCP** (user-facing / backend that powers UI) — start `yarn start` if down:
+
+1. `browser_list_tabs` → reuse or `browser_navigate` to `http://localhost:3000`
+2. Login via `browser_ask_user` for credentials (never invent passwords)
+3. Exercise **each related page** for this change (happy path + one edge)
+4. Close session tabs with `browser_close_tab`
+5. Report URL, pages checked, pass/fail
+
+Hard load / large local data: use `backend/scripts/seed_loadtest.py` + `run_hard_gate.py` when the change is memory/performance related; teardown after.
+
+## Never skip for
+
+- "API/frontend not running" → **start them**
+- "Only backend changed" → still browser-test UI that consumes those APIs
+- "RTL already passed" → browser still required for UI surfaces
+- "Will test later" → not allowed before done
+
+## Out of scope skips (only these)
+
+- Docs-only with no runtime path
+- Pure comment / typo with no behavior change
+- User **explicitly** waived browser in this conversation
+
+See also: `mandatory-testing.mdc`, `no-data-without-permission.mdc`.

@@ -2,14 +2,14 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import api from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, PageLoader, Money } from "@/components/common"
+import { PageHeader, Money, Spinner, LoadingRegion } from "@/components/common"
 import { SearchableSelect } from "@/components/ui/searchable-select"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { DATE_PRESETS, matchDatePresetId } from "@/components/filters/datePresets"
 import {
-  PanelHeader, KpiCard, MiniBar, InsightCard, buildLeadHref,
-  monthStartISO, todayISO, startOfWeekISO, monthsAgoISO,
+  PanelHeader, KpiCard, MiniBar, InsightCard, buildLeadHref, todayISO,
 } from "@/components/dashboard/atoms"
 import { ChevronDown, ChevronUp, Filter } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -30,13 +30,6 @@ const defaultFilters = () => ({
   assignment_status: "",
   assigned_to: "",
 })
-
-const PRESETS = [
-  { id: "today", label: "Today", apply: () => ({ from: todayISO(), to: todayISO() }) },
-  { id: "week", label: "This Week", apply: () => ({ from: startOfWeekISO(), to: todayISO() }) },
-  { id: "month", label: "This Month", apply: () => ({ from: monthStartISO(), to: todayISO() }) },
-  { id: "3m", label: "Last 3M", apply: () => ({ from: monthsAgoISO(3), to: todayISO() }) },
-]
 
 const STATUS_TABS = [
   { id: "all", label: "All", value: "" },
@@ -66,7 +59,7 @@ export default function Dashboard() {
 
   const [filters, setFilters] = useState(() => filtersFromParams(params))
   const [activePreset, setActivePreset] = useState(() => params.get("preset") || DEFAULT_PRESET)
-  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [filtersOpen, setFiltersOpen] = useState(true)
   const [options, setOptions] = useState(null)
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -144,8 +137,9 @@ export default function Dashboard() {
   }
 
   const handleApply = () => {
-    setActivePreset("")
-    syncUrl(filters, "")
+    const presetId = matchDatePresetId(filters.from, filters.to, activePreset)
+    setActivePreset(presetId)
+    syncUrl(filters, presetId || null)
     loadSummary(filters)
   }
 
@@ -155,6 +149,14 @@ export default function Dashboard() {
     setActivePreset(DEFAULT_PRESET)
     syncUrl(next, DEFAULT_PRESET)
     loadSummary(next)
+  }
+
+  const handleDateChange = (key, val) => {
+    setFilters((f) => {
+      const next = { ...f, [key]: val }
+      setActivePreset(matchDatePresetId(next.from, next.to, activePreset))
+      return next
+    })
   }
 
   const fc = (key, val) => setFilters((f) => ({ ...f, [key]: val }))
@@ -209,8 +211,7 @@ export default function Dashboard() {
     navigate(buildLeadHref(params))
   }
 
-  if (loading && !data) return <PageLoader />
-  if (!data) {
+  if (!loading && !data) {
     return (
       <div data-testid="dashboard-page">
         <PageHeader title="Dashboard" subtitle="Unable to load analysis" />
@@ -218,12 +219,12 @@ export default function Dashboard() {
     )
   }
 
-  const k = data.kpis
-  const agingMax = Math.max(1, ...(data.aging_sla || []).map((a) => a.count))
-  const funnelMax = Math.max(1, ...(data.pipeline_funnel || []).map((f) => f.count))
-  const responseMax = Math.max(1, ...(data.lead_disposition_breakdown || []).map((f) => f.count))
-  const rc = data.response_conversion || {}
-  const trendData = (data.daily_trend || []).map((d) => ({
+  const k = data?.kpis
+  const agingMax = Math.max(1, ...(data?.aging_sla || []).map((a) => a.count))
+  const funnelMax = Math.max(1, ...(data?.pipeline_funnel || []).map((f) => f.count))
+  const responseMax = Math.max(1, ...(data?.lead_disposition_breakdown || []).map((f) => f.count))
+  const rc = data?.response_conversion || {}
+  const trendData = (data?.daily_trend || []).map((d) => ({
     ...d,
     label: d.date?.slice(5) || d.date,
   }))
@@ -235,23 +236,24 @@ export default function Dashboard() {
         subtitle="Filterable operational analysis (IST)"
         actions={
           <div className="flex flex-wrap items-center gap-1.5">
-            {PRESETS.map((p) => (
+            {DATE_PRESETS.map((p) => (
               <Button
                 key={p.id}
                 size="sm"
                 variant={activePreset === p.id ? "default" : "outline"}
                 className={activePreset === p.id ? "bg-sky-500 hover:bg-sky-600 h-8" : "h-8"}
                 onClick={() => handlePreset(p)}
+                disabled={loading}
                 data-testid={`preset-${p.id}`}
               >
                 {p.label}
               </Button>
             ))}
-            <Button size="sm" variant="outline" className="h-8" onClick={handleReset} data-testid="dashboard-reset">
+            <Button size="sm" variant="outline" className="h-8" onClick={handleReset} disabled={loading} data-testid="dashboard-reset">
               Reset
             </Button>
-            <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600" onClick={handleApply} data-testid="dashboard-apply">
-              Apply
+            <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600" onClick={handleApply} disabled={loading} data-testid="dashboard-apply">
+              {loading ? <><Spinner className="mr-1.5 h-3.5 w-3.5" /> Applying…</> : "Apply"}
             </Button>
           </div>
         }
@@ -294,21 +296,23 @@ export default function Dashboard() {
               fields={(
                 <>
                   <FilterField label="From" className="w-36">
-                    <Input type="date" value={filters.from} onChange={(e) => fc("from", e.target.value)} className="h-8" data-testid="filter-from" />
+                    <Input type="date" value={filters.from} onChange={(e) => handleDateChange("from", e.target.value)} className="h-8" data-testid="filter-from" />
                   </FilterField>
                   <FilterField label="To" className="w-36">
-                    <Input type="date" value={filters.to} onChange={(e) => fc("to", e.target.value)} className="h-8" data-testid="filter-to" />
+                    <Input type="date" value={filters.to} onChange={(e) => handleDateChange("to", e.target.value)} className="h-8" data-testid="filter-to" />
                   </FilterField>
-                  <FilterField label="Source" className="w-36">
+                  <FilterField label="Status" className="w-36">
                     <SearchableSelect
-                      value={filters.source || "all"}
-                      onChange={(v) => fc("source", v === "all" ? "" : v)}
+                      value={filters.status || "all"}
+                      onChange={(v) => fc("status", v === "all" ? "" : v)}
                       options={[
-                        { value: "all", label: "All sources" },
-                        ...(options?.sources || []).map((s) => ({ value: s, label: s })),
+                        { value: "all", label: "All statuses" },
+                        { value: "active", label: "Active" },
+                        { value: "inactive", label: "Inactive" },
+                        { value: "converted", label: "Converted" },
                       ]}
-                      placeholder="All sources"
-                      testId="filter-source"
+                      placeholder="All statuses"
+                      testId="filter-status"
                       className="h-8"
                     />
                   </FilterField>
@@ -322,6 +326,19 @@ export default function Dashboard() {
                       ]}
                       placeholder="All stages"
                       testId="filter-stage"
+                      className="h-8"
+                    />
+                  </FilterField>
+                  <FilterField label="Source" className="w-36">
+                    <SearchableSelect
+                      value={filters.source || "all"}
+                      onChange={(v) => fc("source", v === "all" ? "" : v)}
+                      options={[
+                        { value: "all", label: "All sources" },
+                        ...(options?.sources || []).map((s) => ({ value: s, label: s })),
+                      ]}
+                      placeholder="All sources"
+                      testId="filter-source"
                       className="h-8"
                     />
                   </FilterField>
@@ -387,7 +404,18 @@ export default function Dashboard() {
               />
             </div>
           )}
+        </>
+      )}
 
+      <LoadingRegion
+        loading={loading}
+        hasData={!!data}
+        testId="dashboard-results"
+        overlayTestId="dashboard-loading-overlay"
+        className="space-y-3"
+      >
+        {!isAffiliate && k && (
+          <>
           {(data.insights || []).length > 0 && (
             <div className="grid grid-cols-1 gap-2 md:grid-cols-3" data-testid="insights">
               {data.insights.map((ins, i) => (
@@ -410,19 +438,7 @@ export default function Dashboard() {
             <KpiCard testId="kpi-overdue" label="Overdue FUs" value={k.overdue_followups} accent="red" onClick={() => navigate("/followups")} />
             <KpiCard testId="kpi-clients" label="Clients" value={k.total_clients} hint={`${k.ftd_clients} FTD`} onClick={() => navigate("/clients")} />
           </div>
-        </>
-      )}
 
-      {isAffiliate && (
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
-          <KpiCard testId="kpi-clients" label="Clients" value={k.total_clients} hint={`${k.ftd_clients} FTD`} />
-          <KpiCard testId="kpi-credit" label="Deposits" value={<Money value={k.ledger_credit} />} />
-          <KpiCard testId="kpi-net" label="Net Balance" value={<Money value={k.net_balance} />} hint={`₹${Number(k.ledger_debit).toLocaleString("en-IN")} withdrawn`} accent="blue" />
-        </div>
-      )}
-
-      {!isAffiliate && (
-        <>
           <div className="grid grid-cols-2 gap-2 md:grid-cols-4" data-testid="response-kpis">
             <KpiCard
               testId="kpi-top-response"
@@ -453,6 +469,7 @@ export default function Dashboard() {
               hint={`${rc.carry_forward_count || 0} leads`}
             />
           </div>
+
 
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
             <div className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm lg:col-span-8" data-testid="responses-overview">
@@ -666,8 +683,17 @@ export default function Dashboard() {
               </button>
             ))}
           </div>
-        </>
-      )}
+          </>
+        )}
+
+        {isAffiliate && k && (
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+            <KpiCard testId="kpi-clients" label="Clients" value={k.total_clients} hint={`${k.ftd_clients} FTD`} />
+            <KpiCard testId="kpi-credit" label="Deposits" value={<Money value={k.ledger_credit} />} />
+            <KpiCard testId="kpi-net" label="Net Balance" value={<Money value={k.net_balance} />} hint={`₹${Number(k.ledger_debit).toLocaleString("en-IN")} withdrawn`} accent="blue" />
+          </div>
+        )}
+      </LoadingRegion>
     </div>
   )
 }

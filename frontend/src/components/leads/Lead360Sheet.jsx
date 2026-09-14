@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { StatusPill, Money } from "@/components/common"
+import { StatusPill, Money, Spinner } from "@/components/common"
 import { Button } from "@/components/ui/button"
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
@@ -124,7 +124,9 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
       <Sheet open={!!leadId} onOpenChange={(o) => !o && onClose?.()}>
         <SheetContent className="w-full overflow-y-auto bg-white sm:max-w-2xl" data-testid="lead-360">
           {loading && !lead && (
-            <p className="mt-8 text-sm text-slate-400" data-testid="lead-360-loading">Loading…</p>
+            <div className="mt-8 flex justify-center" data-testid="lead-360-loading">
+              <Spinner className="h-6 w-6" />
+            </div>
           )}
           {error && (
             <p className="mt-8 text-sm text-red-600" data-testid="lead-360-error">{error}</p>

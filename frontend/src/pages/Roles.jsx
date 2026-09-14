@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import api, { formatApiError } from "@/lib/api";
 import { useAuth } from "@/context/AuthContext";
-import { PageHeader, PageLoader, StatusPill } from "@/components/common";
+import { PageHeader, PageLoader, StatusPill, LoadingOverlay } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,15 +21,20 @@ const ACTION_LABELS = {
 
 export default function Roles() {
   const { can } = useAuth();
-  const [roles, setRoles] = useState(null);
+  const [roles, setRoles] = useState(null)
+  const [loading, setLoading] = useState(true);
   const [catalog, setCatalog] = useState([]);
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState({ name: "", description: "", permissions: [], menus: [], data_scope: "OWN" });
 
   const load = useCallback(async () => {
-    try { const { data } = await api.get("/roles"); setRoles(data.roles); }
-    catch { setRoles([]); }
+    setLoading(true);
+    try {
+      const { data } = await api.get("/roles");
+      setRoles(data.roles);
+    } catch { setRoles([]); }
+    finally { setLoading(false); }
   }, []);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { api.get("/menus/catalog").then((r) => setCatalog(r.data.menus)).catch(() => {}); }, []);
@@ -53,10 +58,20 @@ export default function Roles() {
   const togglePerm = (perm) => setForm((f) => ({ ...f, permissions: f.permissions.includes(perm) ? f.permissions.filter((p) => p !== perm) : [...f.permissions, perm] }));
   const toggleMenu = (key) => setForm((f) => ({ ...f, menus: f.menus.includes(key) ? f.menus.filter((m) => m !== key) : [...f.menus, key] }));
 
-  if (!roles) return <PageLoader />;
+  
+
+  if (roles === null) {
+    return (
+      <div data-testid="roles-page">
+        <PageLoader />
+      </div>
+    )
+  }
 
   return (
-    <div data-testid="roles-page">
+    <div data-testid="roles-page" className="relative">
+      {loading && <LoadingOverlay testId="roles-loading-overlay" />}
+      <div className={loading ? "pointer-events-none opacity-60" : undefined}>
       <PageHeader title="Roles & Menus" subtitle="Deny-by-default RBAC · edit permissions without redeploy"
         actions={can("roles_menus:create") && <Button className="bg-sky-500 hover:bg-sky-600" onClick={openNew} data-testid="new-role-btn"><Plus size={16} className="mr-1.5" /> New Role</Button>} />
 
@@ -84,6 +99,7 @@ export default function Roles() {
             </div>
           </div>
         ))}
+      </div>
       </div>
 
       <Dialog open={show} onOpenChange={setShow}>

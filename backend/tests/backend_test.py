@@ -2249,6 +2249,46 @@ class TestReports:
         bad = admin.get(f"{BASE_URL}/api/reports/company?from=bad", timeout=30)
         assert bad.status_code == 400
 
+    def test_reports_lead_filters_caller_company(self, admin):
+        """Lead-parity filters on caller/company keep shape and narrow results."""
+        base_caller = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120)
+        assert base_caller.status_code == 200
+        base_summary = base_caller.json()["summary"]
+
+        filtered = admin.get(
+            f"{BASE_URL}/api/reports/caller?status=active&disposition=__none__",
+            timeout=120,
+        )
+        assert filtered.status_code == 200, filtered.text[:300]
+        body = filtered.json()
+        assert "rows" in body and "summary" in body
+        assert "disposition_breakdown" in body
+        assert body["summary"]["total_leads"] <= base_summary["total_leads"]
+
+        co = admin.get(
+            f"{BASE_URL}/api/reports/company?status=active&stage=New&assignment_status=assigned",
+            timeout=120,
+        )
+        assert co.status_code == 200, co.text[:300]
+        co_body = co.json()
+        assert "rows" in co_body and "summary" in co_body
+        for key in ["total_leads", "conversion_rate", "responses_logged"]:
+            assert key in co_body["summary"]
+
+        emptyish = admin.get(
+            f"{BASE_URL}/api/reports/company?source=__no_such_source__",
+            timeout=120,
+        )
+        assert emptyish.status_code == 200
+        assert emptyish.json()["summary"]["total_leads"] == 0
+
+    def test_reports_lead_filters_agent_denied(self, agent):
+        r = agent.get(
+            f"{BASE_URL}/api/reports/caller?status=active&source=Manual",
+            timeout=30,
+        )
+        assert r.status_code == 403
+
     def test_reports_requires_auth(self):
         import requests
         r = requests.get(f"{BASE_URL}/api/reports/caller", timeout=30)

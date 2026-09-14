@@ -6,6 +6,7 @@ from core import COMPANY_ID, db, live_ledger_filter, now_iso
 logger = logging.getLogger(__name__)
 
 CLEANUP_REASON = "cleanup:remove_ledger_reversals"
+MIGRATION_FLAG = "ledger_reversal_cleanup_v1"
 
 
 async def _rewrite_client_balances(client_id: str) -> float:
@@ -28,18 +29,51 @@ async def _rewrite_client_balances(client_id: str) -> float:
     return bal
 
 
+async def _flag_done() -> bool:
+    doc = await db.system_flags.find_one(
+        {"companyId": COMPANY_ID, "id": MIGRATION_FLAG},
+        {"_id": 0, "done": 1},
+    )
+    return bool(doc and doc.get("done"))
+
+
+async def _mark_done() -> None:
+    await db.system_flags.update_one(
+        {"companyId": COMPANY_ID, "id": MIGRATION_FLAG},
+        {"$set": {
+            "companyId": COMPANY_ID,
+            "id": MIGRATION_FLAG,
+            "done": True,
+            "completed_at": now_iso(),
+        }},
+        upsert=True,
+    )
+
+
 async def ensure_cleanup_ledger_reversals() -> dict:
     """Soft-delete all live category=reversal rows and recompute affected balances.
 
-    Idempotent: if no live reversals remain, this is a no-op.
+    Idempotent: if flagged done and no live reversals remain, skip the heavy scan.
     """
     q = {
         "companyId": COMPANY_ID,
         "category": "reversal",
         **live_ledger_filter(),
     }
-    reversals = await db.ledger.find(q, {"_id": 0, "id": 1, "client_id": 1}).to_list(100000)
+    if await _flag_done():
+        remaining = await db.ledger.count_documents(q)
+        if remaining == 0:
+            logger.info("Ledger reversal cleanup: already done, skipping")
+            return {"deleted": 0, "clients_updated": 0, "skipped": True}
+
+    # Cursor batches — avoid .to_list(100000)
+    reversals = []
+    async for r in db.ledger.find(q, {"_id": 0, "id": 1, "client_id": 1}):
+        reversals.append(r)
+        if len(reversals) >= 100000:
+            break
     if not reversals:
+        await _mark_done()
         logger.info("Ledger reversal cleanup: nothing to do")
         return {"deleted": 0, "clients_updated": 0}
 
@@ -57,6 +91,7 @@ async def ensure_cleanup_ledger_reversals() -> dict:
     for cid in client_ids:
         await _rewrite_client_balances(cid)
 
+    await _mark_done()
     out = {
         "deleted": res.modified_count,
         "clients_updated": len(client_ids),

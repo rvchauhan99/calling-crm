@@ -164,16 +164,96 @@ describe("Dashboard analysis", () => {
     render(<Dashboard />)
 
     await waitFor(() => {
-      expect(screen.getByTestId("toggle-filters")).toBeInTheDocument()
-    })
-    await act(async () => {
-      screen.getByTestId("toggle-filters").click()
-    })
-    await waitFor(() => {
       expect(screen.getByTestId("advanced-filters")).toBeInTheDocument()
     })
     expect(screen.queryByTestId("filter-assignment")).not.toBeInTheDocument()
     expect(screen.queryByTestId("filter-agent")).not.toBeInTheDocument()
+    expect(screen.getByTestId("filter-status")).toBeInTheDocument()
+  })
+
+  it("keeps Week preset highlighted after Apply when dates match", async () => {
+    useAuth.mockReturnValue({
+      user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
+    })
+
+    render(<Dashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("preset-week")).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      screen.getByTestId("preset-week").click()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("preset-week").className).toMatch(/bg-sky-500/)
+    })
+
+    await act(async () => {
+      screen.getByTestId("dashboard-apply").click()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("preset-week").className).toMatch(/bg-sky-500/)
+    })
+  })
+
+  it("shows Applying label while dashboard refetch is in flight", async () => {
+    let resolveDash
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/dashboard?")) {
+        return new Promise((resolve) => {
+          resolveDash = () => resolve({ data: summary })
+        })
+      }
+      if (url === "/dashboard/filter-options") {
+        return Promise.resolve({
+          data: {
+            stages: ["New"],
+            sources: ["Manual"],
+            dispositions: [{ id: "d1", name: "Interested" }],
+            agents: [{ id: "a1", name: "Rohan" }],
+            statuses: ["active"],
+          },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    useAuth.mockReturnValue({
+      user: { id: "admin", user_type: "admin" },
+      dataScope: "ALL",
+    })
+
+    render(<Dashboard />)
+    await act(async () => {
+      resolveDash()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("kpi-leads")).toBeInTheDocument()
+    })
+
+    let resolveSecond
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/dashboard?")) {
+        return new Promise((resolve) => {
+          resolveSecond = () => resolve({ data: summary })
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    await act(async () => {
+      screen.getByTestId("dashboard-apply").click()
+    })
+    expect(screen.getByTestId("dashboard-apply")).toHaveTextContent(/Applying/)
+    expect(screen.getByTestId("dashboard-loading-overlay")).toBeInTheDocument()
+    await act(async () => {
+      resolveSecond()
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("dashboard-apply")).toHaveTextContent("Apply")
+    })
   })
 
   it("hides lead analysis for affiliates", async () => {

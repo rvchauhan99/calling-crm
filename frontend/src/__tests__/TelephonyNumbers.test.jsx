@@ -70,8 +70,7 @@ describe("TelephonyNumbers", () => {
 
   it("shows inactive banner and locks mutations when ui_enabled is false", async () => {
     render(<TelephonyNumbers />)
-    expect(await screen.findByTestId("telephony-numbers-page")).toBeInTheDocument()
-    expect(screen.getByTestId("telephony-inactive-banner")).toHaveTextContent(/inactive/i)
+    expect(await screen.findByTestId("telephony-inactive-banner")).toHaveTextContent(/inactive/i)
     expect(screen.getByTestId("telephony-status-banner")).toHaveTextContent("mock")
     expect(screen.getByText("+919876543210")).toBeInTheDocument()
     expect(screen.queryByTestId("telephony-add-number")).not.toBeInTheDocument()
@@ -91,7 +90,7 @@ describe("TelephonyNumbers", () => {
     })
     const user = userEvent.setup()
     render(<TelephonyNumbers />)
-    await screen.findByTestId("telephony-numbers-page")
+    expect(await screen.findByTestId("telephony-add-number")).toBeInTheDocument()
     await user.click(screen.getByTestId("telephony-add-number"))
     expect(await screen.findByTestId("telephony-number-dialog")).toBeInTheDocument()
     expect(screen.getByTestId("telephony-e164")).toBeInTheDocument()

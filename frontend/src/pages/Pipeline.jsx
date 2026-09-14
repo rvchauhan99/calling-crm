@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from "react"
 import { useSearchParams } from "react-router-dom"
 import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
-import { PageHeader, PageLoader, StatusPill, EmptyState } from "@/components/common"
+import { PageHeader, PageLoader, StatusPill, EmptyState, LoadingRegion } from "@/components/common"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { PipelineLogCallDialog, PIPELINE_STAGES } from "@/components/pipeline/PipelineLogCallDialog"
@@ -37,6 +37,7 @@ export default function Pipeline() {
   const assignedTo = params.get("assigned_to") || ""
 
   const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [filterOptions, setFilterOptions] = useState(null)
   const [agents, setAgents] = useState([])
   const [dispositions, setDispositions] = useState([])
@@ -56,14 +57,19 @@ export default function Pipeline() {
   const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
 
   const load = useCallback(async () => {
-    const p = new URLSearchParams()
-    if (search) p.set("search", search)
-    if (source) p.set("source", source)
-    if (disposition) p.set("disposition", disposition)
-    if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
-    const qs = p.toString()
-    const { data: board } = await api.get(`/pipeline${qs ? `?${qs}` : ""}`)
-    setData(board)
+    setLoading(true)
+    try {
+      const p = new URLSearchParams()
+      if (search) p.set("search", search)
+      if (source) p.set("source", source)
+      if (disposition) p.set("disposition", disposition)
+      if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
+      const qs = p.toString()
+      const { data: board } = await api.get(`/pipeline${qs ? `?${qs}` : ""}`)
+      setData(board)
+    } finally {
+      setLoading(false)
+    }
   }, [search, source, disposition, assignedTo, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -174,13 +180,19 @@ export default function Pipeline() {
     return (data.stages || []).flatMap((s) => data.board[s] || [])
   }, [data])
 
-  if (!data) return <PageLoader />
+  if (!data && !loading) {
+    return (
+      <div data-testid="pipeline-page">
+        <PageHeader title="Pipeline" subtitle="Unable to load board" />
+      </div>
+    )
+  }
 
   return (
     <div data-testid="pipeline-page" className="space-y-3">
       <PageHeader
         title="Pipeline"
-        subtitle={`${data.total ?? flatLeads.length} leads · drag to move (logs call + follow-up)`}
+        subtitle={`${data?.total ?? flatLeads.length} leads · drag to move (logs call + follow-up)`}
         actions={(
           <div className="flex gap-1.5">
             <Button
@@ -270,7 +282,8 @@ export default function Pipeline() {
         onClearAll={chips.length ? clearFilters : undefined}
       />
 
-      {view === "kanban" ? (
+      <LoadingRegion loading={loading} hasData={!!data} testId="pipeline-results">
+      {data && (view === "kanban" ? (
         <div className="flex gap-3 overflow-x-auto pb-4">
           {(data.stages || PIPELINE_STAGES).map((stage) => {
             const items = data.board[stage] || []
@@ -442,7 +455,8 @@ export default function Pipeline() {
             </Table>
           )}
         </div>
-      )}
+      ))}
+      </LoadingRegion>
 
       <PipelineLogCallDialog
         open={!!moveTarget}
