@@ -41,11 +41,23 @@ class TestSheetColumnMapping:
         load_dotenv(root / ".env")
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
-        from sheet_sync import parse_sheet_url, suggest_column_map, validate_column_map
+        from sheet_sync import (
+            parse_sheet_url,
+            suggest_column_map,
+            validate_column_map,
+            csv_export_url,
+            parse_csv_rows,
+            normalize_csv_headers,
+            SheetParseError,
+        )
 
         sid, gid = parse_sheet_url(SAMPLE_URL)
         assert sid == "1aLEV8ZK1RkMaPzsaahfUZQ-zXKHFDSQLirF4Jbx-u0A"
         assert gid == "0"
+
+        export = csv_export_url(sid, gid)
+        assert "/export?format=csv&gid=0" in export
+        assert "gviz" not in export
 
         suggested = suggest_column_map(
             ["id", "full_name", "phone_number", "email"], "meta_lead_ads"
@@ -64,6 +76,15 @@ class TestSheetColumnMapping:
 
         with pytest.raises(ValueError):
             validate_column_map({"name": "", "phone": "phone"})
+
+        bom_csv = "\ufeffname,phone\nAlice,9111111111\n"
+        bom_headers, bom_rows = parse_csv_rows(bom_csv)
+        assert bom_headers == ["name", "phone"]
+        assert bom_rows[0]["name"] == "Alice"
+
+        assert normalize_csv_headers(["name", "", "  ", "phone"]) == ["name", "phone"]
+        with pytest.raises(SheetParseError, match="corrupted"):
+            normalize_csv_headers(["name " + ("unknown " * 50)])
 
     def test_sheet_csv_row_cap(self):
         import sys

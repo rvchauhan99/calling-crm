@@ -82,8 +82,8 @@ class TestSheetSyncBatch:
     def test_batch_sync_dedupe_via_api(self, admin):
         """Batched sync: existing phone + in-CSV external_id collision → same counters."""
         tag = f"TEST_BatchSync_{uuid.uuid4().hex[:8]}"
-        # Create a lead with a known phone first
-        phone_raw = "9123456780"
+        # Unique phones so local DB pollution cannot flake this test
+        phone_raw = "9" + "".join(str((uuid.uuid4().int >> (4 * i)) % 10) for i in range(9))
         create_lead = admin.post(
             f"{BASE_URL}/api/leads",
             json={"name": f"{tag}_Existing", "phone": phone_raw},

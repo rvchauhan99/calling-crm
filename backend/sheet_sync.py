@@ -31,6 +31,7 @@ DEFAULT_POLL_SECONDS = 120
 SYNC_LOCK_SECONDS = 300
 MAX_SHEET_BYTES = 10 * 1024 * 1024
 MAX_SHEET_ROWS = 50_000
+MAX_HEADER_LEN = 200
 SYNC_CHUNK_SIZE = 500
 COMPANY_SYNC_COOLDOWN_SECONDS = max(
     0, int(os.environ.get("SHEET_SYNC_COOLDOWN_SECONDS", "5") or "5"),
@@ -99,10 +100,46 @@ def parse_sheet_url(url: str) -> tuple[str, str]:
 
 
 def csv_export_url(spreadsheet_id: str, gid: str = "0") -> str:
+    """Public Google Sheets CSV export (reliable headers + full rows; not gviz)."""
     return (
         f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
-        f"/gviz/tq?tqx=out:csv&gid={gid}"
+        f"/export?format=csv&gid={gid}"
     )
+
+
+def strip_csv_bom(text: str) -> str:
+    """Remove UTF-8 BOM Google often prefixes on /export CSV."""
+    if not text:
+        return ""
+    if text.startswith("\ufeff"):
+        return text[1:]
+    return text
+
+
+def normalize_csv_text(content: str) -> str:
+    """Strip BOM and surrounding whitespace before DictReader."""
+    return strip_csv_bom(content or "").strip()
+
+
+def normalize_csv_headers(fieldnames) -> list[str]:
+    """
+    Normalize header names: strip, lowercase, drop empties.
+    Reject mangled/corrupt headers (e.g. gviz concatenating column values).
+    """
+    headers: list[str] = []
+    for h in fieldnames or []:
+        if h is None:
+            continue
+        name = _norm_header(h)
+        if not name:
+            continue
+        if len(name) > MAX_HEADER_LEN:
+            raise SheetParseError(
+                "Sheet column headers look corrupted (too long). "
+                "Re-check the sheet is publicly shared, or split oversized header cells."
+            )
+        headers.append(name)
+    return headers
 
 
 NAME_ALIASES = ("full_name", "full name", "name", "customer name", "lead name")
@@ -258,14 +295,14 @@ def map_row(row: dict, column_map: dict, preset: str) -> Optional[dict]:
 
 def parse_csv_rows(content: str, *, max_rows: int = MAX_SHEET_ROWS) -> tuple[list[str], list[dict]]:
     """Parse CSV text into headers and normalized row dicts. Caps rows to protect memory."""
-    text = (content or "").strip()
+    text = normalize_csv_text(content)
     if not text:
         return [], []
     reader = csv.DictReader(io.StringIO(text))
-    headers = [_norm_header(h) for h in (reader.fieldnames or [])]
+    headers = normalize_csv_headers(reader.fieldnames)
     rows = []
     for raw in reader:
-        row = {_norm_header(k): (v or "").strip() for k, v in raw.items() if k is not None}
+        row = {_norm_header(k): (v or "").strip() for k, v in raw.items() if k is not None and _norm_header(k)}
         if any(row.values()):
             rows.append(row)
         if len(rows) > max_rows:
@@ -304,7 +341,13 @@ async def fetch_sheet_csv(spreadsheet_id: str, gid: str = "0", *, client: Option
             raise SheetAccessError(
                 "Cannot access sheet — share it as 'Anyone with the link can view'"
             )
-        return text
+        # Also catch HTML login walls that omit text/html content-type
+        stripped = normalize_csv_text(text)
+        if stripped.lower().startswith("<!doctype") or stripped[:200].lower().lstrip().startswith("<html"):
+            raise SheetAccessError(
+                "Cannot access sheet — share it as 'Anyone with the link can view'"
+            )
+        return strip_csv_bom(text)
     finally:
         if own_client:
             await http.aclose()
@@ -578,12 +621,12 @@ async def inspect_sheet(
     if csv_text is None:
         csv_text = await fetch_sheet_csv(spreadsheet_id, gid)
     # Headers only — avoid materializing all rows for inspect
-    text = (csv_text or "").strip()
+    text = normalize_csv_text(csv_text)
     if not text:
         headers = []
     else:
         reader = csv.DictReader(io.StringIO(text))
-        headers = [_norm_header(h) for h in (reader.fieldnames or [])]
+        headers = normalize_csv_headers(reader.fieldnames)
     suggested = suggest_column_map(headers, preset or "meta_lead_ads")
     return {
         "spreadsheet_id": spreadsheet_id,
