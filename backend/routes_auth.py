@@ -1,12 +1,11 @@
 """Auth routes: login, logout, me, refresh, forgot/reset password, my menus."""
-import os
 import secrets
 from datetime import timedelta
 from fastapi import APIRouter, Request, Response, HTTPException, Depends
 from pydantic import BaseModel, EmailStr
 from core import (db, COMPANY_ID, verify_password, hash_password, create_access_token,
                   create_refresh_token, set_auth_cookies, get_principal, now_utc,
-                  now_iso, new_id, audit, dedupe_menus_by_key)
+                  now_iso, new_id, audit, dedupe_menus_by_key, primary_frontend_url)
 import jwt
 from core import JWT_SECRET, JWT_ALGORITHM
 
@@ -109,7 +108,7 @@ async def forgot_password(body: ForgotIn):
             "id": new_id(), "token": token, "user_id": user["id"],
             "expires_at": (now_utc() + timedelta(hours=1)).isoformat(),
             "used": False, "created_at": now_iso()})
-        print(f"[PASSWORD RESET] {os.environ.get('FRONTEND_URL')}/reset-password?token={token}")
+        print(f"[PASSWORD RESET] {primary_frontend_url()}/reset-password?token={token}")
     return {"ok": True, "message": "If the email exists, a reset link was generated."}
 
 

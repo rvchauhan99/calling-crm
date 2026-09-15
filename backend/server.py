@@ -9,7 +9,7 @@ load_dotenv(Path(__file__).parent / ".env")
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
-from core import client, db, COMPANY_ID
+from core import client, db, COMPANY_ID, parse_frontend_origins
 import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
 import routes_telephony
@@ -167,7 +167,7 @@ async def health():
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.environ.get("FRONTEND_URL", "http://localhost:3000")],
+    allow_origins=parse_frontend_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

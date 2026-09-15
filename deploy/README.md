@@ -26,7 +26,7 @@ chmod +x scripts/setup-env.sh
 | `ADMIN_EMAIL` | Valid email (not `@localhost`) |
 | `ADMIN_PASSWORD` | Strong Super Admin password |
 | `DEMO_PASSWORD` | Seeded demo users password |
-| `FRONTEND_URL` | **Vercel origin** for CORS, e.g. `https://your-app.vercel.app` |
+| `FRONTEND_URL` | Frontend origin(s) for CORS — single or comma-separated, e.g. `https://app.vercel.app` or `https://app.vercel.app,https://baazexcall.com` (scheme + host; trailing slash optional, stripped) |
 | `COOKIE_SECURE` | `true` if API is HTTPS; `false` for plain `http://IP:8000` tests |
 | `API_PUBLISH` | Default `8000:8000` (no TLS). With TLS: `127.0.0.1:8000:8000` |
 | `DOMAIN` | API hostname if using Caddy TLS, e.g. `api.yourdomain.com` |
@@ -52,7 +52,7 @@ REACT_APP_BACKEND_URL=https://api.yourdomain.com
 
 Must match the public API base (no `/api` suffix — the app appends `/api`).
 
-Set Vultr `FRONTEND_URL` to the exact Vercel origin (scheme + host, no path), or CORS will block the browser.
+Set Vultr `FRONTEND_URL` to the exact frontend origin(s) (scheme + host, no path). Comma-separate multiple origins (e.g. Vercel + custom domain). Trailing slashes are stripped. Wrong/missing values block the browser via CORS.
 
 ---
 

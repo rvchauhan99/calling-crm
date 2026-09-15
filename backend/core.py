@@ -13,6 +13,31 @@ DB_NAME = os.environ["DB_NAME"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 COMPANY_ID = os.environ.get("COMPANY_ID", "default")
 JWT_ALGORITHM = "HS256"
+DEFAULT_FRONTEND_ORIGIN = "http://localhost:3000"
+
+
+def parse_frontend_origins(value: str | None = None) -> list[str]:
+    """Parse FRONTEND_URL as one or more comma-separated CORS origins.
+
+    Trims whitespace and trailing slashes (browsers send Origin without a path).
+    Falls back to DEFAULT_FRONTEND_ORIGIN when unset or empty.
+    """
+    raw = os.environ.get("FRONTEND_URL") if value is None else value
+    if raw is None or not str(raw).strip():
+        return [DEFAULT_FRONTEND_ORIGIN]
+    origins: list[str] = []
+    for part in str(raw).split(","):
+        origin = part.strip()
+        while origin.endswith("/") and not origin.endswith("://"):
+            origin = origin[:-1]
+        if origin:
+            origins.append(origin)
+    return origins or [DEFAULT_FRONTEND_ORIGIN]
+
+
+def primary_frontend_url() -> str:
+    """First FRONTEND_URL origin — used for password-reset links and similar."""
+    return parse_frontend_origins()[0]
 
 client = AsyncIOMotorClient(
     MONGO_URL,
