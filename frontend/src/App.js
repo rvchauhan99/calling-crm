@@ -20,6 +20,7 @@ import Followups from "@/pages/Followups";
 import Audit from "@/pages/Audit";
 import SheetSources from "@/pages/SheetSources";
 import LeadSources from "@/pages/LeadSources";
+import IpAccess from "@/pages/IpAccess";
 import TelephonyNumbers from "@/pages/TelephonyNumbers";
 import "@/App.css";
 
@@ -61,6 +62,7 @@ function AppRoutes() {
         <Route path="/dispositions" element={g("/dispositions", <Dispositions />)} />
         <Route path="/lead-sources" element={g("/lead-sources", <LeadSources />)} />
         <Route path="/sheet-sources" element={g("/sheet-sources", <SheetSources />)} />
+        <Route path="/ip-access" element={g("/ip-access", <IpAccess />)} />
         <Route path="/clients" element={g("/clients", <Clients />)} />
         <Route path="/ledger" element={g("/ledger", <Ledger />)} />
         <Route path="/reports" element={g("/reports", <Reports />)} />

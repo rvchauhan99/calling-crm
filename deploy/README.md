@@ -30,6 +30,7 @@ chmod +x scripts/setup-env.sh
 | `COOKIE_SECURE` | `true` if API is HTTPS; `false` for plain `http://IP:8000` tests |
 | `API_PUBLISH` | Default `8000:8000` (no TLS). With TLS: `127.0.0.1:8000:8000` |
 | `DOMAIN` | API hostname if using Caddy TLS, e.g. `api.yourdomain.com` |
+| `IP_ACCESS_SEED_DEFAULTS` | `1` on deploy (default in compose) to upsert office/home allowlist CIDRs on boot; leave unset/`0` locally so empty list = allow all |
 
 ### Atlas checklist
 

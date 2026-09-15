@@ -13,6 +13,7 @@ from core import client, db, COMPANY_ID, parse_frontend_origins
 import routes_auth, routes_admin, routes_leads, routes_clients, routes_reports
 import routes_sheet_sources
 import routes_telephony
+import routes_ip_access
 from seed import seed
 from sheet_sync import (
     pick_next_due_source,
@@ -77,6 +78,18 @@ async def lifespan(_app: FastAPI):
         logger.info("Lead sources master ensured")
     except Exception as e:
         logger.exception("ensure_lead_sources failed: %s", e)
+    try:
+        from ip_access import ensure_ip_access
+        await ensure_ip_access()
+        logger.info("IP access master ensured")
+    except Exception as e:
+        logger.exception("ensure_ip_access failed: %s", e)
+    try:
+        from ip_access import ensure_ip_access_defaults
+        result = await ensure_ip_access_defaults()
+        logger.info("IP access defaults seed: %s", result)
+    except Exception as e:
+        logger.exception("ensure_ip_access_defaults failed: %s", e)
     try:
         from seed import ensure_telephony_menus
         await ensure_telephony_menus()
@@ -150,6 +163,7 @@ app.include_router(routes_clients.router)
 app.include_router(routes_reports.router)
 app.include_router(routes_sheet_sources.router)
 app.include_router(routes_telephony.router)
+app.include_router(routes_ip_access.router)
 
 
 def _health_ok():

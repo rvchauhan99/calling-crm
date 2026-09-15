@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import {
   Gauge, Users, PhoneCall, History, Kanban, CalendarCheck, ListChecks,
   UserCog, Wallet, BarChart3, IdCard, UsersRound, ShieldCheck, FileSearch,
-  LogOut, Menu as MenuIcon, X, PhoneOutgoing, Table, Share2, Phone,
+  LogOut, Menu as MenuIcon, X, PhoneOutgoing, Table, Share2, Phone, Shield,
 } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
@@ -17,6 +17,7 @@ const ICONS = {
   pipeline: Kanban, followups: CalendarCheck, dispositions: ListChecks,
   lead_sources: Share2,
   sheet_sources: Table,
+  ip_access: Shield,
   clients: UserCog, ledger: Wallet, reports: BarChart3, users: IdCard,
   teams: UsersRound, roles_menus: ShieldCheck, telephony_numbers: Phone, audit: FileSearch,
 };

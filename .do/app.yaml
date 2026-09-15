@@ -30,3 +30,6 @@ services:
       - key: FRONTEND_URL
         value: "https://baazexcalling.vercel.app"
         scope: RUN_TIME
+      - key: IP_ACCESS_SEED_DEFAULTS
+        value: "1"
+        scope: RUN_TIME

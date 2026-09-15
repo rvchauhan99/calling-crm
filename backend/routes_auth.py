@@ -59,6 +59,9 @@ async def login(body: LoginIn, request: Request, response: Response):
     if not user.get("active", True):
         raise HTTPException(status_code=403, detail="Account is disabled")
 
+    from ip_access import enforce_ip_access
+    await enforce_ip_access(request)
+
     await db.login_attempts.delete_one({"identifier": ident})
     at = create_access_token(user["id"], user["email"])
     rt = create_refresh_token(user["id"])
@@ -81,6 +84,8 @@ async def me(principal: dict = Depends(get_principal)):
 
 @router.post("/refresh")
 async def refresh(request: Request, response: Response):
+    from ip_access import enforce_ip_access
+    await enforce_ip_access(request)
     token = request.cookies.get("refresh_token")
     if not token:
         raise HTTPException(status_code=401, detail="No refresh token")
@@ -100,7 +105,9 @@ async def refresh(request: Request, response: Response):
 
 
 @router.post("/forgot-password")
-async def forgot_password(body: ForgotIn):
+async def forgot_password(body: ForgotIn, request: Request):
+    from ip_access import enforce_ip_access
+    await enforce_ip_access(request)
     user = await db.users.find_one({"email": body.email.lower()})
     if user:
         token = secrets.token_urlsafe(32)
@@ -113,7 +120,9 @@ async def forgot_password(body: ForgotIn):
 
 
 @router.post("/reset-password")
-async def reset_password(body: ResetIn):
+async def reset_password(body: ResetIn, request: Request):
+    from ip_access import enforce_ip_access
+    await enforce_ip_access(request)
     rec = await db.password_reset_tokens.find_one({"token": body.token})
     if not rec or rec.get("used") or rec["expires_at"] < now_iso():
         raise HTTPException(status_code=400, detail="Invalid or expired token")

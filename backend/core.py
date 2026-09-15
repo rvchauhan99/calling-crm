@@ -249,6 +249,9 @@ async def get_principal(request: Request) -> dict:
     else:
         user["permissions"], user["menus"], user["data_scope"] = [], [], "OWN"
     user.pop("password_hash", None)
+    # IP allowlist: empty active list = open; otherwise client IP must match
+    from ip_access import enforce_ip_access
+    await enforce_ip_access(request)
     return user
 
 

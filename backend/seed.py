@@ -19,15 +19,17 @@ MENU_CATALOG = [
      ["view", "create", "edit", "delete"]),
     ("sheet_sources", "Sheet Sources", "Table", "/sheet-sources", "Config", 9,
      ["view", "create", "edit", "delete", "sync"]),
-    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 10, ["view", "create", "edit", "convert"]),
-    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 11, ["view", "post", "export"]),
-    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 12, ["view", "export"]),
-    ("users", "Users", "IdentificationBadge", "/users", "Admin", 13, ["view", "create", "edit", "delete"]),
-    ("teams", "Teams", "UsersThree", "/teams", "Admin", 14, ["view", "create", "edit", "delete"]),
-    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 15, ["view", "create", "edit", "delete"]),
-    ("telephony_numbers", "Phone Numbers", "Phone", "/telephony-numbers", "Admin", 16,
+    ("ip_access", "IP Access", "Shield", "/ip-access", "Config", 10,
      ["view", "create", "edit", "delete"]),
-    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 17, ["view"]),
+    ("clients", "Clients", "UserCircleGear", "/clients", "Finance", 11, ["view", "create", "edit", "convert"]),
+    ("ledger", "Finance Ledger", "Wallet", "/ledger", "Finance", 12, ["view", "post", "export"]),
+    ("reports", "Reports", "ChartBar", "/reports", "Analytics", 13, ["view", "export"]),
+    ("users", "Users", "IdentificationBadge", "/users", "Admin", 14, ["view", "create", "edit", "delete"]),
+    ("teams", "Teams", "UsersThree", "/teams", "Admin", 15, ["view", "create", "edit", "delete"]),
+    ("roles_menus", "Roles & Menus", "ShieldCheck", "/roles", "Admin", 16, ["view", "create", "edit", "delete"]),
+    ("telephony_numbers", "Phone Numbers", "Phone", "/telephony-numbers", "Admin", 17,
+     ["view", "create", "edit", "delete"]),
+    ("audit", "Audit Log", "FileMagnifyingGlass", "/audit", "Admin", 18, ["view"]),
 ]
 
 
@@ -244,6 +246,8 @@ async def ensure_indexes():
     await db.sheet_sync_locks.create_index([("companyId", 1)], unique=True)
     from lead_sources import ensure_lead_source_indexes
     await ensure_lead_source_indexes()
+    from ip_access import ensure_ip_access_indexes
+    await ensure_ip_access_indexes()
     await db.ledger.create_index("idempotency_key", unique=True, sparse=True)
     await db.ledger.create_index([("client_id", 1), ("created_at", 1)])
     await db.ledger.create_index([("companyId", 1), ("client_id", 1)])
