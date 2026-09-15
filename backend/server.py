@@ -107,6 +107,12 @@ async def lifespan(_app: FastAPI):
         logger.info("Disposition pipeline links ensured: %s", result)
     except Exception as e:
         logger.exception("ensure_disposition_pipeline_links failed: %s", e)
+    try:
+        from disposition_pipeline import ensure_lead_pipeline_from_disposition
+        result = await ensure_lead_pipeline_from_disposition()
+        logger.info("Lead pipeline backfill ensured: %s", result)
+    except Exception as e:
+        logger.exception("ensure_lead_pipeline_from_disposition failed: %s", e)
     if _run_seed_enabled():
         try:
             await seed()

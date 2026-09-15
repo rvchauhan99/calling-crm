@@ -17,6 +17,7 @@ DISPOSITION_PIPELINE_ALIASES = {
 }
 
 MIGRATION_FLAG = "disposition_pipeline_links_v2"
+LEAD_BACKFILL_FLAG = "disposition_lead_pipeline_backfill_v1"
 
 
 def disposition_pipeline_defaults() -> dict:
@@ -48,6 +49,25 @@ def is_call_back_disposition(disp: Optional[dict]) -> bool:
     if name == "Call Back" or name.startswith("Call Back"):
         return True
     return False
+
+
+def _pipeline_stage_mismatch_or(mapped: str) -> list:
+    """Mongo $or clauses: effective stage (null/missing → New) differs from mapped."""
+    if mapped == "New":
+        return [{"pipeline_stage": {"$exists": True, "$nin": [None, "New"]}}]
+    return [
+        {"pipeline_stage": {"$exists": False}},
+        {"pipeline_stage": None},
+        {"pipeline_stage": {"$ne": mapped}},
+    ]
+
+
+def _non_client_lead_base() -> dict:
+    return {
+        "companyId": COMPANY_ID,
+        "is_client": {"$ne": True},
+        "status": {"$ne": "converted"},
+    }
 
 
 async def ensure_disposition_pipeline_links() -> dict:
@@ -120,9 +140,7 @@ async def collect_lead_pipeline_mismatches(limit_samples: int = 5) -> dict:
 
     cursor = db.leads.find(
         {
-            "companyId": COMPANY_ID,
-            "is_client": {"$ne": True},
-            "status": {"$ne": "converted"},
+            **_non_client_lead_base(),
             "$or": [
                 {"disposition_id": {"$ne": None}},
                 {"disposition_name": {"$nin": [None, ""]}},
@@ -160,53 +178,139 @@ async def collect_lead_pipeline_mismatches(limit_samples: int = 5) -> dict:
     return {"total": total, "buckets": buckets, "samples": samples}
 
 
-async def apply_lead_pipeline_from_disposition() -> dict:
-    """Set lead.pipeline_stage from disposition mapping for mismatched non-client leads."""
+async def _count_lead_pipeline_mismatches_quick() -> int:
+    """Count mismatched non-client leads via indexed update filters (no full scan)."""
     disps = await db.dispositions.find(
         {"companyId": COMPANY_ID},
         {"_id": 0, "id": 1, "name": 1, "default_pipeline_stage": 1, "converts_to_client": 1},
     ).to_list(500)
-    by_id = {d["id"]: d for d in disps if d.get("id")}
-    by_name = {d["name"]: d for d in disps if d.get("name")}
+    total = 0
+    base = _non_client_lead_base()
+    for disp in disps:
+        mapped = mapped_stage_for_disposition(disp)
+        if not mapped:
+            continue
+        stage_or = _pipeline_stage_mismatch_or(mapped)
+        if disp.get("id"):
+            total += await db.leads.count_documents({
+                **base,
+                "disposition_id": disp["id"],
+                "$or": stage_or,
+            })
+        if disp.get("name"):
+            total += await db.leads.count_documents({
+                **base,
+                "disposition_name": disp["name"],
+                "$and": [
+                    {"$or": [
+                        {"disposition_id": None},
+                        {"disposition_id": {"$exists": False}},
+                        {"disposition_id": ""},
+                    ]},
+                    {"$or": stage_or},
+                ],
+            })
+    return total
+
+
+async def apply_lead_pipeline_from_disposition() -> dict:
+    """Bulk-set lead.pipeline_stage from disposition mapping for mismatched non-client leads."""
+    disps = await db.dispositions.find(
+        {"companyId": COMPANY_ID},
+        {"_id": 0, "id": 1, "name": 1, "default_pipeline_stage": 1, "converts_to_client": 1},
+    ).to_list(500)
 
     updated = 0
     by_disp: dict = {}
     now = now_iso()
+    base = _non_client_lead_base()
 
-    cursor = db.leads.find(
-        {
-            "companyId": COMPANY_ID,
-            "is_client": {"$ne": True},
-            "status": {"$ne": "converted"},
-            "$or": [
-                {"disposition_id": {"$ne": None}},
-                {"disposition_name": {"$nin": [None, ""]}},
-            ],
-        },
-        {
-            "_id": 0, "id": 1, "pipeline_stage": 1,
-            "disposition_id": 1, "disposition_name": 1,
-        },
-    )
-    async for lead in cursor:
-        disp = None
-        if lead.get("disposition_id"):
-            disp = by_id.get(lead["disposition_id"])
-        if not disp and lead.get("disposition_name"):
-            disp = by_name.get(lead["disposition_name"])
-        mapped = mapped_stage_for_disposition(disp) if disp else None
+    for disp in disps:
+        mapped = mapped_stage_for_disposition(disp)
         if not mapped:
             continue
-        current = lead.get("pipeline_stage") or "New"
-        if current == mapped:
-            continue
-        res = await db.leads.update_one(
-            {"id": lead["id"], "companyId": COMPANY_ID},
-            {"$set": {"pipeline_stage": mapped, "updated_at": now}},
-        )
-        if res.modified_count:
-            updated += 1
-            dname = disp.get("name") or "?"
-            by_disp[dname] = by_disp.get(dname, 0) + 1
+        stage_or = _pipeline_stage_mismatch_or(mapped)
+        set_doc = {"$set": {"pipeline_stage": mapped, "updated_at": now}}
+        n = 0
+        dname = disp.get("name") or "?"
+
+        if disp.get("id"):
+            res = await db.leads.update_many(
+                {
+                    **base,
+                    "disposition_id": disp["id"],
+                    "$or": stage_or,
+                },
+                set_doc,
+            )
+            n += res.modified_count
+
+        if disp.get("name"):
+            res = await db.leads.update_many(
+                {
+                    **base,
+                    "disposition_name": disp["name"],
+                    "$and": [
+                        {"$or": [
+                            {"disposition_id": None},
+                            {"disposition_id": {"$exists": False}},
+                            {"disposition_id": ""},
+                        ]},
+                        {"$or": stage_or},
+                    ],
+                },
+                set_doc,
+            )
+            n += res.modified_count
+
+        if n:
+            updated += n
+            by_disp[dname] = by_disp.get(dname, 0) + n
 
     return {"updated": updated, "by_disposition": by_disp}
+
+
+async def _lead_backfill_flag_done() -> bool:
+    doc = await db.system_flags.find_one(
+        {"companyId": COMPANY_ID, "id": LEAD_BACKFILL_FLAG},
+        {"_id": 0, "done": 1},
+    )
+    return bool(doc and doc.get("done"))
+
+
+async def _mark_lead_backfill_done(result: dict) -> None:
+    await db.system_flags.update_one(
+        {"companyId": COMPANY_ID, "id": LEAD_BACKFILL_FLAG},
+        {"$set": {
+            "companyId": COMPANY_ID,
+            "id": LEAD_BACKFILL_FLAG,
+            "done": True,
+            "completed_at": now_iso(),
+            "updated": result.get("updated", 0),
+            "by_disposition": result.get("by_disposition") or {},
+        }},
+        upsert=True,
+    )
+
+
+async def ensure_lead_pipeline_from_disposition() -> dict:
+    """One-shot boot migration: align lead.pipeline_stage with disposition masters.
+
+    Idempotent via disposition_lead_pipeline_backfill_v1. If flagged done and no
+    remaining mismatches, skips. Otherwise ensures masters, bulk-applies, marks done.
+    """
+    await ensure_disposition_pipeline_links()
+
+    if await _lead_backfill_flag_done():
+        remaining = await _count_lead_pipeline_mismatches_quick()
+        if remaining == 0:
+            logger.info("Lead pipeline backfill: already done, skipping")
+            return {"updated": 0, "by_disposition": {}, "skipped": True}
+
+    result = await apply_lead_pipeline_from_disposition()
+    await _mark_lead_backfill_done(result)
+    logger.info(
+        "Lead pipeline backfill: updated=%s by_disposition=%s",
+        result.get("updated"), result.get("by_disposition"),
+    )
+    return result

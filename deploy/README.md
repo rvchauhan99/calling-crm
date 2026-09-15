@@ -113,4 +113,17 @@ curl -sS https://api.example.com/api/health
 
 API `seed()` creates menus, roles, admin from `ADMIN_*`, and demo users via `DEMO_PASSWORD`.
 
+On every boot the API also:
+
+- Ensures disposition masters have `default_pipeline_stage` (e.g. Call Back / Busy → Contacted)
+- Runs a **one-shot** lead backfill (`disposition_lead_pipeline_backfill_v1`) so existing leads’ `pipeline_stage` matches those masters
+
+Master ensure alone does **not** rewrite historical lead stages — that is the lead backfill. Manual dry-run / re-apply:
+
+```bash
+cd backend && source .venv/bin/activate
+python scripts/backfill_lead_pipeline_from_disposition.py
+python scripts/backfill_lead_pipeline_from_disposition.py --apply
+```
+
 When `deploy/.env` is filled, say so — phase 2 is SSH + `docker compose up` on the VPS.

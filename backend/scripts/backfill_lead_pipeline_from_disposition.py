@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Backfill lead.pipeline_stage from disposition default_pipeline_stage.
 
-Default is dry-run (read-only). Pass --apply to write.
+Default is dry-run (read-only). Pass --apply to write (same path as API boot
+ensure_lead_pipeline_from_disposition).
 
   cd backend && source .venv/bin/activate
   python scripts/backfill_lead_pipeline_from_disposition.py
@@ -31,7 +32,7 @@ async def main() -> int:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Write updates (default is dry-run)",
+        help="Write updates via ensure_lead_pipeline_from_disposition (default is dry-run)",
     )
     parser.add_argument(
         "--samples",
@@ -42,9 +43,9 @@ async def main() -> int:
     args = parser.parse_args()
 
     from disposition_pipeline import (
-        apply_lead_pipeline_from_disposition,
         collect_lead_pipeline_mismatches,
         ensure_disposition_pipeline_links,
+        ensure_lead_pipeline_from_disposition,
     )
 
     ensure = await ensure_disposition_pipeline_links()
@@ -66,10 +67,8 @@ async def main() -> int:
         print("Dry-run only. Re-run with --apply to update leads.")
         return 0
 
-    result = await apply_lead_pipeline_from_disposition()
-    print(f"Applied: updated={result['updated']}")
-    for name, n in sorted(result.get("by_disposition", {}).items(), key=lambda x: -x[1]):
-        print(f"  {name}: {n}")
+    result = await ensure_lead_pipeline_from_disposition()
+    print(f"Applied: {result}")
     return 0
 
 
