@@ -5,6 +5,7 @@ import jwt
 import bcrypt
 import uuid
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 from fastapi import Request, HTTPException, Depends
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -14,30 +15,67 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 COMPANY_ID = os.environ.get("COMPANY_ID", "default")
 JWT_ALGORITHM = "HS256"
 DEFAULT_FRONTEND_ORIGIN = "http://localhost:3000"
+_IPV4_HOST = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _www_apex_sibling(origin: str) -> str | None:
+    """Return www↔apex sibling origin, or None for localhost / IPs / unparseable."""
+    parsed = urlparse(origin)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    host = parsed.hostname.lower()
+    if host in ("localhost", "127.0.0.1", "::1") or _IPV4_HOST.match(host):
+        return None
+    port = f":{parsed.port}" if parsed.port else ""
+    if host.startswith("www."):
+        sibling_host = host[4:]
+        if not sibling_host:
+            return None
+    else:
+        sibling_host = f"www.{host}"
+    return f"{parsed.scheme}://{sibling_host}{port}"
 
 
 def parse_frontend_origins(value: str | None = None) -> list[str]:
     """Parse FRONTEND_URL as one or more comma-separated CORS origins.
 
     Trims whitespace and trailing slashes (browsers send Origin without a path).
-    Falls back to DEFAULT_FRONTEND_ORIGIN when unset or empty.
+    Also allows the www / non-www sibling for each http(s) host so apex and www
+    both work when either is configured. Falls back to DEFAULT_FRONTEND_ORIGIN
+    when unset or empty.
     """
     raw = os.environ.get("FRONTEND_URL") if value is None else value
     if raw is None or not str(raw).strip():
         return [DEFAULT_FRONTEND_ORIGIN]
     origins: list[str] = []
+    seen: set[str] = set()
+    for part in str(raw).split(","):
+        origin = part.strip()
+        while origin.endswith("/") and not origin.endswith("://"):
+            origin = origin[:-1]
+        if not origin or origin in seen:
+            continue
+        origins.append(origin)
+        seen.add(origin)
+        sibling = _www_apex_sibling(origin)
+        if sibling and sibling not in seen:
+            origins.append(sibling)
+            seen.add(sibling)
+    return origins or [DEFAULT_FRONTEND_ORIGIN]
+
+
+def primary_frontend_url() -> str:
+    """First configured FRONTEND_URL origin (before www sibling) for reset links."""
+    raw = os.environ.get("FRONTEND_URL")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_FRONTEND_ORIGIN
     for part in str(raw).split(","):
         origin = part.strip()
         while origin.endswith("/") and not origin.endswith("://"):
             origin = origin[:-1]
         if origin:
-            origins.append(origin)
-    return origins or [DEFAULT_FRONTEND_ORIGIN]
-
-
-def primary_frontend_url() -> str:
-    """First FRONTEND_URL origin — used for password-reset links and similar."""
-    return parse_frontend_origins()[0]
+            return origin
+    return DEFAULT_FRONTEND_ORIGIN
 
 client = AsyncIOMotorClient(
     MONGO_URL,

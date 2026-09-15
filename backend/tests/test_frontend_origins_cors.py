@@ -18,26 +18,43 @@ from core import DEFAULT_FRONTEND_ORIGIN, parse_frontend_origins, primary_fronte
 class TestParseFrontendOrigins:
     def test_single_origin(self):
         assert parse_frontend_origins("https://baazexcalling.vercel.app") == [
-            "https://baazexcalling.vercel.app"
+            "https://baazexcalling.vercel.app",
+            "https://www.baazexcalling.vercel.app",
         ]
 
     def test_comma_separated_prod_shape(self):
         raw = "https://baazexcalling.vercel.app,https://baazexcall.com/"
         assert parse_frontend_origins(raw) == [
             "https://baazexcalling.vercel.app",
+            "https://www.baazexcalling.vercel.app",
             "https://baazexcall.com",
+            "https://www.baazexcall.com",
         ]
 
     def test_spaces_around_commas(self):
         raw = " https://a.example.com , https://b.example.com "
         assert parse_frontend_origins(raw) == [
             "https://a.example.com",
+            "https://www.a.example.com",
             "https://b.example.com",
+            "https://www.b.example.com",
         ]
 
     def test_trailing_slash_stripped(self):
         assert parse_frontend_origins("https://baazexcall.com/") == [
-            "https://baazexcall.com"
+            "https://baazexcall.com",
+            "https://www.baazexcall.com",
+        ]
+
+    def test_www_config_includes_apex(self):
+        assert parse_frontend_origins("https://www.baazexcall.com") == [
+            "https://www.baazexcall.com",
+            "https://baazexcall.com",
+        ]
+
+    def test_localhost_no_www_sibling(self):
+        assert parse_frontend_origins("http://localhost:3000") == [
+            "http://localhost:3000"
         ]
 
     def test_empty_string_defaults(self):
@@ -53,10 +70,12 @@ class TestParseFrontendOrigins:
         )
         assert parse_frontend_origins(None) == [
             "https://baazexcalling.vercel.app",
+            "https://www.baazexcalling.vercel.app",
             "https://baazexcall.com",
+            "https://www.baazexcall.com",
         ]
 
-    def test_primary_frontend_url_is_first(self, monkeypatch):
+    def test_primary_frontend_url_is_first_configured(self, monkeypatch):
         monkeypatch.setenv(
             "FRONTEND_URL",
             "https://baazexcalling.vercel.app,https://baazexcall.com/",
@@ -86,6 +105,28 @@ class TestCorsAllowDeny:
         origins = parse_frontend_origins(
             "https://baazexcalling.vercel.app,https://baazexcall.com/"
         )
+        client = _cors_app(origins)
+        r = client.get(
+            "/api/health",
+            headers={"Origin": "https://baazexcall.com"},
+        )
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == "https://baazexcall.com"
+
+    def test_apex_config_allows_www_origin(self):
+        origins = parse_frontend_origins("https://baazexcall.com")
+        client = _cors_app(origins)
+        r = client.get(
+            "/api/health",
+            headers={"Origin": "https://www.baazexcall.com"},
+        )
+        assert r.status_code == 200
+        assert r.headers.get("access-control-allow-origin") == (
+            "https://www.baazexcall.com"
+        )
+
+    def test_www_config_allows_apex_origin(self):
+        origins = parse_frontend_origins("https://www.baazexcall.com")
         client = _cors_app(origins)
         r = client.get(
             "/api/health",
