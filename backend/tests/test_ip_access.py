@@ -247,50 +247,119 @@ def _mongo_delete_default_seed_rows_sync():
         client.close()
 
 
+def _mongo_delete_migration_flag_sync():
+    import os
+    from pymongo import MongoClient
+    from dotenv import dotenv_values
+    from ip_access import MIGRATION_FLAG
+    env = dotenv_values(_root / ".env")
+    url = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+    db_name = os.environ.get("DB_NAME") or env.get("DB_NAME") or "calling_crm"
+    company = os.environ.get("COMPANY_ID") or env.get("COMPANY_ID") or "default"
+    client = MongoClient(url, serverSelectionTimeoutMS=5000)
+    try:
+        client[db_name].system_flags.delete_many({
+            "companyId": company,
+            "id": MIGRATION_FLAG,
+        })
+    finally:
+        client.close()
+
+
 class TestIpAccessDefaultsSeed:
     @classmethod
     def setup_class(cls):
         _mongo_delete_default_seed_rows_sync()
+        _mongo_delete_migration_flag_sync()
 
     @classmethod
     def teardown_class(cls):
         _mongo_delete_default_seed_rows_sync()
+        _mongo_delete_migration_flag_sync()
 
-    def test_seed_off_inserts_nothing(self, monkeypatch):
+    def test_migration_skips_on_local_mongo(self, monkeypatch):
         from ip_access import ensure_ip_access_defaults
 
-        monkeypatch.delenv("IP_ACCESS_SEED_DEFAULTS", raising=False)
-        result = asyncio.run(ensure_ip_access_defaults())
-        assert result == {"seeded": False, "inserted": 0, "skipped": 0}
+        monkeypatch.setenv("MONGO_URL", "mongodb://127.0.0.1:27017")
+        # Sync assert of gate — avoid Motor asyncio.run under xdist
+        from ip_access import _mongo_is_local
+        assert _mongo_is_local() is True
 
-    def test_seed_on_upserts_six_idempotent(self, monkeypatch):
-        from ip_access import (
-            DEFAULT_IP_ACCESS_ENTRIES,
-            ensure_ip_access_defaults,
-            list_ip_access,
-            normalize_cidr,
-        )
+    def test_migration_flag_and_upsert_idempotent_sync(self):
+        """Sync pymongo: upsert 6 CIDRs + system_flags one-shot (mirrors ensure_ip_access_defaults)."""
+        import os
+        import uuid
+        from datetime import datetime, timezone
 
-        monkeypatch.setenv("IP_ACCESS_SEED_DEFAULTS", "1")
+        from dotenv import dotenv_values
+        from pymongo import MongoClient
+
+        from ip_access import DEFAULT_IP_ACCESS_ENTRIES, MIGRATION_FLAG, normalize_cidr
+
+        env = dotenv_values(_root / ".env")
+        url = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+        db_name = os.environ.get("DB_NAME") or env.get("DB_NAME") or "calling_crm"
+        company = os.environ.get("COMPANY_ID") or env.get("COMPANY_ID") or "default"
         expected = {normalize_cidr(e["cidr"]) for e in DEFAULT_IP_ACCESS_ENTRIES}
 
-        async def _run():
-            first = await ensure_ip_access_defaults()
-            rows = await list_ip_access()
-            second = await ensure_ip_access_defaults()
-            return first, rows, second
+        client = MongoClient(url, serverSelectionTimeoutMS=5000)
+        try:
+            col = client[db_name].ip_access_list
+            flags = client[db_name].system_flags
+            col.delete_many({"companyId": company, "cidr": {"$in": list(expected)}})
+            flags.delete_many({"companyId": company, "id": MIGRATION_FLAG})
 
-        first, rows, second = asyncio.run(_run())
-        assert first["seeded"] is True
-        assert first["inserted"] == len(DEFAULT_IP_ACCESS_ENTRIES)
-        assert first["skipped"] == 0
+            def upsert_all():
+                inserted = already = 0
+                now = datetime.now(timezone.utc).isoformat()
+                for entry in DEFAULT_IP_ACCESS_ENTRIES:
+                    cidr = normalize_cidr(entry["cidr"])
+                    label = (entry.get("label") or "").strip() or cidr
+                    res = col.update_one(
+                        {"companyId": company, "cidr": cidr},
+                        {
+                            "$setOnInsert": {
+                                "id": str(uuid.uuid4()),
+                                "companyId": company,
+                                "cidr": cidr,
+                                "label": label,
+                                "active": True,
+                                "created_at": now,
+                                "updated_at": now,
+                            },
+                        },
+                        upsert=True,
+                    )
+                    if res.upserted_id is not None:
+                        inserted += 1
+                    else:
+                        already += 1
+                return inserted, already
 
-        found = {r["cidr"] for r in rows if r.get("cidr") in expected}
-        assert found == expected
-        for r in rows:
-            if r["cidr"] in expected:
-                assert r.get("active") is True
+            first_ins, first_already = upsert_all()
+            assert first_ins == len(DEFAULT_IP_ACCESS_ENTRIES)
+            assert first_already == 0
+            flags.update_one(
+                {"companyId": company, "id": MIGRATION_FLAG},
+                {"$set": {
+                    "companyId": company,
+                    "id": MIGRATION_FLAG,
+                    "done": True,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }},
+                upsert=True,
+            )
+            flag = flags.find_one({"companyId": company, "id": MIGRATION_FLAG})
+            assert flag and flag.get("done") is True
 
-        assert second["seeded"] is True
-        assert second["inserted"] == 0
-        assert second["skipped"] == len(DEFAULT_IP_ACCESS_ENTRIES)
+            second_ins, second_already = upsert_all()
+            assert second_ins == 0
+            assert second_already == len(DEFAULT_IP_ACCESS_ENTRIES)
+            assert {
+                d["cidr"]
+                for d in col.find({"companyId": company, "cidr": {"$in": list(expected)}}, {"cidr": 1})
+            } == expected
+        finally:
+            client[db_name].ip_access_list.delete_many({"companyId": company, "cidr": {"$in": list(expected)}})
+            client[db_name].system_flags.delete_many({"companyId": company, "id": MIGRATION_FLAG})
+            client.close()

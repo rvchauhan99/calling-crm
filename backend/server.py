@@ -87,7 +87,7 @@ async def lifespan(_app: FastAPI):
     try:
         from ip_access import ensure_ip_access_defaults
         result = await ensure_ip_access_defaults()
-        logger.info("IP access defaults seed: %s", result)
+        logger.info("IP access defaults migration: %s", result)
     except Exception as e:
         logger.exception("ensure_ip_access_defaults failed: %s", e)
     try:

@@ -30,7 +30,8 @@ _DEFAULT_TRUSTED_PROXY_CIDRS = (
 
 _DENY_DETAIL = "Access denied from this network. Contact your administrator."
 
-# Deploy-time defaults (seeded when IP_ACCESS_SEED_DEFAULTS=1). $setOnInsert only.
+# One-shot boot migration (system_flags); $setOnInsert so admin edits are kept.
+MIGRATION_FLAG = "ip_access_office_defaults_v1"
 DEFAULT_IP_ACCESS_ENTRIES = (
     {"label": "Network 1 IPv4", "cidr": "86.98.8.178"},
     {"label": "Network 1 IPv6", "cidr": "2001:4860:7:142c::ff"},
@@ -43,10 +44,6 @@ DEFAULT_IP_ACCESS_ENTRIES = (
 
 def ip_access_disabled() -> bool:
     return os.environ.get("IP_ACCESS_DISABLED", "").strip().lower() in ("1", "true", "yes")
-
-
-def ip_access_seed_defaults_enabled() -> bool:
-    return os.environ.get("IP_ACCESS_SEED_DEFAULTS", "").strip().lower() in ("1", "true", "yes")
 
 
 def normalize_cidr(raw: str) -> str:
@@ -168,18 +165,49 @@ async def ensure_ip_access():
     )
 
 
-async def ensure_ip_access_defaults() -> dict:
-    """Idempotent upsert of office/home allowlist rows when IP_ACCESS_SEED_DEFAULTS is on.
+async def _migration_flag_done() -> bool:
+    doc = await db.system_flags.find_one(
+        {"companyId": COMPANY_ID, "id": MIGRATION_FLAG},
+        {"_id": 0, "done": 1},
+    )
+    return bool(doc and doc.get("done"))
 
+
+async def _mark_migration_done() -> None:
+    await db.system_flags.update_one(
+        {"companyId": COMPANY_ID, "id": MIGRATION_FLAG},
+        {"$set": {
+            "companyId": COMPANY_ID,
+            "id": MIGRATION_FLAG,
+            "done": True,
+            "completed_at": now_iso(),
+        }},
+        upsert=True,
+    )
+
+
+def _mongo_is_local() -> bool:
+    """Skip office-IP migration against local Mongo so pytest/dev stay allow-all."""
+    url = (os.environ.get("MONGO_URL") or "").lower()
+    return "127.0.0.1" in url or "localhost" in url
+
+
+async def ensure_ip_access_defaults() -> dict:
+    """One-shot boot migration: upsert office/home allowlist CIDRs, then set system_flags.
+
+    Same pattern as ledger/undone-convert cleanups. Second boot skips via flag.
     Uses $setOnInsert so admin edits to label/active are never overwritten.
-    Local/dev leaves the flag off so an empty list stays allow-all.
+    Skips on local Mongo (127.0.0.1/localhost) so empty list remains allow-all in dev.
     """
-    if not ip_access_seed_defaults_enabled():
-        return {"seeded": False, "inserted": 0, "skipped": 0}
+    if _mongo_is_local():
+        return {"migrated": False, "skipped": True, "reason": "local_mongo", "inserted": 0}
+
+    if await _migration_flag_done():
+        return {"migrated": False, "skipped": True, "reason": "already_done", "inserted": 0}
 
     await ensure_ip_access_indexes()
     inserted = 0
-    skipped = 0
+    already = 0
     for entry in DEFAULT_IP_ACCESS_ENTRIES:
         cidr = normalize_cidr(entry["cidr"])
         label = (entry.get("label") or "").strip() or cidr
@@ -201,8 +229,16 @@ async def ensure_ip_access_defaults() -> dict:
         if res.upserted_id is not None:
             inserted += 1
         else:
-            skipped += 1
-    return {"seeded": True, "inserted": inserted, "skipped": skipped}
+            already += 1
+
+    await _mark_migration_done()
+    return {
+        "migrated": True,
+        "skipped": False,
+        "inserted": inserted,
+        "already_present": already,
+        "flag": MIGRATION_FLAG,
+    }
 
 
 async def list_ip_access(*, active_only: bool = False) -> List[dict]:
