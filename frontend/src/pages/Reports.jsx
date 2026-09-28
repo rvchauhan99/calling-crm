@@ -10,6 +10,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
 import { DATE_PRESETS, matchDatePresetId } from "@/components/filters/datePresets"
 import {
@@ -307,7 +308,7 @@ export default function Reports() {
                     options={[
                       { value: "all", label: "All dispositions" },
                       { value: "__none__", label: "No disposition" },
-                      ...(options?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                      ...dispositionFilterOptions(options?.dispositions),
                     ]}
                     placeholder="All dispositions"
                     testId="filter-disposition"
@@ -337,7 +338,7 @@ export default function Reports() {
                       onChange={(v) => fc("assigned_to", v === "all" ? "" : v)}
                       options={[
                         { value: "all", label: "All agents" },
-                        ...(options?.agents || []).map((a) => ({ value: a.id, label: a.name })),
+                        ...agentFilterOptions(options?.agents),
                       ]}
                       placeholder="All agents"
                       testId="filter-agent"
@@ -368,8 +369,9 @@ export default function Reports() {
           className="mt-3"
         >
             <TabsContent value="caller" className="mt-0 space-y-3">
-              <div className="grid grid-cols-2 gap-2 md:grid-cols-5" data-testid="caller-kpis">
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-6" data-testid="caller-kpis">
                 <KpiCard testId="kpi-calls" label="Total Calls" value={summary.total_calls ?? 0} />
+                <KpiCard testId="kpi-unique-leads" label="Lead Count" value={summary.total_unique_leads ?? 0} />
                 <KpiCard testId="kpi-interested" label="Interested" value={summary.total_interested ?? 0} accent="blue" />
                 <KpiCard testId="kpi-registered" label="Registered" value={summary.total_registered ?? 0} />
                 <KpiCard testId="kpi-deposite" label="Deposite" value={summary.total_deposite ?? 0} accent="amber" />
@@ -422,6 +424,7 @@ export default function Reports() {
                   ["interested", "Interested"],
                   ["registered", "Registered"],
                   ["deposite", "Deposite"],
+                  ["unique_leads", "Lead Count"],
                   ["calls", "Total Calls"],
                   ["conversion_ratio", "conversionRatios"],
                 ]}
@@ -431,6 +434,7 @@ export default function Reports() {
                   interested: summary.total_interested ?? 0,
                   registered: summary.total_registered ?? 0,
                   deposite: summary.total_deposite ?? 0,
+                  unique_leads: summary.total_unique_leads ?? 0,
                   calls: summary.total_calls ?? 0,
                   conversion_ratio: summary.conversion_ratio ?? 0,
                 }}

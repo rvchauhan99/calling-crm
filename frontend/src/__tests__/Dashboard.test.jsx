@@ -28,7 +28,14 @@ jest.mock("@/lib/api", () => ({
 }))
 
 jest.mock("@/components/ui/searchable-select", () => ({
-  SearchableSelect: ({ testId, label }) => <div data-testid={testId || "searchable"}>{label}</div>,
+  SearchableSelect: ({ testId, label, options = [] }) => (
+    <div data-testid={testId || "searchable"}>
+      {label}
+      {(options || []).map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </div>
+  ),
 }))
 
 jest.mock("recharts", () => ({
@@ -103,8 +110,14 @@ describe("Dashboard analysis", () => {
           data: {
             stages: ["New"],
             sources: ["Manual"],
-            dispositions: [{ id: "d1", name: "Interested" }],
-            agents: [{ id: "a1", name: "Rohan" }],
+            dispositions: [
+              { id: "d1", name: "Interested", active: true },
+              { id: "d-old", name: "Old Disp", active: false },
+            ],
+            agents: [
+              { id: "a1", name: "Rohan", active: true },
+              { id: "a2", name: "Retired", active: false },
+            ],
             statuses: ["active", "inactive", "converted"],
           },
         })
@@ -153,6 +166,8 @@ describe("Dashboard analysis", () => {
     expect(screen.getByTestId("responses-overview")).toBeInTheDocument()
     expect(screen.getByTestId("lead-disposition-bars")).toBeInTheDocument()
     expect(screen.getByTestId("response-kpis")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-disposition")).toHaveTextContent("Old Disp (inactive)")
+    expect(screen.getByTestId("filter-agent")).toHaveTextContent("Retired (inactive)")
   })
 
   it("hides assignment and agent filters for OWN scope", async () => {
@@ -169,6 +184,7 @@ describe("Dashboard analysis", () => {
     expect(screen.queryByTestId("filter-assignment")).not.toBeInTheDocument()
     expect(screen.queryByTestId("filter-agent")).not.toBeInTheDocument()
     expect(screen.getByTestId("filter-status")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-disposition")).toHaveTextContent("Old Disp (inactive)")
   })
 
   it("keeps Week preset highlighted after Apply when dates match", async () => {
@@ -211,8 +227,14 @@ describe("Dashboard analysis", () => {
           data: {
             stages: ["New"],
             sources: ["Manual"],
-            dispositions: [{ id: "d1", name: "Interested" }],
-            agents: [{ id: "a1", name: "Rohan" }],
+            dispositions: [
+              { id: "d1", name: "Interested", active: true },
+              { id: "d-old", name: "Old Disp", active: false },
+            ],
+            agents: [
+              { id: "a1", name: "Rohan", active: true },
+              { id: "a2", name: "Retired", active: false },
+            ],
             statuses: ["active"],
           },
         })

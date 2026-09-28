@@ -297,17 +297,24 @@ export default function Dispositions() {
       <Dialog open={show} onOpenChange={setShow}>
         <DialogContent className="bg-white" data-testid="disp-dialog">
           <DialogHeader>
-            <DialogTitle>{editing ? "Edit" : "New"} Response</DialogTitle>
+            <DialogTitle>
+              {editing ? "Edit" : "New"} Response{" "}
+              {editing && <span className="text-xs font-normal text-slate-400">(name locked)</span>}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <div>
               <Label>Name</Label>
               <Input
                 value={form.name}
+                disabled={Boolean(editing)}
                 className="mt-1 focus-visible:ring-sky-500"
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 data-testid="disp-name"
               />
+              {editing && (
+                <p className="mt-1 text-xs text-slate-500">Name cannot be changed after create</p>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>

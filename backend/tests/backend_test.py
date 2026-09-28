@@ -407,6 +407,57 @@ class TestLeads:
                        json={"lead_ids": ["x"], "agent_id": "nope"}, timeout=30)
         assert r.status_code == 404
 
+    def test_unassign_returns_to_pool(self, admin, agent):
+        p = "94" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_Unassign", "phone": p}, timeout=30).json()["lead"]
+        TestLeads.created.append(lead["id"])
+        assigned = admin.post(f"{BASE_URL}/api/leads/assign",
+                              json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        assert assigned.status_code == 200 and assigned.json()["assigned"] == 1
+        r = admin.post(f"{BASE_URL}/api/leads/unassign",
+                       json={"lead_ids": [lead["id"]]}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json()["unassigned"] == 1
+        got = admin.get(f"{BASE_URL}/api/leads/{lead['id']}", timeout=30).json()["lead"]
+        assert got["assigned_to"] is None
+        assert got["assigned_name"] is None
+        assert got["owner_id"] is None
+        assert got["assigned_date"] is None
+        listed = admin.get(
+            f"{BASE_URL}/api/leads?assignment_status=unassigned&search={p}", timeout=30).json()
+        assert any(l["id"] == lead["id"] for l in listed["leads"])
+
+    def test_unassign_already_unassigned_is_noop(self, admin):
+        p = "94" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_UnassignNoop", "phone": p}, timeout=30).json()["lead"]
+        TestLeads.created.append(lead["id"])
+        r = admin.post(f"{BASE_URL}/api/leads/unassign",
+                       json={"lead_ids": [lead["id"]]}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json()["unassigned"] == 0
+
+    def test_unassign_unknown_ids(self, admin):
+        r = admin.post(f"{BASE_URL}/api/leads/unassign",
+                       json={"lead_ids": ["missing-lead-id"]}, timeout=30)
+        assert r.status_code == 200, r.text
+        assert r.json()["unassigned"] == 0
+
+    def test_unassign_empty_lead_ids(self, admin):
+        r = admin.post(f"{BASE_URL}/api/leads/unassign", json={"lead_ids": []}, timeout=30)
+        assert r.status_code == 422
+
+    def test_unassign_over_page_cap(self, admin):
+        r = admin.post(f"{BASE_URL}/api/leads/unassign",
+                       json={"lead_ids": [f"id-{i}" for i in range(101)]}, timeout=30)
+        assert r.status_code == 422
+
+    def test_agent_denied_unassign(self, agent):
+        r = agent.post(f"{BASE_URL}/api/leads/unassign",
+                       json={"lead_ids": ["x"]}, timeout=30)
+        assert r.status_code == 403
+
     def test_auto_assign(self, admin):
         r = admin.post(f"{BASE_URL}/api/leads/auto-assign", timeout=120)
         assert r.status_code == 200, r.text
@@ -663,7 +714,7 @@ class TestLeads:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["stages"][0] == "New"
-        assert len(body["sources"]) == 8
+        assert len(body["sources"]) >= 8
         assert "Manual" in body["sources"]
         assert "Import" in body["sources"]
         assert isinstance(body["dispositions"], list)
@@ -965,8 +1016,9 @@ class TestLeads:
 # ---------------- Dispositions ----------------
 class TestDispositions:
     def test_crud(self, admin, agent):
+        created_name = uniq("TEST_Disp_")
         r = admin.post(f"{BASE_URL}/api/dispositions", json={
-            "name": uniq("TEST_Disp_"), "slot": 9, "type": "carry_forward",
+            "name": created_name, "slot": 9, "type": "carry_forward",
             "requires_acw": True, "color": "#0EA5E9",
             "default_pipeline_stage": "Qualified", "converts_to_client": False}, timeout=30)
         assert r.status_code == 200, r.text
@@ -983,13 +1035,36 @@ class TestDispositions:
         assert u.status_code == 200
         lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         upd = [x for x in lst if x["id"] == d["id"]][0]
-        assert upd["name"] == "TEST_Disp_Upd" and upd["type"] == "non_carry_forward"
+        assert upd["name"] == created_name and upd["type"] == "non_carry_forward"
         assert upd["default_pipeline_stage"] == "Lost"
         # agent cannot create
         assert agent.post(f"{BASE_URL}/api/dispositions", json={"name": "x"}, timeout=30).status_code == 403
         assert admin.delete(f"{BASE_URL}/api/dispositions/{d['id']}", timeout=30).status_code == 200
         lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
         assert not any(x["id"] == d["id"] for x in lst)
+
+    def test_disposition_name_locked_on_update(self, admin):
+        created_name = uniq("TEST_DispLock_")
+        created = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": created_name, "slot": 91, "type": "carry_forward",
+            "requires_acw": False, "color": "#0EA5E9",
+            "default_pipeline_stage": "Contacted", "converts_to_client": False}, timeout=30)
+        assert created.status_code == 200, created.text
+        d = created.json()["disposition"]
+        try:
+            u = admin.put(f"{BASE_URL}/api/dispositions/{d['id']}", json={
+                "name": "HACKED", "slot": 91, "type": "non_carry_forward",
+                "requires_acw": True, "default_pipeline_stage": "Lost",
+                "converts_to_client": False}, timeout=30)
+            assert u.status_code == 200, u.text
+            lst = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+            upd = [x for x in lst if x["id"] == d["id"]][0]
+            assert upd["name"] == created_name, "disposition name was renamed"
+            assert upd["type"] == "non_carry_forward"
+            assert upd["requires_acw"] is True
+            assert upd["default_pipeline_stage"] == "Lost"
+        finally:
+            admin.delete(f"{BASE_URL}/api/dispositions/{d['id']}", timeout=30)
 
     def test_converts_to_client_forces_won(self, admin):
         r = admin.post(f"{BASE_URL}/api/dispositions", json={
@@ -1146,6 +1221,108 @@ class TestLeadSources:
         assert "Import" in body["sources"]
         assert "Import" not in body["sources_creatable"]
         assert "Manual" in body["sources_creatable"]
+
+
+class TestFilterInactiveMasters:
+    created_sources = []
+    created_dispositions = []
+    created_users = []
+    created_leads = []
+
+    @classmethod
+    def teardown_class(cls):
+        from conftest import client_for
+        c = client_for("admin")
+        for lid in cls.created_leads:
+            c.delete(f"{BASE_URL}/api/leads/{lid}", timeout=30)
+        for sid in cls.created_sources:
+            c.delete(f"{BASE_URL}/api/lead-sources/{sid}", timeout=30)
+        for did in cls.created_dispositions:
+            c.delete(f"{BASE_URL}/api/dispositions/{did}", timeout=30)
+        for uid in cls.created_users:
+            c.delete(f"{BASE_URL}/api/users/{uid}", timeout=30)
+
+    def test_filter_options_requires_auth(self):
+        r = requests.get(f"{BASE_URL}/api/leads/filter-options", timeout=30)
+        assert r.status_code == 401
+        r2 = requests.get(f"{BASE_URL}/api/dashboard/filter-options", timeout=30)
+        assert r2.status_code == 401
+
+    def test_filter_options_affiliate_denied(self, affiliate):
+        r = affiliate.get(f"{BASE_URL}/api/leads/filter-options", timeout=30)
+        assert r.status_code == 403, r.text
+
+    def test_inactive_masters_in_filter_options(self, admin, agent):
+        src_name = uniq("TEST_InactSrc_")
+        disp_name = uniq("TEST_InactDisp_")
+        src = admin.post(f"{BASE_URL}/api/lead-sources", json={
+            "name": src_name, "order": 90, "active": True, "creatable": True}, timeout=30)
+        assert src.status_code == 200, src.text
+        sid = src.json()["lead_source"]["id"]
+        self.created_sources.append(sid)
+        disp = admin.post(f"{BASE_URL}/api/dispositions", json={
+            "name": disp_name, "slot": 20, "type": "carry_forward",
+            "requires_acw": False, "color": "#0EA5E9", "active": True}, timeout=30)
+        assert disp.status_code == 200, disp.text
+        did = disp.json()["disposition"]["id"]
+        self.created_dispositions.append(did)
+
+        su = admin.put(f"{BASE_URL}/api/lead-sources/{sid}", json={
+            "name": src_name, "order": 90, "active": False, "creatable": True}, timeout=30)
+        assert su.status_code == 200, su.text
+        du = admin.put(f"{BASE_URL}/api/dispositions/{did}", json={
+            "name": disp_name, "slot": 20, "type": "carry_forward",
+            "requires_acw": False, "color": "#0EA5E9", "active": False}, timeout=30)
+        assert du.status_code == 200, du.text
+
+        leads_fo = admin.get(f"{BASE_URL}/api/leads/filter-options", timeout=30)
+        assert leads_fo.status_code == 200, leads_fo.text
+        leads_body = leads_fo.json()
+        assert src_name in leads_body["sources"]
+        assert src_name not in leads_body["sources_creatable"]
+        disp_row = next((d for d in leads_body["dispositions"] if d["id"] == did), None)
+        assert disp_row is not None
+        assert disp_row["name"] == disp_name
+        assert disp_row["active"] is False
+
+        dash_fo = admin.get(f"{BASE_URL}/api/dashboard/filter-options", timeout=30)
+        assert dash_fo.status_code == 200, dash_fo.text
+        dash_body = dash_fo.json()
+        assert src_name in dash_body["sources"]
+        dash_disp = next((d for d in dash_body["dispositions"] if d["id"] == did), None)
+        assert dash_disp is not None and dash_disp["active"] is False
+
+        phone = "97" + uuid.uuid4().int.__str__()[:8]
+        bad = admin.post(f"{BASE_URL}/api/leads",
+                         json={"name": "TEST_InactSrcLead", "phone": phone, "source": src_name},
+                         timeout=30)
+        assert bad.status_code == 400, bad.text
+        assert "Invalid source" in bad.json()["detail"]
+
+        roles = admin.get(f"{BASE_URL}/api/roles", timeout=30).json()["roles"]
+        agent_role = [r for r in roles if r["name"] == "Agent"][0]["id"]
+        email = f"test_inact_agent_{uuid.uuid4().hex[:8]}@example.com"
+        cr = admin.post(f"{BASE_URL}/api/users", json={
+            "name": "TEST_InactAgent", "email": email, "password": TEST_PASSWORD,
+            "role_id": agent_role, "user_type": "caller", "daily_quota": 0, "active": True}, timeout=30)
+        assert cr.status_code == 200, cr.text
+        uid = cr.json()["user"]["id"]
+        self.created_users.append(uid)
+        assert admin.delete(f"{BASE_URL}/api/users/{uid}", timeout=30).status_code == 200
+
+        dash_after = admin.get(f"{BASE_URL}/api/dashboard/filter-options", timeout=30).json()
+        agent_row = next((a for a in dash_after["agents"] if a["id"] == uid), None)
+        assert agent_row is not None
+        assert agent_row["name"] == "TEST_InactAgent"
+        assert agent_row["active"] is False
+
+        assignable = admin.get(f"{BASE_URL}/api/leads/assignable-callers", timeout=30)
+        assert assignable.status_code == 200, assignable.text
+        assert uid not in [u["id"] for u in assignable.json()["users"]]
+
+        own = agent.get(f"{BASE_URL}/api/dashboard/filter-options", timeout=30)
+        assert own.status_code == 200, own.text
+        assert own.json()["agents"] == []
 
 
 # ---------------- Today calls + ACW gate ----------------
@@ -2411,7 +2588,7 @@ class TestReports:
         assert r.status_code == 200
         body = r.json()
         s = body["summary"]
-        for key in ["total_calls", "total_interested", "total_registered", "total_deposite",
+        for key in ["total_calls", "total_unique_leads", "total_interested", "total_registered", "total_deposite",
                     "conversion_ratio", "total_connected", "connect_rate",
                     "total_leads", "total_conversions", "conversion_rate",
                     "responses_logged", "converted_responses", "converted_response_share"]:
@@ -2419,19 +2596,107 @@ class TestReports:
         assert all("interested" in row for row in body["rows"])
         assert all("registered" in row for row in body["rows"])
         assert all("deposite" in row for row in body["rows"])
+        assert all("unique_leads" in row for row in body["rows"])
         assert all("conversion_ratio" in row for row in body["rows"])
         assert all("connect_rate" in row for row in body["rows"])
         assert all("top_disposition" in row for row in body["rows"])
         assert all("converted_responses" in row for row in body["rows"])
         for row in body["rows"]:
+            assert row["unique_leads"] <= row["calls"]
             expected = round((row["deposite"] / row["calls"] * 100) if row["calls"] else 0, 1)
             assert row["conversion_ratio"] == expected
+        assert s["total_unique_leads"] == sum(r["unique_leads"] for r in body["rows"])
         expected_summary = round(
             (s["total_deposite"] / s["total_calls"] * 100) if s["total_calls"] else 0, 1
         )
         assert s["conversion_ratio"] == expected_summary
         assert "disposition_breakdown" in body
         assert isinstance(body["disposition_breakdown"], list)
+
+    def test_reports_caller_unique_leads_vs_repeat_calls(self, admin, agent):
+        disps = admin.get(f"{BASE_URL}/api/dispositions", timeout=30).json()["dispositions"]
+        cf = _non_callback_carry_forward(disps)
+        p = "73" + uuid.uuid4().int.__str__()[:8]
+        lead = admin.post(f"{BASE_URL}/api/leads",
+                          json={"name": "TEST_UniqueLeads", "phone": p}, timeout=30).json()["lead"]
+        TestLeads.created.append(lead["id"])
+        admin.post(f"{BASE_URL}/api/leads/assign",
+                   json={"lead_ids": [lead["id"]], "agent_id": agent.user["id"]}, timeout=30)
+        before = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        before_row = next(
+            (r for r in before["rows"] if r["agent_id"] == agent.user["id"]),
+            {"unique_leads": 0, "calls": 0},
+        )
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r1 = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cf["id"], "notes": "TEST_unique_1",
+        }, timeout=30)
+        assert r1.status_code == 200, r1.text
+        agent.post(f"{BASE_URL}/api/calls/complete-acw", timeout=30)
+        r2 = agent.post(f"{BASE_URL}/api/calls/log", json={
+            "lead_id": lead["id"], "disposition_id": cf["id"], "notes": "TEST_unique_2",
+        }, timeout=30)
+        assert r2.status_code == 200, r2.text
+        after = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        row = next((r for r in after["rows"] if r["agent_id"] == agent.user["id"]), None)
+        assert row is not None
+        assert row["unique_leads"] == before_row["unique_leads"] + 1
+        assert row["calls"] >= before_row["calls"] + 2
+        assert row["unique_leads"] <= row["calls"]
+        assert after["summary"]["total_unique_leads"] == sum(r["unique_leads"] for r in after["rows"])
+
+    def test_reports_caller_null_lead_id_not_in_unique(self, admin, agent):
+        import asyncio
+        import os
+        from pathlib import Path
+        from motor.motor_asyncio import AsyncIOMotorClient
+        from dotenv import dotenv_values, load_dotenv
+
+        backend_dir = Path(__file__).resolve().parents[1]
+        load_dotenv(backend_dir / ".env")
+        env = dotenv_values(backend_dir / ".env")
+        mongo = os.environ.get("MONGO_URL") or env.get("MONGO_URL")
+        dbname = os.environ.get("DB_NAME") or env.get("DB_NAME")
+        company = os.environ.get("COMPANY_ID") or env.get("COMPANY_ID") or "default"
+
+        before = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+        before_row = next(
+            (r for r in before["rows"] if r["agent_id"] == agent.user["id"]),
+            {"unique_leads": 0, "calls": 0},
+        )
+        call_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        async def insert_and_delete(do_delete=False):
+            client = AsyncIOMotorClient(mongo)
+            local_db = client[dbname]
+            try:
+                if do_delete:
+                    await local_db.calls.delete_one({"id": call_id})
+                else:
+                    await local_db.calls.insert_one({
+                        "id": call_id,
+                        "companyId": company,
+                        "lead_id": None,
+                        "agent_id": agent.user["id"],
+                        "agent_name": agent.user.get("name") or "Rohan",
+                        "disposition_name": "Unknown",
+                        "outcome": "no_answer",
+                        "notes": "TEST_null_lead_id",
+                        "created_at": now,
+                    })
+            finally:
+                client.close()
+
+        asyncio.run(insert_and_delete(False))
+        try:
+            after = admin.get(f"{BASE_URL}/api/reports/caller", timeout=120).json()
+            row = next((r for r in after["rows"] if r["agent_id"] == agent.user["id"]), None)
+            assert row is not None
+            assert row["unique_leads"] == before_row["unique_leads"]
+            assert row["calls"] == before_row["calls"] + 1
+        finally:
+            asyncio.run(insert_and_delete(True))
 
     def test_reports_company_disposition_breakdown(self, admin):
         r = admin.get(f"{BASE_URL}/api/reports/company", timeout=120)
@@ -2453,7 +2718,9 @@ class TestReports:
         assert far.status_code == 200
         far_b = far.json()
         assert far_b["summary"]["total_calls"] == 0
+        assert far_b["summary"]["total_unique_leads"] == 0
         assert all(row["calls"] == 0 for row in far_b["rows"])
+        assert all(row["unique_leads"] == 0 for row in far_b["rows"])
         assert all_caller["summary"]["total_calls"] >= far_b["summary"]["total_calls"]
         co = admin.get(f"{BASE_URL}/api/reports/company?from=2099-01-01&to=2099-01-02", timeout=120)
         assert co.status_code == 200
@@ -2581,6 +2848,7 @@ class TestReports:
         ).text.splitlines()[0]
         assert "conversion_ratio" in caller_csv
         assert "deposite" in caller_csv
+        assert "unique_leads,calls" in caller_csv
         aff_csv = admin.get(
             f"{BASE_URL}/api/reports/export?kind=affiliate", timeout=120
         ).text.splitlines()[0]

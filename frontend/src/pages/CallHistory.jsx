@@ -18,6 +18,7 @@ import {
 import { History, Search, Download } from "lucide-react"
 import { monthStartISO, todayISO } from "@/components/dashboard/atoms"
 import { matchDatePresetId } from "@/components/filters/datePresets"
+import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { cn } from "@/lib/utils"
 
 export default function CallHistory() {
@@ -78,7 +79,7 @@ export default function CallHistory() {
   useEffect(() => { load().catch(() => {}) }, [load])
 
   useEffect(() => {
-    api.get("/dispositions").then((r) => setDispositions((r.data.dispositions || []).filter((d) => d.active))).catch(() => {})
+    api.get("/dispositions").then((r) => setDispositions(r.data.dispositions || [])).catch(() => {})
     if (!isOwnScope) {
       api.get("/dashboard/filter-options").then((r) => setAgents(r.data.agents || [])).catch(() => {})
     }
@@ -160,7 +161,7 @@ export default function CallHistory() {
                 onChange={(v) => setParam("disposition", v === "all" ? "" : v)}
                 options={[
                   { value: "all", label: "All dispositions" },
-                  ...dispositions.map((d) => ({ value: d.name, label: d.name })),
+                  ...dispositionFilterOptions(dispositions),
                 ]}
                 placeholder="All dispositions"
                 testId="call-filter-disposition"
@@ -174,7 +175,7 @@ export default function CallHistory() {
                   onChange={(v) => setParam("agent_id", v === "all" ? "" : v)}
                   options={[
                     { value: "all", label: "All agents" },
-                    ...agents.map((a) => ({ value: a.id, label: a.name })),
+                    ...agentFilterOptions(agents),
                   ]}
                   placeholder="All agents"
                   testId="call-filter-agent"

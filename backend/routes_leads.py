@@ -9,11 +9,11 @@ from lead_import_jobs import (
     job_status_dto,
     sse_response,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit,
-                  live_client_filter, escape_regex, clamp_page_size)
+                  live_client_filter, escape_regex, clamp_page_size, PAGE_SIZE_MAX)
 from lead_sources import (
     list_lead_sources,
     source_names,
@@ -175,6 +175,7 @@ async def update_disposition(did: str, body: DispositionIn, principal: dict = De
     if not existing:
         raise HTTPException(status_code=404, detail="Not found")
     fields = _normalize_disposition_fields(body)
+    fields["name"] = existing.get("name") or fields.get("name")
     await db.dispositions.update_one({"id": did, "companyId": COMPANY_ID},
                                      {"$set": {**fields, "order": body.slot}})
     before = _disposition_snapshot(existing)
@@ -299,6 +300,10 @@ class LeadIn(BaseModel):
 class AssignIn(BaseModel):
     lead_ids: List[str]
     agent_id: str
+
+
+class UnassignIn(BaseModel):
+    lead_ids: List[str] = Field(..., min_length=1, max_length=PAGE_SIZE_MAX)
 
 
 class AutoAssignAllocationIn(BaseModel):
@@ -567,10 +572,11 @@ async def leads_tab_counts(principal: dict = Depends(require("leads:view"))):
 
 @router.get("/leads/filter-options")
 async def leads_filter_options(principal: dict = Depends(require("leads:view"))):
+    # Include inactive masters so historic leads remain filterable.
     dispositions = await db.dispositions.find(
-        {"companyId": COMPANY_ID, "active": True}, {"_id": 0, "id": 1, "name": 1}
+        {"companyId": COMPANY_ID}, {"_id": 0, "id": 1, "name": 1, "active": 1}
     ).sort("order", 1).to_list(100)
-    sources = await source_names(active_only=True, creatable_only=False)
+    sources = await source_names(active_only=False, creatable_only=False)
     sources_creatable = await source_names(active_only=True, creatable_only=True)
     return {
         "stages": PIPELINE_STAGES,
@@ -697,6 +703,19 @@ async def assign_leads(body: AssignIn, principal: dict = Depends(require("leads:
                   "owner_id": body.agent_id, "assigned_date": now_utc().date().isoformat()}})
     await audit(principal, "assign", "lead", None, {"count": res.modified_count, "agent": au["name"]})
     return {"assigned": res.modified_count}
+
+
+@router.post("/leads/unassign")
+async def unassign_leads(body: UnassignIn, principal: dict = Depends(require("leads:assign"))):
+    res = await db.leads.update_many(
+        {"id": {"$in": body.lead_ids}, "companyId": COMPANY_ID},
+        {"$set": {
+            "assigned_to": None, "assigned_name": None,
+            "owner_id": None, "assigned_date": None,
+        }},
+    )
+    await audit(principal, "unassign", "lead", None, {"count": res.modified_count})
+    return {"unassigned": res.modified_count}
 
 
 @router.post("/leads/auto-assign")

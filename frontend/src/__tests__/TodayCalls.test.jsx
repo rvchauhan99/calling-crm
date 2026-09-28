@@ -180,7 +180,11 @@ function mockApi(acwId = null) {
         data: {
           stages: ["New", "Contacted"],
           sources: ["Website", "Referral", "Manual"],
-          dispositions: [{ id: "d1", name: "Interested" }, { id: "d2", name: "Call Back" }],
+          dispositions: [
+            { id: "d1", name: "Interested", active: true },
+            { id: "d2", name: "Call Back", active: true },
+            { id: "d-old", name: "Old Disp", active: false },
+          ],
         },
       })
     }
@@ -210,6 +214,7 @@ describe("TodayCalls workbench", () => {
     expect(screen.getByTestId("filter-stage")).toBeInTheDocument()
     expect(screen.getByTestId("filter-source")).toBeInTheDocument()
     expect(screen.getByTestId("filter-disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-disposition")).toHaveTextContent("Old Disp (inactive)")
     expect(screen.getByTestId("filter-sort")).toBeInTheDocument()
     expect(screen.getByTestId("kpi-acw")).toHaveTextContent("0")
     expect(screen.queryByTestId("dial-call-btn-lead-overdue")).not.toBeInTheDocument()

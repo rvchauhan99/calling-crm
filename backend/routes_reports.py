@@ -409,18 +409,19 @@ def in_range(iso_str, from_d: Optional[date], to_d: Optional[date]) -> bool:
 
 @router.get("/dashboard/filter-options")
 async def dashboard_filter_options(principal: dict = Depends(require("dashboard:view"))):
+    # Include inactive masters so historic leads remain filterable.
     dispositions = await db.dispositions.find(
-        {"companyId": COMPANY_ID, "active": True}, {"_id": 0, "id": 1, "name": 1}
+        {"companyId": COMPANY_ID}, {"_id": 0, "id": 1, "name": 1, "active": 1}
     ).sort("order", 1).to_list(100)
     agents = []
     if principal.get("data_scope") != "OWN":
-        q = {"companyId": COMPANY_ID, "user_type": "caller", "active": True}
+        q = {"companyId": COMPANY_ID, "user_type": "caller"}
         if principal.get("data_scope") == "TEAM":
             q["id"] = {"$in": await team_member_ids(principal)}
-        agents = await db.users.find(q, {"_id": 0, "id": 1, "name": 1}).to_list(500)
+        agents = await db.users.find(q, {"_id": 0, "id": 1, "name": 1, "active": 1}).sort("name", 1).to_list(2000)
     return {
         "stages": PIPELINE_STAGES,
-        "sources": await source_names(active_only=True, creatable_only=False),
+        "sources": await source_names(active_only=False, creatable_only=False),
         "dispositions": dispositions,
         "agents": agents,
         "statuses": ["active", "inactive", "converted"],
@@ -855,6 +856,29 @@ def _build_lead_filter(
     return lead
 
 
+def _calls_lead_join_stages(lead_match: Optional[dict] = None, extra_expr=None) -> list:
+    """Equality lookup onto leads, optional prefixed match and $expr."""
+    if lead_match is None and extra_expr is None:
+        return []
+    stages = [
+        {"$lookup": {
+            "from": "leads",
+            "localField": "lead_id",
+            "foreignField": "id",
+            "as": "_lead",
+        }},
+        {"$unwind": "$_lead"},
+    ]
+    match = {}
+    if lead_match is not None:
+        match.update(_prefix_lead_fields(lead_match))
+    if extra_expr is not None:
+        match["$expr"] = extra_expr
+    if match:
+        stages.append({"$match": match})
+    return stages
+
+
 def _agg_calls_by_disposition(
     match_q: dict,
     lead_match: Optional[dict] = None,
@@ -863,17 +887,7 @@ def _agg_calls_by_disposition(
 ):
     """Aggregate calls by disposition/outcome; optional indexed lead join via localField."""
     pipeline = [{"$match": match_q}]
-    if lead_match is not None:
-        pipeline.extend([
-            {"$lookup": {
-                "from": "leads",
-                "localField": "lead_id",
-                "foreignField": "id",
-                "as": "_lead",
-            }},
-            {"$unwind": "$_lead"},
-            {"$match": _prefix_lead_fields(lead_match)},
-        ])
+    pipeline.extend(_calls_lead_join_stages(lead_match))
     group_id = {
         "disposition_name": {"$ifNull": ["$disposition_name", "Unknown"]},
         "outcome": "$outcome",
@@ -883,6 +897,18 @@ def _agg_calls_by_disposition(
         group_id["agent_id"] = "$agent_id"
         group_stage["agent_name"] = {"$first": "$agent_name"}
     pipeline.append({"$group": group_stage})
+    return db.calls.aggregate(pipeline)
+
+
+def _agg_unique_leads_by_agent(match_q: dict, lead_match: Optional[dict] = None, extra_expr=None):
+    """Distinct lead_id per agent from the same call set as caller call counts."""
+    pipeline = [{"$match": match_q}]
+    pipeline.extend(_calls_lead_join_stages(lead_match, extra_expr))
+    pipeline.extend([
+        {"$match": {"lead_id": {"$nin": [None, ""]}}},
+        {"$group": {"_id": {"agent_id": "$agent_id", "lead_id": "$lead_id"}}},
+        {"$group": {"_id": "$_id.agent_id", "n": {"$sum": 1}}},
+    ])
     return db.calls.aggregate(pipeline)
 
 
@@ -921,7 +947,9 @@ async def caller_report(
     }
 
     # Per-agent call buckets from one aggregation (indexed lead join when filters on)
-    call_stats = {aid: {"disp_counts": {}, "connected": 0, "calls": 0} for aid in agent_ids}
+    call_stats = {
+        aid: {"disp_counts": {}, "connected": 0, "calls": 0, "unique_leads": 0} for aid in agent_ids
+    }
     skip_calls = False
     if lead_attrs_on:
         probe = _build_lead_filter(
@@ -943,6 +971,8 @@ async def caller_report(
             **reportable_calls_filter(),
             **date_q,
         }
+        unique_lead_match = None
+        unique_extra_expr = None
         if lead_attrs_on and assignment_status != "unassigned":
             pipeline_lead = _build_lead_filter(
                 date_q=date_q,
@@ -953,20 +983,12 @@ async def caller_report(
                 assignment_status=None,
                 apply_assignment=False,
             )
+            unique_lead_match = pipeline_lead
+            unique_extra_expr = {"$eq": ["$_lead.assigned_to", "$agent_id"]}
             # Equality lookup + lead attrs + lead assigned to the call's agent
             pipe = [
                 {"$match": cq},
-                {"$lookup": {
-                    "from": "leads",
-                    "localField": "lead_id",
-                    "foreignField": "id",
-                    "as": "_lead",
-                }},
-                {"$unwind": "$_lead"},
-                {"$match": {
-                    **_prefix_lead_fields(pipeline_lead),
-                    "$expr": {"$eq": ["$_lead.assigned_to", "$agent_id"]},
-                }},
+                *_calls_lead_join_stages(pipeline_lead, unique_extra_expr),
                 {"$group": {
                     "_id": {
                         "agent_id": "$agent_id",
@@ -988,6 +1010,7 @@ async def caller_report(
                 assignment_status=assignment_status,
                 apply_assignment=True,
             )
+            unique_lead_match = pipeline_lead
             agg_iter = _agg_calls_by_disposition(cq, pipeline_lead, group_by_agent=True)
         else:
             agg_iter = _agg_calls_by_disposition(cq, None, group_by_agent=True)
@@ -1003,6 +1026,11 @@ async def caller_report(
             call_stats[aid]["disp_counts"][dn] = call_stats[aid]["disp_counts"].get(dn, 0) + n
             if key.get("outcome") == "connected":
                 call_stats[aid]["connected"] += n
+
+        async for row in _agg_unique_leads_by_agent(cq, unique_lead_match, unique_extra_expr):
+            aid = row.get("_id")
+            if aid in call_stats:
+                call_stats[aid]["unique_leads"] = int(row.get("n") or 0)
 
     # One leads aggregation for per-agent lead/conversion counts
     lead_counts = {aid: {"leads": 0, "conversions": 0} for aid in agent_ids}
@@ -1033,9 +1061,12 @@ async def caller_report(
     rows = []
     for a in agents:
         aid = a["id"]
-        stats = call_stats.get(aid) or {"disp_counts": {}, "connected": 0, "calls": 0}
+        stats = call_stats.get(aid) or {
+            "disp_counts": {}, "connected": 0, "calls": 0, "unique_leads": 0,
+        }
         disp_counts = stats["disp_counts"]
         calls = stats["calls"]
+        unique_leads = int(stats.get("unique_leads") or 0)
         connected = stats["connected"]
         top_disp = max(disp_counts.items(), key=lambda x: x[1])[0] if disp_counts else None
         converted_disp_calls = sum(
@@ -1055,6 +1086,7 @@ async def caller_report(
             "interested": interested,
             "registered": registered,
             "deposite": deposite,
+            "unique_leads": unique_leads,
             "calls": calls,
             "conversion_ratio": conversion_ratio,
             "connected": connected,
@@ -1073,6 +1105,7 @@ async def caller_report(
         rows = [r for r in rows if r["agent_id"] in allowed]
     rows.sort(key=lambda x: (-x["deposite"], -x["calls"], -x["interested"]))
     total_calls = sum(r["calls"] for r in rows)
+    total_unique_leads = sum(r["unique_leads"] for r in rows)
     total_connected = sum(r["connected"] for r in rows)
     total_leads = sum(r["leads"] for r in rows)
     total_conversions = sum(r["conversions"] for r in rows)
@@ -1091,6 +1124,7 @@ async def caller_report(
     ]
     summary = {
         "total_calls": total_calls,
+        "total_unique_leads": total_unique_leads,
         "total_interested": total_interested,
         "total_registered": total_registered,
         "total_deposite": total_deposite,
@@ -1372,7 +1406,7 @@ async def export_report(
         ))["rows"]
         return _csv_response(
             data,
-            ["name", "interested", "registered", "deposite", "calls", "conversion_ratio"],
+            ["name", "interested", "registered", "deposite", "unique_leads", "calls", "conversion_ratio"],
             "caller_report.csv",
         )
     if kind == "affiliate":

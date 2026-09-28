@@ -104,7 +104,15 @@ function mockApi() {
       return Promise.resolve({ data: JSON.parse(JSON.stringify(board)) })
     }
     if (url === "/leads/filter-options") {
-      return Promise.resolve({ data: { sources: ["Website"], dispositions: [] } })
+      return Promise.resolve({
+        data: {
+          sources: ["Website"],
+          dispositions: [
+            { id: "d1", name: "Interested", active: true },
+            { id: "d-old", name: "Old Disp", active: false },
+          ],
+        },
+      })
     }
     if (url === "/dispositions") {
       return Promise.resolve({
@@ -116,7 +124,14 @@ function mockApi() {
       })
     }
     if (url === "/dashboard/filter-options") {
-      return Promise.resolve({ data: { agents: [{ id: "a1", name: "Rohan" }] } })
+      return Promise.resolve({
+        data: {
+          agents: [
+            { id: "a1", name: "Rohan", active: true },
+            { id: "a2", name: "Retired", active: false },
+          ],
+        },
+      })
     }
     if (url === "/leads/lead-1") {
       return Promise.resolve({
@@ -156,6 +171,8 @@ describe("Pipeline workbench", () => {
     })
     expect(screen.getByText("Source")).toBeInTheDocument()
     expect(screen.getByText("Disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("pipeline-filter-disposition")).toHaveTextContent("Old Disp (inactive)")
+    expect(screen.getByTestId("pipeline-filter-agent")).toHaveTextContent("Retired (inactive)")
     expect(screen.getByTestId("pipeline-card-last-remarks-lead-1")).toHaveTextContent(
       "Needs site survey",
     )
@@ -180,6 +197,7 @@ describe("Pipeline workbench", () => {
     expect(within(dialog).getByTestId("log-call-last-remarks")).toHaveTextContent(
       "Needs site survey",
     )
+    expect(within(dialog).queryByText("Old Disp (inactive)")).not.toBeInTheDocument()
   })
 
   it("list view shows pagination when total exceeds page", async () => {

@@ -18,7 +18,13 @@ jest.mock("@/lib/api", () => ({
 }))
 
 jest.mock("@/components/ui/searchable-select", () => ({
-  SearchableSelect: ({ testId }) => <div data-testid={testId} />,
+  SearchableSelect: ({ testId, options = [] }) => (
+    <select data-testid={testId}>
+      {(options || []).map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  ),
 }))
 
 jest.mock("sonner", () => ({ toast: { success: jest.fn(), error: jest.fn() } }))
@@ -39,10 +45,24 @@ describe("CallHistory filters", () => {
         })
       }
       if (url === "/dispositions") {
-        return Promise.resolve({ data: { dispositions: [{ id: "d1", name: "Interested", active: true }] } })
+        return Promise.resolve({
+          data: {
+            dispositions: [
+              { id: "d1", name: "Interested", active: true },
+              { id: "d-old", name: "Old Disp", active: false },
+            ],
+          },
+        })
       }
       if (url === "/dashboard/filter-options") {
-        return Promise.resolve({ data: { agents: [{ id: "ag1", name: "Rohan" }] } })
+        return Promise.resolve({
+          data: {
+            agents: [
+              { id: "ag1", name: "Rohan", active: true },
+              { id: "ag2", name: "Retired", active: false },
+            ],
+          },
+        })
       }
       return Promise.resolve({ data: {} })
     })
@@ -52,8 +72,9 @@ describe("CallHistory filters", () => {
     render(<CallHistory />)
     await waitFor(() => {
       expect(screen.getByTestId("call-history-filters")).toBeInTheDocument()
+      expect(screen.getByTestId("call-filter-disposition")).toHaveTextContent("Old Disp (inactive)")
     })
-    expect(screen.getByTestId("call-filter-disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("call-filter-agent")).toHaveTextContent("Retired (inactive)")
     expect(screen.getByTestId("call-filter-from")).toBeInTheDocument()
     expect(screen.getByText("Disposition")).toBeInTheDocument()
   })

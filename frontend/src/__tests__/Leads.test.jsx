@@ -208,6 +208,11 @@ describe("Leads role visibility", () => {
       if (url === "/leads/assignable-callers") {
         return Promise.resolve({ data: { users: [{ id: "agent-joslin", name: "Joslin" }] } })
       }
+      if (url === "/dashboard/filter-options") {
+        return Promise.resolve({
+          data: { agents: [{ id: "agent-joslin", name: "Joslin", active: true }] },
+        })
+      }
       return Promise.resolve({ data: {} })
     })
 
@@ -219,6 +224,52 @@ describe("Leads role visibility", () => {
       expect(leadsCall[0]).toContain("assigned_to=agent-joslin")
       expect(leadsCall[0]).toContain("assignment_status=assigned")
       expect(screen.getByText("Agent: Joslin")).toBeInTheDocument()
+    })
+  })
+
+  it("loads filter agents from dashboard filter-options and assign agents separately", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/leads?")) {
+        return Promise.resolve({ data: mockLeadsResponse })
+      }
+      if (url === "/leads/tab-counts") {
+        return Promise.resolve({ data: { unassigned: 5, assigned: 10 } })
+      }
+      if (url === "/leads/filter-options") {
+        return Promise.resolve({
+          data: {
+            stages: ["New"],
+            dispositions: [{ id: "d-old", name: "Old Disp", active: false }],
+          },
+        })
+      }
+      if (url === "/leads/assignable-callers") {
+        return Promise.resolve({ data: { users: [{ id: "a-active", name: "Active Caller" }] } })
+      }
+      if (url === "/dashboard/filter-options") {
+        return Promise.resolve({
+          data: {
+            agents: [
+              { id: "a-active", name: "Active Caller", active: true },
+              { id: "a-old", name: "Retired Caller", active: false },
+            ],
+          },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(api.get).toHaveBeenCalledWith("/dashboard/filter-options")
+      expect(api.get).toHaveBeenCalledWith("/leads/assignable-callers")
     })
   })
 
@@ -335,6 +386,7 @@ describe("Leads role visibility", () => {
       expect(screen.getByTestId("lead-check-lead-1")).toHaveAttribute("data-state", "checked")
       expect(screen.getByTestId("lead-check-lead-2")).toHaveAttribute("data-state", "checked")
       expect(screen.getByTestId("assign-selected-btn")).toHaveTextContent("Assign (2)")
+      expect(screen.queryByTestId("unassign-selected-btn")).not.toBeInTheDocument()
     })
 
     await userEvent.click(selectAll)
@@ -410,5 +462,132 @@ describe("Leads role visibility", () => {
       expect(screen.getByTestId("leads-select-all")).toHaveAttribute("data-state", "indeterminate")
       expect(screen.getByTestId("assign-selected-btn")).toHaveTextContent("Assign (1)")
     })
+  })
+})
+
+const twoAssignedLeadsResponse = {
+  leads: [
+    {
+      id: "lead-1",
+      name: "Lead One",
+      phone: "+919876543210",
+      source: "Manual",
+      status: "active",
+      pipeline_stage: "New",
+      assigned_to: "agent-1",
+      assigned_name: "Rohan",
+    },
+    {
+      id: "lead-2",
+      name: "Lead Two",
+      phone: "+919876543211",
+      source: "Manual",
+      status: "active",
+      pipeline_stage: "New",
+      assigned_to: "agent-1",
+      assigned_name: "Rohan",
+    },
+  ],
+  total: 2,
+  page: 1,
+  page_size: 25,
+}
+
+function mockAssignedTabLeadsApi() {
+  api.get.mockImplementation((url) => {
+    if (url.startsWith("/leads?")) {
+      return Promise.resolve({ data: twoAssignedLeadsResponse })
+    }
+    if (url === "/leads/tab-counts") {
+      return Promise.resolve({ data: { unassigned: 0, assigned: 2 } })
+    }
+    if (url === "/leads/filter-options") {
+      return Promise.resolve({ data: { stages: ["New"], dispositions: [] } })
+    }
+    if (url === "/leads/assignable-callers") {
+      return Promise.resolve({ data: { users: [{ id: "agent-1", name: "Rohan" }] } })
+    }
+    return Promise.resolve({ data: {} })
+  })
+}
+
+describe("Leads reverse to unassigned", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    __setMockSearchParams(new URLSearchParams("tab=assigned"))
+    mockAssignedTabLeadsApi()
+    api.post.mockResolvedValue({ data: { unassigned: 2 } })
+  })
+
+  it("shows reverse action after selecting all assigned-page leads", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-select-all")).toBeInTheDocument()
+    })
+    await userEvent.click(screen.getByTestId("leads-select-all"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("assign-selected-btn")).toHaveTextContent("Assign (2)")
+      expect(screen.getByTestId("unassign-selected-btn")).toHaveTextContent("Reverse to unassigned (2)")
+    })
+  })
+
+  it("posts selected ids on confirm and does not post on cancel", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm === "leads:assign",
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("leads-select-all")).toBeInTheDocument()
+    })
+    await userEvent.click(screen.getByTestId("leads-select-all"))
+    await userEvent.click(screen.getByTestId("unassign-selected-btn"))
+
+    await waitFor(() => {
+      expect(screen.getByTestId("unassign-dialog")).toBeInTheDocument()
+      expect(screen.getByTestId("unassign-dialog")).toHaveTextContent("Reverse 2 leads to unassigned")
+    })
+
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    expect(api.post).not.toHaveBeenCalled()
+
+    await userEvent.click(screen.getByTestId("unassign-selected-btn"))
+    await waitFor(() => {
+      expect(screen.getByTestId("confirm-unassign-btn")).toBeInTheDocument()
+    })
+    await userEvent.click(screen.getByTestId("confirm-unassign-btn"))
+
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith("/leads/unassign", {
+        lead_ids: ["lead-1", "lead-2"],
+      })
+    })
+  })
+
+  it("hides reverse action when the user cannot assign", async () => {
+    useAuth.mockReturnValue({
+      can: () => false,
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+
+    render(<Leads />)
+
+    await waitFor(() => {
+      expect(screen.getByTestId("lead-row-lead-1")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("unassign-selected-btn")).not.toBeInTheDocument()
+    expect(screen.queryByTestId("leads-select-all")).not.toBeInTheDocument()
   })
 })

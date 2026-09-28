@@ -16,6 +16,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { dispositionFilterOptions } from "@/lib/masterOptions"
 import { toast } from "sonner"
 import {
   PhoneCall, PhoneOutgoing, AlertTriangle, CheckCircle2, Search, Phone,
@@ -220,11 +221,11 @@ export default function TodayCalls() {
     return []
   }, [filterOptions])
 
-  const dispositionNames = useMemo(() => {
+  const dispositionFilterOpts = useMemo(() => {
     if (filterOptions?.dispositions?.length) {
-      return filterOptions.dispositions.map((d) => d.name).filter(Boolean)
+      return dispositionFilterOptions(filterOptions.dispositions)
     }
-    return dispositions.map((d) => d.name).filter(Boolean)
+    return dispositionFilterOptions(dispositions)
   }, [filterOptions, dispositions])
 
   const items = useMemo(() => listData?.items || [], [listData?.items])
@@ -437,7 +438,7 @@ export default function TodayCalls() {
               { value: "all", label: "All dispositions" },
               { value: "__none__", label: "No disposition" },
               { value: "__has__", label: "Has disposition" },
-              ...dispositionNames.map((d) => ({ value: d, label: d })),
+              ...dispositionFilterOpts,
             ]}
             placeholder="All dispositions"
             testId="filter-disposition"

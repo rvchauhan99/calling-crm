@@ -121,6 +121,12 @@ async def lifespan(_app: FastAPI):
     except Exception as e:
         logger.exception("ensure_disposition_pipeline_links failed: %s", e)
     try:
+        from disposition_id_relink import ensure_disposition_id_relink
+        result = await ensure_disposition_id_relink()
+        logger.info("Disposition id relink ensured: %s", result)
+    except Exception as e:
+        logger.exception("ensure_disposition_id_relink failed: %s", e)
+    try:
         from disposition_pipeline import ensure_lead_pipeline_from_disposition
         result = await ensure_lead_pipeline_from_disposition()
         logger.info("Lead pipeline backfill ensured: %s", result)

@@ -9,6 +9,7 @@ import { LeadImportDialog } from "@/components/leads/LeadImportDialog"
 import { PhoneField } from "@/components/leads/PhoneField"
 import { EmailField } from "@/components/leads/EmailField"
 import { SourceSelect } from "@/components/leads/SourceSelect"
+import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { LastRemarks } from "@/components/leads/LastRemarks"
@@ -29,7 +30,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { toast } from "sonner"
-import { Upload, Plus, Search, Users, Wand2, UserCheck, Download } from "lucide-react"
+import { Upload, Plus, Search, Users, Wand2, UserCheck, UserMinus, Download } from "lucide-react"
 
 const SORT_OPTIONS = [
   { value: "created_at_desc", label: "Newest created" },
@@ -47,10 +48,12 @@ export default function Leads() {
   const [tabCounts, setTabCounts] = useState(null)
   const [filterOptions, setFilterOptions] = useState(null)
   const [selected, setSelected] = useState([])
-  const [agents, setAgents] = useState([])
+  const [filterAgents, setFilterAgents] = useState([])
+  const [assignAgents, setAssignAgents] = useState([])
   const [lead360Id, setLead360Id] = useState(null)
   const [showCreate, setShowCreate] = useState(false)
   const [showAssign, setShowAssign] = useState(false)
+  const [showUnassign, setShowUnassign] = useState(false)
   const [showAutoAssign, setShowAutoAssign] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [assignAgent, setAssignAgent] = useState("")
@@ -147,20 +150,16 @@ export default function Leads() {
 
   useEffect(() => {
     if (isOwnScope) return
-    const loadAgents = async () => {
-      try {
-        if (can("leads:assign")) {
-          const { data: d } = await api.get("/leads/assignable-callers")
-          setAgents(d.users || [])
-          return
-        }
-        const { data: d } = await api.get("/dashboard/filter-options")
-        setAgents(d.agents || [])
-      } catch {
-        setAgents([])
-      }
-    }
-    loadAgents()
+    api.get("/dashboard/filter-options")
+      .then((r) => setFilterAgents(r.data.agents || []))
+      .catch(() => setFilterAgents([]))
+  }, [isOwnScope])
+
+  useEffect(() => {
+    if (isOwnScope || !can("leads:assign")) return
+    api.get("/leads/assignable-callers")
+      .then((r) => setAssignAgents(r.data.users || []))
+      .catch(() => setAssignAgents([]))
   }, [can, isOwnScope])
 
   const filterChips = useMemo(() => {
@@ -177,7 +176,7 @@ export default function Leads() {
       })
     }
     if (!isOwnScope && assignedTo) {
-      const name = agents.find((a) => a.id === assignedTo)?.name || assignedTo
+      const name = filterAgents.find((a) => a.id === assignedTo)?.name || assignedTo
       list.push({ key: "assigned_to", label: `Agent: ${name}`, onRemove: () => setParam("assigned_to", "") })
     }
     if (sort && sort !== "created_at_desc") {
@@ -185,7 +184,7 @@ export default function Leads() {
       list.push({ key: "sort", label: `Sort: ${label}`, onRemove: () => setParam("sort", "") })
     }
     return list
-  }, [search, status, stage, source, disposition, assignedTo, sort, isOwnScope, agents, setParam])
+  }, [search, status, stage, source, disposition, assignedTo, sort, isOwnScope, filterAgents, setParam])
 
   const createLead = async () => {
     const { fieldErrors, isValid } = validateLeadForm(form)
@@ -242,6 +241,15 @@ export default function Leads() {
       toast.success("Leads assigned")
       setShowAssign(false)
       setAssignAgent("")
+      load()
+    } catch (e) { toast.error(formatApiError(e.response?.data?.detail)) }
+  }
+
+  const doUnassign = async () => {
+    try {
+      await api.post("/leads/unassign", { lead_ids: selected })
+      toast.success("Leads moved to unassigned")
+      setShowUnassign(false)
       load()
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)) }
   }
@@ -362,6 +370,7 @@ export default function Leads() {
                 onChange={(v) => setParam("source", v === "all" ? "" : v)}
                 includeImport
                 includeAll
+                includeInactive
                 label=""
                 placeholder="All sources"
                 testId="source-filter"
@@ -375,21 +384,21 @@ export default function Leads() {
                 options={[
                   { value: "all", label: "All dispositions" },
                   { value: "__none__", label: "No disposition" },
-                  ...(filterOptions?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                  ...dispositionFilterOptions(filterOptions?.dispositions),
                 ]}
                 placeholder="All dispositions"
                 testId="disposition-filter"
                 className="h-8"
               />
             </FilterField>
-            {!isOwnScope && agents.length > 0 && (
+            {!isOwnScope && filterAgents.length > 0 && (
               <FilterField label="Agent" className="w-40">
                 <SearchableSelect
                   value={assignedTo || "all"}
                   onChange={(v) => setParam("assigned_to", v === "all" ? "" : v)}
                   options={[
                     { value: "all", label: "All agents" },
-                    ...agents.map((a) => ({ value: a.id, label: a.name })),
+                    ...agentFilterOptions(filterAgents),
                   ]}
                   placeholder="All agents"
                   testId="agent-filter"
@@ -410,9 +419,16 @@ export default function Leads() {
           </>
         )}
         actions={selected.length > 0 && can("leads:assign") && (
-          <Button variant="outline" className="h-8" onClick={() => setShowAssign(true)} data-testid="assign-selected-btn">
-            <UserCheck size={16} className="mr-1.5" /> Assign ({selected.length})
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" className="h-8" onClick={() => setShowAssign(true)} data-testid="assign-selected-btn">
+              <UserCheck size={16} className="mr-1.5" /> Assign ({selected.length})
+            </Button>
+            {tab === "assigned" && (
+              <Button variant="outline" className="h-8" onClick={() => setShowUnassign(true)} data-testid="unassign-selected-btn">
+                <UserMinus size={16} className="mr-1.5" /> Reverse to unassigned ({selected.length})
+              </Button>
+            )}
+          </div>
         )}
         chips={filterChips}
         onClearAll={filterChips.length ? clearAllFilters : undefined}
@@ -580,7 +596,7 @@ export default function Leads() {
           <SearchableSelect
             value={assignAgent}
             onChange={setAssignAgent}
-            options={agents.map((a) => ({ value: a.id, label: a.name }))}
+            options={assignAgents.map((a) => ({ value: a.id, label: a.name }))}
             placeholder="Select caller"
             searchPlaceholder="Search callers…"
             testId="assign-agent-select"
@@ -588,6 +604,18 @@ export default function Leads() {
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAssign(false)}>Cancel</Button>
             <Button className="bg-sky-500 hover:bg-sky-600" disabled={!assignAgent} onClick={doAssign} data-testid="confirm-assign-btn">Assign</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={showUnassign} onOpenChange={setShowUnassign}>
+        <DialogContent className="bg-white" data-testid="unassign-dialog" aria-describedby={undefined}>
+          <DialogHeader>
+            <DialogTitle>Reverse {selected.length} leads to unassigned</DialogTitle>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowUnassign(false)}>Cancel</Button>
+            <Button className="bg-sky-500 hover:bg-sky-600" onClick={doUnassign} data-testid="confirm-unassign-btn">Reverse</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

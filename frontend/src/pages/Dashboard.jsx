@@ -4,6 +4,7 @@ import api from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, Money, Spinner, LoadingRegion } from "@/components/common"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
@@ -349,7 +350,7 @@ export default function Dashboard() {
                       options={[
                         { value: "all", label: "All dispositions" },
                         { value: "__none__", label: "No disposition" },
-                        ...(options?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                        ...dispositionFilterOptions(options?.dispositions),
                       ]}
                       placeholder="All dispositions"
                       testId="filter-disposition"
@@ -379,7 +380,7 @@ export default function Dashboard() {
                         onChange={(v) => fc("assigned_to", v === "all" ? "" : v)}
                         options={[
                           { value: "all", label: "All agents" },
-                          ...(options?.agents || []).map((a) => ({ value: a.id, label: a.name })),
+                          ...agentFilterOptions(options?.agents),
                         ]}
                         placeholder="All agents"
                         testId="filter-agent"

@@ -61,6 +61,7 @@ const callerPayload = {
     interested: 6,
     registered: 2,
     deposite: 1,
+    unique_leads: 4,
     calls: 10,
     conversion_ratio: 10,
     connected: 6,
@@ -74,6 +75,7 @@ const callerPayload = {
   }],
   summary: {
     total_calls: 10,
+    total_unique_leads: 4,
     total_interested: 6,
     total_registered: 2,
     total_deposite: 1,
@@ -129,10 +131,16 @@ describe("Reports page", () => {
       if (url === "/dashboard/filter-options") {
         return Promise.resolve({
           data: {
-            agents: [{ id: "a1", name: "Rohan" }],
+            agents: [
+              { id: "a1", name: "Rohan", active: true },
+              { id: "a2", name: "Retired", active: false },
+            ],
             sources: ["Manual"],
             stages: ["New"],
-            dispositions: [{ id: "d1", name: "Interested" }],
+            dispositions: [
+              { id: "d1", name: "Interested", active: true },
+              { id: "d-old", name: "Old Disp", active: false },
+            ],
           },
         })
       }
@@ -153,6 +161,8 @@ describe("Reports page", () => {
       expect(screen.getByTestId("caller-kpis")).toBeInTheDocument()
     })
     expect(screen.getByTestId("kpi-calls")).toBeInTheDocument()
+    expect(screen.getByTestId("kpi-unique-leads")).toBeInTheDocument()
+    expect(screen.getByTestId("kpi-unique-leads")).toHaveTextContent("Lead Count")
     expect(screen.getByTestId("kpi-interested")).toBeInTheDocument()
     expect(screen.getByTestId("kpi-deposite")).toBeInTheDocument()
     expect(screen.getByTestId("tab-caller")).toBeInTheDocument()
@@ -176,9 +186,11 @@ describe("Reports page", () => {
     expect(screen.getByTestId("caller-table-head-interested")).toHaveTextContent("Interested")
     expect(screen.getByTestId("caller-table-head-registered")).toHaveTextContent("Registered")
     expect(screen.getByTestId("caller-table-head-deposite")).toHaveTextContent("Deposite")
+    expect(screen.getByTestId("caller-table-head-unique_leads")).toHaveTextContent("Lead Count")
     expect(screen.getByTestId("caller-table-head-calls")).toHaveTextContent("Total Calls")
     expect(screen.getByTestId("caller-table-head-conversion_ratio")).toHaveTextContent("conversionRatios")
     expect(screen.getByTestId("caller-table-totals")).toHaveTextContent("TOTAL")
+    expect(screen.getByTestId("caller-table-totals")).toHaveTextContent("4")
 
     const initialCallerCall = api.get.mock.calls.find(
       (c) => typeof c[0] === "string" && c[0].startsWith("/reports/caller?"),
@@ -247,8 +259,10 @@ describe("Reports page", () => {
     expect(screen.getByTestId("filter-stage")).toBeInTheDocument()
     expect(screen.getByTestId("filter-source")).toBeInTheDocument()
     expect(screen.getByTestId("filter-disposition")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-disposition")).toHaveTextContent("Old Disp (inactive)")
     expect(screen.getByTestId("filter-assignment")).toBeInTheDocument()
     expect(screen.getByTestId("filter-agent")).toBeInTheDocument()
+    expect(screen.getByTestId("filter-agent")).toHaveTextContent("Retired (inactive)")
 
     await act(async () => {
       screen.getByTestId("reports-apply").click()

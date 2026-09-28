@@ -118,12 +118,15 @@ API `seed()` creates menus, roles, admin from `ADMIN_*`, and demo users via `DEM
 On every boot the API also:
 
 - Ensures disposition masters have `default_pipeline_stage` (e.g. Call Back / Busy → Contacted)
+- Runs a **one-shot** lead/call id relink (`disposition_lead_id_relink_v1`) so `disposition_id` matches the current master for the stored `disposition_name`
 - Runs a **one-shot** lead backfill (`disposition_lead_pipeline_backfill_v1`) so existing leads’ `pipeline_stage` matches those masters
 
-Master ensure alone does **not** rewrite historical lead stages — that is the lead backfill. Manual dry-run / re-apply:
+Master ensure alone does **not** rewrite historical lead stages — that is the lead backfill. Id relink uses stored names as the source of truth (it does not rename dispositions). Manual dry-run / re-apply:
 
 ```bash
 cd backend && source .venv/bin/activate
+python scripts/relink_lead_disposition_ids.py
+python scripts/relink_lead_disposition_ids.py --apply
 python scripts/backfill_lead_pipeline_from_disposition.py
 python scripts/backfill_lead_pipeline_from_disposition.py --apply
 ```

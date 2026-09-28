@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { inactiveMasterLabel } from "@/lib/masterOptions"
 import api from "@/lib/api"
 
 export function SourceSelect({
@@ -7,6 +8,7 @@ export function SourceSelect({
   onChange,
   includeImport = false,
   includeAll = false,
+  includeInactive = false,
   placeholder = "Select source",
   label = "Source",
   testId = "lead-field-source",
@@ -19,22 +21,27 @@ export function SourceSelect({
     api.get("/lead-sources")
       .then((r) => {
         if (cancelled) return
-        const rows = (r.data.lead_sources || []).filter((s) => s.active !== false)
-        const names = rows
+        const rows = (r.data.lead_sources || []).filter(
+          (s) => includeInactive || s.active !== false,
+        )
+        const options = rows
           .filter((s) => includeImport || s.creatable !== false)
-          .map((s) => s.name)
-          .filter(Boolean)
-        setSourceList(names)
+          .filter((s) => s.name)
+          .map((s) => ({
+            value: s.name,
+            label: inactiveMasterLabel(s.name, s.active),
+          }))
+        setSourceList(options)
       })
       .catch(() => {
         if (!cancelled) setSourceList([])
       })
     return () => { cancelled = true }
-  }, [includeImport])
+  }, [includeImport, includeInactive])
 
   const options = [
     ...(includeAll ? [{ value: "all", label: "All sources" }] : []),
-    ...sourceList.map((s) => ({ value: s, label: s })),
+    ...sourceList,
   ]
 
   return (

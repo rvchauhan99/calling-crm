@@ -154,3 +154,67 @@ describe("Dispositions activity history", () => {
     expect(screen.queryByTestId("disp-history-disp-1")).not.toBeInTheDocument()
   })
 })
+
+describe("Dispositions name lock on edit", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    useAuth.mockReturnValue({
+      can: () => true,
+      dataScope: "ALL",
+      user: { id: "admin-1", user_type: "admin" },
+    })
+    api.get.mockResolvedValue({ data: { dispositions: [mockDisp] } })
+    api.post.mockResolvedValue({ data: { disposition: { id: "disp-new", name: "Follow Up" } } })
+    api.put.mockResolvedValue({ data: { ok: true } })
+  })
+
+  it("keeps name enabled when creating a new response", async () => {
+    render(<Dispositions />)
+    await waitFor(() => {
+      expect(screen.getByTestId("new-disposition-btn")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("new-disposition-btn"))
+    await waitFor(() => {
+      expect(screen.getByTestId("disp-dialog")).toBeInTheDocument()
+    })
+    const nameInput = screen.getByTestId("disp-name")
+    expect(nameInput).not.toBeDisabled()
+    expect(screen.queryByText("Name cannot be changed after create")).not.toBeInTheDocument()
+  })
+
+  it("disables name on edit and still puts the original name", async () => {
+    render(<Dispositions />)
+    await waitFor(() => {
+      expect(screen.getByTestId("edit-disp-disp-1")).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByTestId("edit-disp-disp-1"))
+    await waitFor(() => {
+      expect(screen.getByTestId("disp-dialog")).toBeInTheDocument()
+    })
+    const nameInput = screen.getByTestId("disp-name")
+    expect(nameInput).toBeDisabled()
+    expect(nameInput).toHaveValue("Ringing")
+    expect(screen.getByText("Name cannot be changed after create")).toBeInTheDocument()
+    expect(screen.getByText(/name locked/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId("save-disp-btn"))
+    await waitFor(() => {
+      expect(api.put).toHaveBeenCalledWith("/dispositions/disp-1", expect.objectContaining({
+        name: "Ringing",
+      }))
+    })
+  })
+
+  it("hides edit without dispositions:edit", async () => {
+    useAuth.mockReturnValue({
+      can: (perm) => perm !== "dispositions:edit",
+      dataScope: "ALL",
+      user: { id: "agent-1" },
+    })
+    render(<Dispositions />)
+    await waitFor(() => {
+      expect(screen.getByTestId("disp-row-disp-1")).toBeInTheDocument()
+    })
+    expect(screen.queryByTestId("edit-disp-disp-1")).not.toBeInTheDocument()
+  })
+})

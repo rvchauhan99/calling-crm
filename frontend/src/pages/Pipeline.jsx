@@ -14,6 +14,7 @@ import { LastRemarks } from "@/components/leads/LastRemarks"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
@@ -339,7 +340,7 @@ export default function Pipeline() {
                 options={[
                   { value: "all", label: "All dispositions" },
                   { value: "__none__", label: "No disposition" },
-                  ...(filterOptions?.dispositions || []).map((d) => ({ value: d.name, label: d.name })),
+                  ...dispositionFilterOptions(filterOptions?.dispositions),
                 ]}
                 placeholder="All dispositions"
                 testId="pipeline-filter-disposition"
@@ -353,7 +354,7 @@ export default function Pipeline() {
                   onChange={(v) => setParam("assigned_to", v === "all" ? "" : v)}
                   options={[
                     { value: "all", label: "All agents" },
-                    ...agents.map((a) => ({ value: a.id, label: a.name })),
+                    ...agentFilterOptions(agents),
                   ]}
                   placeholder="All agents"
                   testId="pipeline-filter-agent"
