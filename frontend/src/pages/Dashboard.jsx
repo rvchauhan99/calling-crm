@@ -8,6 +8,7 @@ import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOption
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { DATE_PRESETS, matchDatePresetId } from "@/components/filters/datePresets"
 import {
   PanelHeader, KpiCard, MiniBar, InsightCard, buildLeadHref, todayISO,
@@ -30,6 +31,7 @@ const defaultFilters = () => ({
   disposition: "",
   assignment_status: "",
   assigned_to: "",
+  country: "",
 })
 
 const STATUS_TABS = [
@@ -39,7 +41,7 @@ const STATUS_TABS = [
   { id: "converted", label: "Converted", value: "converted" },
 ]
 
-const FILTER_KEYS = ["from", "to", "status", "source", "stage", "disposition", "assignment_status", "assigned_to", "preset"]
+const FILTER_KEYS = ["from", "to", "status", "source", "stage", "disposition", "assignment_status", "assigned_to", "country", "preset"]
 
 const filtersFromParams = (params) => {
   const base = defaultFilters()
@@ -81,7 +83,7 @@ export default function Dashboard() {
     if (next.to) p.set("to", next.to)
     if (presetId) p.set("preset", presetId)
     else p.delete("preset")
-    ;["status", "source", "stage", "disposition", "assignment_status", "assigned_to"].forEach((k) => {
+    ;["status", "source", "stage", "disposition", "assignment_status", "assigned_to", "country"].forEach((k) => {
       if (next[k]) p.set(k, next[k])
       else p.delete(k)
     })
@@ -101,6 +103,7 @@ export default function Dashboard() {
       if (f.disposition) p.set("disposition", f.disposition)
       if (!isOwnScope && f.assignment_status) p.set("assignment_status", f.assignment_status)
       if (!isOwnScope && f.assigned_to) p.set("assigned_to", f.assigned_to)
+      if (f.country) p.set("country", f.country)
       const { data: summary } = await api.get(`/dashboard?${p.toString()}`)
       setData(summary)
     } catch {
@@ -177,6 +180,7 @@ export default function Dashboard() {
     if (!isOwnScope && filters.assignment_status) {
       list.push({ key: "assignment_status", label: `Assignment: ${filters.assignment_status}` })
     }
+    if (filters.country) list.push({ key: "country", label: `Country: ${filters.country}` })
     if (!isOwnScope && filters.assigned_to) {
       const name = options?.agents?.find((a) => a.id === filters.assigned_to)?.name || filters.assigned_to
       list.push({ key: "assigned_to", label: `Agent: ${name}` })
@@ -203,6 +207,7 @@ export default function Dashboard() {
     const params = {
       status: filters.status || undefined,
       source: filters.source || undefined,
+      country: filters.country || undefined,
       stage: filters.stage || undefined,
       disposition: filters.disposition || undefined,
       ...extra,
@@ -330,6 +335,7 @@ export default function Dashboard() {
                       className="h-8"
                     />
                   </FilterField>
+                  <CountryFilter value={filters.country} onChange={(v) => fc("country", v)} />
                   <FilterField label="Source" className="w-36">
                     <SearchableSelect
                       value={filters.source || "all"}

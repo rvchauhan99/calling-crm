@@ -1,31 +1,14 @@
-const INDIAN_MOBILE_RE = /^\+91[6-9]\d{9}$/
-const INTL_E164_RE = /^\+[1-9]\d{7,14}$/
+import { parsePhoneNumberFromString } from "libphonenumber-js"
+
 const EMAIL_RE = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/
 
-function normalizePhoneClient(raw) {
-  const s = String(raw || "").trim()
-  if (!s) return ""
-  const plus = s.startsWith("+")
-  const digits = s.replace(/\D/g, "")
-  if (!digits) return ""
-  if (plus) return `+${digits}`
-  if (digits.length === 10) return `+91${digits}`
-  if (digits.startsWith("91")) return `+${digits}`
-  if (digits.startsWith("0")) return `+91${digits.replace(/^0+/, "")}`
-  return `+${digits}`
-}
-
 export function validatePhone(value) {
-  const trimmed = String(value || "").trim()
+  const trimmed = String(value || "").trim().replace(/^[pP]:\s*/, "")
   if (!trimmed) return "Phone is required"
-  const hadPlus = trimmed.startsWith("+")
-  const normalized = normalizePhoneClient(trimmed)
-  if (!normalized) return "Invalid phone number. Use 10-digit mobile or +91…"
-  if (hadPlus) {
-    if (!INTL_E164_RE.test(normalized)) return "Invalid phone number. Use 10-digit mobile or +91…"
-  } else if (!INDIAN_MOBILE_RE.test(normalized)) {
-    return "Invalid phone number. Use 10-digit mobile or +91…"
-  }
+  const parsed = trimmed.startsWith("+")
+    ? parsePhoneNumberFromString(trimmed)
+    : parsePhoneNumberFromString(trimmed, "IN")
+  if (!parsed || !parsed.isValid()) return "Invalid phone number."
   return ""
 }
 

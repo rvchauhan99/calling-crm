@@ -18,6 +18,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
@@ -42,6 +43,7 @@ export default function Clients() {
   const [unconverting, setUnconverting] = useState(false)
 
   const search = params.get("search") || ""
+  const country = params.get("country") || ""
   const statusTab = params.get("status") === "inactive" ? "inactive" : "active"
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
 
@@ -58,19 +60,20 @@ export default function Clients() {
     try {
       const p = new URLSearchParams()
       if (search) p.set("search", search)
+      if (country) p.set("country", country)
       p.set("status", statusTab)
       p.set("page", page)
       p.set("page_size", pageSize)
       const [{ data: list }, { data: counts }] = await Promise.all([
         api.get(`/clients?${p.toString()}`),
-        api.get("/clients/tab-counts"),
+        api.get(`/clients/tab-counts${country ? `?country=${encodeURIComponent(country)}` : ""}`),
       ])
       setData(list)
       setTabCounts(counts)
     } finally {
       setLoading(false)
     }
-  }, [search, page, pageSize, statusTab])
+  }, [search, country, page, pageSize, statusTab])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -170,7 +173,9 @@ export default function Clients() {
         </TabsList>
       </Tabs>
 
-      <div className="mb-4 relative max-w-md">
+      <div className="mb-4 flex flex-wrap items-end gap-3">
+        <CountryFilter value={country} onChange={(v) => setParam("country", v)} />
+      <div className="relative max-w-md flex-1">
         <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
         <Input
           placeholder="Search name or phone…"
@@ -179,6 +184,7 @@ export default function Clients() {
           onChange={(e) => setParam("search", e.target.value)}
           className="pl-9 focus-visible:ring-sky-500"
         />
+      </div>
       </div>
 
       <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
@@ -207,7 +213,10 @@ export default function Clients() {
                     data-testid={`client-row-${c.id}`}
                   >
                     <TableCell className="font-medium text-slate-800">{c.name}</TableCell>
-                    <TableCell className="tabular text-slate-600">{c.phone}</TableCell>
+                    <TableCell className="tabular text-slate-600">
+                      {c.phone_country ? <span className="mr-1 text-xs font-medium text-slate-500">{c.phone_country}</span> : null}
+                      {c.phone}
+                    </TableCell>
                     <TableCell className="text-slate-500">{c.assigned_name || "—"}</TableCell>
                     <TableCell>
                       {c.ftd_at

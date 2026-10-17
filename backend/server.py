@@ -91,6 +91,12 @@ async def lifespan(_app: FastAPI):
     except Exception as e:
         logger.exception("ensure_ip_access_defaults failed: %s", e)
     try:
+        from phone_country import ensure_phone_country_india
+        result = await ensure_phone_country_india()
+        logger.info("Phone country India backfill: %s", result)
+    except Exception as e:
+        logger.exception("ensure_phone_country_india failed: %s", e)
+    try:
         from seed import ensure_telephony_menus
         await ensure_telephony_menus()
         logger.info("Telephony menus ensured")

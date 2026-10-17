@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, scope_filter, client_scope_filter, team_member_ids, now_utc,
                   live_client_filter, live_ledger_filter, reportable_calls_filter, escape_regex,
-                  clamp_page_size)
+                  clamp_page_size, apply_country_filter)
 from lead_sources import source_names
 from caller_sales import sales_disp_counts
 
@@ -438,6 +438,7 @@ async def dashboard(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     fresh: Optional[int] = Query(None, description="Set to 1 to bypass short TTL cache"),
     principal: dict = Depends(require("dashboard:view")),
 ):
@@ -445,6 +446,7 @@ async def dashboard(
         "from": from_date, "to": to_date, "status": status, "source": source,
         "stage": stage, "disposition": disposition,
         "assignment_status": assignment_status, "assigned_to": assigned_to,
+        "country": country,
     })
     if not fresh:
         cached = _dashboard_cache_get(cache_key)
@@ -501,6 +503,11 @@ async def dashboard(
             lq["$or"] = [{"disposition_name": None}, {"disposition_name": {"$in": others}}]
         else:
             lq["disposition_name"] = {"$in": dispositions_f} if len(dispositions_f) > 1 else dispositions_f[0]
+
+    try:
+        apply_country_filter(lq, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     apply_created_range(lq, from_d, to_d)
     apply_created_range(cq, from_d, to_d)
@@ -754,8 +761,9 @@ def _lead_attr_filters_active(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
 ) -> bool:
-    return bool(status or source or stage or disposition or assignment_status or assigned_to)
+    return bool(status or source or stage or disposition or assignment_status or assigned_to or (country or "").strip())
 
 
 def _apply_lead_attr_filters(
@@ -767,11 +775,16 @@ def _apply_lead_attr_filters(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     is_own: bool = False,
     principal_id: Optional[str] = None,
     apply_assignment: bool = True,
 ) -> dict:
     """Apply dashboard-parity lead attribute filters onto a Mongo match dict."""
+    try:
+        apply_country_filter(lq, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     statuses = csv_list(status)
     sources = csv_list(source)
     stages = csv_list(stage)
@@ -836,6 +849,7 @@ def _build_lead_filter(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     is_own: bool = False,
     principal_id: Optional[str] = None,
     apply_assignment: bool = True,
@@ -849,6 +863,7 @@ def _build_lead_filter(
         disposition=disposition,
         assignment_status=assignment_status,
         assigned_to=assigned_to,
+        country=country,
         is_own=is_own,
         principal_id=principal_id,
         apply_assignment=apply_assignment,
@@ -922,6 +937,7 @@ async def caller_report(
     stage: Optional[str] = None,
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
+    country: Optional[str] = None,
     principal: dict = Depends(require("reports:view")),
 ):
     from_d, to_d = _report_date_range(from_date, to_date)
@@ -929,7 +945,7 @@ async def caller_report(
     scope = await scope_filter(principal, "agent_id")
     is_own = principal.get("data_scope") == "OWN"
     lead_attrs_on = _lead_attr_filters_active(
-        status, source, stage, disposition, assignment_status, None,
+        status, source, stage, disposition, assignment_status, None, country,
     )
     agents = await db.users.find(
         {"companyId": COMPANY_ID, "user_type": "caller"}, {"_id": 0, "id": 1, "name": 1},
@@ -959,6 +975,7 @@ async def caller_report(
             stage=stage,
             disposition=disposition,
             assignment_status=assignment_status if assignment_status == "unassigned" else None,
+            country=country,
             apply_assignment=assignment_status == "unassigned",
         )
         if await db.leads.count_documents(probe) == 0:
@@ -981,6 +998,7 @@ async def caller_report(
                 stage=stage,
                 disposition=disposition,
                 assignment_status=None,
+                country=country,
                 apply_assignment=False,
             )
             unique_lead_match = pipeline_lead
@@ -1008,6 +1026,7 @@ async def caller_report(
                 stage=stage,
                 disposition=disposition,
                 assignment_status=assignment_status,
+                country=country,
                 apply_assignment=True,
             )
             unique_lead_match = pipeline_lead
@@ -1043,6 +1062,7 @@ async def caller_report(
             stage=stage,
             disposition=disposition,
             assignment_status=assignment_status,
+            country=country,
             apply_assignment=False,
         )
         async for row in db.leads.aggregate([
@@ -1153,6 +1173,7 @@ async def caller_report(
 async def affiliate_report(
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
+    country: Optional[str] = None,
     principal: dict = Depends(require("reports:view")),
 ):
     from_d, to_d = _report_date_range(from_date, to_date)
@@ -1172,6 +1193,10 @@ async def affiliate_report(
     rows = []
     for a in affs:
         cq = {"companyId": COMPANY_ID, "affiliate_id": a["id"], **live_client_filter(), **date_q}
+        try:
+            apply_country_filter(cq, country)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         clients_n = await db.clients.count_documents(cq)
         bal_rows = await db.clients.aggregate([
             {"$match": cq},
@@ -1225,6 +1250,7 @@ async def company_report(
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     principal: dict = Depends(require("reports:view")),
 ):
     from_d, to_d = _report_date_range(from_date, to_date)
@@ -1239,6 +1265,7 @@ async def company_report(
         disposition=disposition,
         assignment_status=assignment_status,
         assigned_to=assigned_to,
+        country=country,
         is_own=is_own,
         principal_id=principal.get("id"),
     )
@@ -1277,6 +1304,7 @@ async def company_report(
 
     lead_attrs_on = _lead_attr_filters_active(
         status, source, stage, disposition, assignment_status, assigned_to if not is_own else None,
+        country,
     )
     lead_match = None
     skip_calls = False
@@ -1289,6 +1317,7 @@ async def company_report(
             disposition=disposition,
             assignment_status=assignment_status,
             assigned_to=assigned_to,
+            country=country,
             is_own=is_own,
             principal_id=principal.get("id"),
         )
@@ -1390,6 +1419,7 @@ async def export_report(
     stage: Optional[str] = None,
     disposition: Optional[str] = None,
     assignment_status: Optional[str] = None,
+    country: Optional[str] = None,
     principal: dict = Depends(require("reports:export")),
 ):
     if kind == "caller":
@@ -1402,6 +1432,7 @@ async def export_report(
             stage=stage,
             disposition=disposition,
             assignment_status=assignment_status,
+            country=country,
             principal=principal,
         ))["rows"]
         return _csv_response(
@@ -1410,7 +1441,9 @@ async def export_report(
             "caller_report.csv",
         )
     if kind == "affiliate":
-        data = (await affiliate_report(from_date=from_date, to_date=to_date, principal=principal))["rows"]
+        data = (await affiliate_report(
+            from_date=from_date, to_date=to_date, country=country, principal=principal,
+        ))["rows"]
         return _csv_response(
             data, ["name", "clients", "ftd", "ftd_rate", "total_balance"], "affiliate_report.csv"
         )
@@ -1423,6 +1456,7 @@ async def export_report(
         disposition=disposition,
         assignment_status=assignment_status,
         assigned_to=assigned_to,
+        country=country,
         principal=principal,
     ))["rows"]
     return _csv_response(data, ["source", "leads", "conversions", "conversion_rate"], "company_report.csv")
@@ -1434,12 +1468,17 @@ async def export_calls(
     agent_id: Optional[str] = None,
     from_date: Optional[str] = Query(None, alias="from"),
     to_date: Optional[str] = Query(None, alias="to"),
+    country: Optional[str] = None,
     principal: dict = Depends(require("call_history:export")),
 ):
     from_d = parse_date(from_date)
     to_d = parse_date(to_date)
     scope = await scope_filter(principal, "agent_id")
     q = {"companyId": COMPANY_ID, **scope}
+    try:
+        apply_country_filter(q, country, "lead_phone_country")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if search:
         safe = escape_regex(search)
         q["$or"] = [{"lead_name": {"$regex": safe, "$options": "i"}},

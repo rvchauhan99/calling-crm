@@ -4,7 +4,14 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
-from core import COMPANY_ID, db, new_id, now_iso, normalize_phone
+from core import COMPANY_ID, db, new_id, now_iso, normalize_phone, parse_phone
+
+
+def _country_or_in(raw: str) -> str:
+    try:
+        return parse_phone(raw)[1]
+    except ValueError:
+        return "IN"
 
 
 def max_concurrent() -> int:
@@ -131,6 +138,7 @@ async def upsert_provider_call(
                     {"$set": {
                         "lead_name": lead.get("name") or "",
                         "lead_phone": lead.get("phone") or existing.get("lead_phone"),
+                        "lead_phone_country": lead.get("phone_country") or existing.get("lead_phone_country") or "IN",
                     }},
                 )
                 existing["lead_name"] = lead.get("name") or ""
@@ -142,6 +150,7 @@ async def upsert_provider_call(
         "lead_id": lead_id,
         "lead_name": "",
         "lead_phone": normalize_phone(to_number or from_number) or (to_number or from_number),
+        "lead_phone_country": _country_or_in(to_number or from_number or ""),
         "agent_id": agent_id,
         "agent_name": agent_name or "",
         "disposition_id": None,
@@ -178,6 +187,7 @@ async def upsert_provider_call(
         if lead:
             doc["lead_name"] = lead.get("name") or ""
             doc["lead_phone"] = lead.get("phone") or doc["lead_phone"]
+            doc["lead_phone_country"] = lead.get("phone_country") or "IN"
     await db.calls.insert_one(dict(doc))
     return doc
 
@@ -199,12 +209,17 @@ async def ensure_missed_inbound_lead(from_number: str, did: str) -> Optional[dic
         return lead
     from core import new_id as nid
     lid = nid()
-    phone = normalize_phone(from_number) or from_number
+    try:
+        phone, phone_country = parse_phone(from_number)
+    except ValueError:
+        phone = normalize_phone(from_number) or from_number
+        phone_country = "IN"
     doc = {
         "id": lid,
         "companyId": COMPANY_ID,
         "name": f"Missed {phone}",
         "phone": phone,
+        "phone_country": phone_country,
         "email": "",
         "source": "Manual",
         "status": "active",

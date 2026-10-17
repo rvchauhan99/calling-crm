@@ -7,6 +7,7 @@ import { TablePagination, DEFAULT_PAGE_SIZE } from "@/components/TablePagination
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { usePageParams } from "@/hooks/usePageParams"
 import { Button } from "@/components/ui/button"
@@ -35,6 +36,7 @@ export default function CallHistory() {
   const disposition = params.get("disposition") || ""
   const agentId = params.get("agent_id") || ""
   const from = params.get("from") || ""
+  const country = params.get("country") || ""
   const to = params.get("to") || ""
   const sort = params.get("sort") || "created_at_desc"
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
@@ -66,6 +68,7 @@ export default function CallHistory() {
       if (!isOwnScope && agentId) p.set("agent_id", agentId)
       if (from) p.set("from", from)
       if (to) p.set("to", to)
+      if (country) p.set("country", country)
       if (sort) p.set("sort", sort)
       p.set("page", page)
       p.set("page_size", pageSize)
@@ -74,7 +77,7 @@ export default function CallHistory() {
     } finally {
       setLoading(false)
     }
-  }, [search, disposition, agentId, from, to, sort, page, pageSize, isOwnScope])
+  }, [search, disposition, agentId, from, to, country, sort, page, pageSize, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -92,6 +95,7 @@ export default function CallHistory() {
     if (!isOwnScope && agentId) p.set("agent_id", agentId)
     if (from) p.set("from", from)
     if (to) p.set("to", to)
+    if (country) p.set("country", country)
     const res = await fetch(`${API}/call-history/export?${p.toString()}`, {
       headers: { Authorization: `Bearer ${getToken()}` },
     })
@@ -155,6 +159,7 @@ export default function CallHistory() {
             <FilterField label="To" className="w-36">
               <Input type="date" value={to} onChange={(e) => setParam("to", e.target.value)} className="h-8" data-testid="call-filter-to" />
             </FilterField>
+            <CountryFilter value={country} onChange={(v) => setParam("country", v)} />
             <FilterField label="Disposition" className="min-w-[10rem] w-44">
               <SearchableSelect
                 value={disposition || "all"}
@@ -242,7 +247,7 @@ export default function CallHistory() {
                     </TableCell>
                     <TableCell>
                       <LeadPhoneLink leadId={c.lead_id} onOpen={setLead360Id} testId={`call-lead-phone-${c.id}`}>
-                        {c.lead_phone}
+                        {c.lead_phone_country ? `${c.lead_phone_country} ` : ""}{c.lead_phone}
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell className="text-slate-500">{c.agent_name}</TableCell>

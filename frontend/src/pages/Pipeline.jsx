@@ -4,6 +4,7 @@ import api, { formatApiError } from "@/lib/api"
 import { useAuth } from "@/context/AuthContext"
 import { PageHeader, StatusPill, EmptyState, LoadingRegion } from "@/components/common"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { TablePagination } from "@/components/TablePagination"
 import { usePageParams } from "@/hooks/usePageParams"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
@@ -38,6 +39,7 @@ export default function Pipeline() {
   const view = params.get("view") === "list" ? "list" : "kanban"
   const search = params.get("search") || ""
   const source = params.get("source") || ""
+  const country = params.get("country") || ""
   const disposition = params.get("disposition") || ""
   const assignedTo = params.get("assigned_to") || ""
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams, {
@@ -62,10 +64,11 @@ export default function Pipeline() {
     const p = new URLSearchParams()
     if (search) p.set("search", search)
     if (source) p.set("source", source)
+    if (country) p.set("country", country)
     if (disposition) p.set("disposition", disposition)
     if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
     return p
-  }, [search, source, disposition, assignedTo, isOwnScope])
+  }, [search, source, country, disposition, assignedTo, isOwnScope])
 
   const setParam = useCallback((k, v) => {
     const p = new URLSearchParams(params)
@@ -320,6 +323,7 @@ export default function Pipeline() {
         )}
         fields={(
           <>
+            <CountryFilter value={country} onChange={(v) => setParam("country", v)} />
             <FilterField label="Source" className="w-36">
               <SearchableSelect
                 value={source || "all"}
@@ -411,7 +415,7 @@ export default function Pipeline() {
                       aria-label={`${l.name} in ${stage}`}
                     >
                       <p className="text-sm font-medium text-slate-800">{l.name}</p>
-                      <p className="tabular text-xs text-slate-500">{l.phone}</p>
+                      <p className="tabular text-xs text-slate-500">{l.phone_country ? `${l.phone_country} ` : ""}{l.phone}</p>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         <span className="text-[11px] text-slate-400">{l.source || "—"}</span>
                         {l.assigned_name && (
@@ -506,7 +510,7 @@ export default function Pipeline() {
                       </TableCell>
                       <TableCell>
                         <LeadPhoneLink leadId={l.id} onOpen={openDetail} testId={`pipeline-phone-${l.id}`}>
-                          {l.phone}
+                          {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
                         </LeadPhoneLink>
                       </TableCell>
                       <TableCell>

@@ -16,6 +16,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { dispositionFilterOptions } from "@/lib/masterOptions"
 import { toast } from "sonner"
 import {
@@ -86,6 +87,7 @@ export default function TodayCalls() {
   const search = params.get("search") || ""
   const stageFilter = params.get("stage") || ""
   const sourceFilter = params.get("source") || ""
+  const country = params.get("country") || ""
   const dispositionFilter = params.get("disposition") || ""
 
   const [countsData, setCountsData] = useState(null)
@@ -120,9 +122,10 @@ export default function TodayCalls() {
   const [searchLocal, setSearchLocal] = useDebouncedParam(search, commitSearch)
 
   const loadCounts = useCallback(async () => {
-    const { data } = await api.get("/today-calls/counts")
+    const qs = country ? `?country=${encodeURIComponent(country)}` : ""
+    const { data } = await api.get(`/today-calls/counts${qs}`)
     setCountsData(data)
-  }, [])
+  }, [country])
 
   const loadList = useCallback(async () => {
     setLoading(true)
@@ -135,13 +138,14 @@ export default function TodayCalls() {
       if (search) p.set("search", search)
       if (stageFilter) p.set("pipeline_stage", stageFilter)
       if (sourceFilter) p.set("source", sourceFilter)
+      if (country) p.set("country", country)
       if (dispositionFilter) p.set("disposition", dispositionFilter)
       const { data } = await api.get(`/today-calls?${p.toString()}`)
       setListData(data)
     } finally {
       setLoading(false)
     }
-  }, [page, pageSize, bucketFilter, sortBy, search, stageFilter, sourceFilter, dispositionFilter])
+  }, [page, pageSize, bucketFilter, sortBy, search, stageFilter, sourceFilter, country, dispositionFilter])
 
   const loadMeta = useCallback(async () => {
     const [ds, fo] = await Promise.all([
@@ -411,6 +415,13 @@ export default function TodayCalls() {
             className="h-8"
           />
         </div>
+        <CountryFilter
+          value={country}
+          onChange={(v) => patchParams((p) => {
+            if (!v) p.delete("country")
+            else p.set("country", v)
+          })}
+        />
         <div className="w-32 shrink-0">
           <SearchableSelect
             value={sourceFilter || "all"}
@@ -504,7 +515,7 @@ export default function TodayCalls() {
                             </LeadPhoneLink>
                             <div className="mt-0.5">
                               <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`today-phone-${l.id}`}>
-                                {l.phone}
+                                {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
                               </LeadPhoneLink>
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">

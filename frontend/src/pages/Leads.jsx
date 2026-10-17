@@ -15,6 +15,7 @@ import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { LastRemarks } from "@/components/leads/LastRemarks"
 import { validateLeadForm } from "@/lib/leadValidation"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
 import { usePageParams } from "@/hooks/usePageParams"
 import { Button } from "@/components/ui/button"
@@ -64,6 +65,7 @@ export default function Leads() {
   const status = params.get("status") || ""
   const stage = params.get("stage") || ""
   const source = params.get("source") || ""
+  const country = params.get("country") || ""
   const disposition = params.get("disposition") || ""
   const assignedTo = params.get("assigned_to") || ""
   const sort = params.get("sort") || "created_at_desc"
@@ -109,12 +111,13 @@ export default function Leads() {
 
   const loadCounts = useCallback(async () => {
     try {
-      const { data: counts } = await api.get("/leads/tab-counts")
+      const countsQs = country ? `?country=${encodeURIComponent(country)}` : ""
+      const { data: counts } = await api.get(`/leads/tab-counts${countsQs}`)
       setTabCounts(counts)
     } catch {
       setTabCounts(null)
     }
-  }, [])
+  }, [country])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -124,6 +127,7 @@ export default function Leads() {
       if (status) p.set("status", status)
       if (stage) p.set("stage", stage)
       if (source) p.set("source", source)
+      if (country) p.set("country", country)
       if (disposition) p.set("disposition", disposition)
       if (!isOwnScope && assignedTo) p.set("assigned_to", assignedTo)
       if (sort && sort !== "created_at_desc") p.set("sort", sort)
@@ -140,7 +144,7 @@ export default function Leads() {
     } finally {
       setLoading(false)
     }
-  }, [search, status, stage, source, disposition, assignedTo, sort, tab, page, pageSize, loadCounts, isOwnScope])
+  }, [search, status, stage, source, country, disposition, assignedTo, sort, tab, page, pageSize, loadCounts, isOwnScope])
 
   useEffect(() => { load().catch(() => {}) }, [load])
 
@@ -168,6 +172,7 @@ export default function Leads() {
     if (status) list.push({ key: "status", label: `Status: ${status}`, onRemove: () => setParam("status", "") })
     if (stage) list.push({ key: "stage", label: `Stage: ${stage}`, onRemove: () => setParam("stage", "") })
     if (source) list.push({ key: "source", label: `Source: ${source}`, onRemove: () => setParam("source", "") })
+    if (country) list.push({ key: "country", label: `Country: ${country}`, onRemove: () => setParam("country", "") })
     if (disposition) {
       list.push({
         key: "disposition",
@@ -184,7 +189,7 @@ export default function Leads() {
       list.push({ key: "sort", label: `Sort: ${label}`, onRemove: () => setParam("sort", "") })
     }
     return list
-  }, [search, status, stage, source, disposition, assignedTo, sort, isOwnScope, filterAgents, setParam])
+  }, [search, status, stage, source, country, disposition, assignedTo, sort, isOwnScope, filterAgents, setParam])
 
   const createLead = async () => {
     const { fieldErrors, isValid } = validateLeadForm(form)
@@ -377,6 +382,7 @@ export default function Leads() {
                 className="h-8"
               />
             </FilterField>
+            <CountryFilter value={country} onChange={(v) => setParam("country", v)} />
             <FilterField label="Disposition" className="min-w-[10rem] w-44">
               <SearchableSelect
                 value={disposition || "all"}
@@ -482,6 +488,7 @@ export default function Leads() {
                     </TableCell>
                     <TableCell>
                       <LeadPhoneLink leadId={l.id} onOpen={openDetail} testId={`lead-phone-${l.id}`}>
+                        {l.phone_country ? <span className="mr-1 text-xs font-medium text-slate-500">{l.phone_country}</span> : null}
                         {l.phone}
                       </LeadPhoneLink>
                     </TableCell>

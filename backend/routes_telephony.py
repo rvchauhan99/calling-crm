@@ -405,6 +405,7 @@ async def telephony_webhook(
                         "lead_id": lead["id"],
                         "lead_name": lead.get("name"),
                         "lead_phone": lead.get("phone"),
+                        "lead_phone_country": lead.get("phone_country") or "IN",
                         "outcome": "missed",
                     }},
                 )
@@ -685,6 +686,7 @@ async def stringee_event(request: Request):
                     "lead_id": lead["id"],
                     "lead_name": lead.get("name"),
                     "lead_phone": lead.get("phone"),
+                    "lead_phone_country": lead.get("phone_country") or "IN",
                     "outcome": "missed",
                 }},
             )

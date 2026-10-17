@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from core import (
     db, COMPANY_ID, require, scope_filter, client_scope_filter, new_id, now_iso, audit,
-    live_client_filter, live_ledger_filter, escape_regex, clamp_page_size,
+    live_client_filter, live_ledger_filter, escape_regex, clamp_page_size, apply_country_filter,
 )
 
 router = APIRouter(prefix="/api", tags=["clients"])
@@ -47,11 +47,16 @@ class NoteIn(BaseModel):
 
 @router.get("/clients")
 async def list_clients(search: Optional[str] = None, status: Optional[str] = None,
+                       country: Optional[str] = None,
                        page: int = 1, page_size: int = 25,
                        principal: dict = Depends(require("clients:view"))):
     page = max(1, page)
     page_size = clamp_page_size(page_size, 25)
     q = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
+    try:
+        apply_country_filter(q, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if status in ("active", "inactive"):
         q["status"] = status
     if search:
@@ -65,8 +70,12 @@ async def list_clients(search: Optional[str] = None, status: Optional[str] = Non
 
 
 @router.get("/clients/tab-counts")
-async def clients_tab_counts(principal: dict = Depends(require("clients:view"))):
+async def clients_tab_counts(country: Optional[str] = None, principal: dict = Depends(require("clients:view"))):
     base = {"companyId": COMPANY_ID, **live_client_filter(), **await client_scope_filter(principal)}
+    try:
+        apply_country_filter(base, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     active = await db.clients.count_documents({**base, "status": "active"})
     inactive = await db.clients.count_documents({**base, "status": "inactive"})
     return {"active": active, "inactive": inactive}
@@ -97,7 +106,9 @@ async def _create_client_from_lead(lead: dict, principal: dict, affiliate_id: Op
     cid = new_id()
     client = {
         "id": cid, "companyId": COMPANY_ID, "lead_id": lead["id"],
-        "name": lead["name"], "phone": lead["phone"], "email": lead.get("email", ""),
+        "name": lead["name"], "phone": lead["phone"],
+        "phone_country": lead.get("phone_country") or "IN",
+        "email": lead.get("email", ""),
         "assigned_to": lead.get("assigned_to"), "assigned_name": lead.get("assigned_name"),
         "owner_id": lead.get("assigned_to") or principal["id"],
         "affiliate_id": affiliate_id, "ftd_at": None, "balance": 0.0,

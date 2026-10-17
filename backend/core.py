@@ -1,6 +1,8 @@
 """Core: config, db, auth utils, RBAC dependencies, helpers."""
 import os
 import re
+from typing import Optional
+
 import jwt
 import bcrypt
 import uuid
@@ -161,7 +163,7 @@ def set_auth_cookies(response, access_token, refresh_token):
     )
 
 
-# ---------- Phone normalization (E.164 / +91 default) ----------
+# ---------- Phone normalization (E.164; India when no +) ----------
 def normalize_phone(raw: str, default_cc: str = "91") -> str:
     if not raw:
         return ""
@@ -181,21 +183,54 @@ def normalize_phone(raw: str, default_cc: str = "91") -> str:
     return "+" + digits
 
 
+def _strip_phone_prefix(raw: str) -> str:
+    s = str(raw or "").strip()
+    s = re.sub(r"^[pP]:\s*", "", s)
+    return s.strip()
+
+
+def parse_phone(raw: str) -> tuple[str, str]:
+    """Return (E.164, ISO 3166-1 alpha-2). Numbers without + are parsed as India."""
+    import phonenumbers
+    from phonenumbers import NumberParseException, PhoneNumberFormat
+
+    original = _strip_phone_prefix(raw)
+    if not original:
+        raise ValueError("Invalid phone number.")
+    try:
+        if original.startswith("+"):
+            num = phonenumbers.parse(original, None)
+        else:
+            num = phonenumbers.parse(original, "IN")
+    except NumberParseException:
+        raise ValueError("Invalid phone number.")
+    if not phonenumbers.is_valid_number(num):
+        raise ValueError("Invalid phone number.")
+    e164 = phonenumbers.format_number(num, PhoneNumberFormat.E164)
+    region = phonenumbers.region_code_for_number(num) or "IN"
+    return e164, region
+
+
 def normalize_and_validate_phone(raw: str, default_cc: str = "91") -> str:
     """Normalize then validate E.164; raises ValueError with user-facing message."""
-    original = str(raw or "").strip()
-    if not original:
-        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
-    had_plus = original.startswith("+")
-    phone = normalize_phone(raw, default_cc)
-    if not phone:
-        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
-    if had_plus:
-        if not re.match(r"^\+[1-9]\d{7,14}$", phone):
-            raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
-    elif not re.match(r"^\+91[6-9]\d{9}$", phone):
-        raise ValueError("Invalid phone number. Use 10-digit mobile or +91…")
-    return phone
+    return parse_phone(raw)[0]
+
+
+def country_filter_code(country: Optional[str]) -> str:
+    """ISO2 filter value, or empty when the caller wants every country."""
+    code = (country or "").strip().upper()
+    if not code or code == "ALL":
+        return ""
+    if not re.fullmatch(r"[A-Z]{2}", code):
+        raise ValueError("Invalid country")
+    return code
+
+
+def apply_country_filter(q: dict, country: Optional[str], field: str = "phone_country") -> dict:
+    code = country_filter_code(country)
+    if code:
+        q[field] = code
+    return q
 
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")

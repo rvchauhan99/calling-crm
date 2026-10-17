@@ -12,7 +12,7 @@ from lead_import_jobs import (
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
-                  now_iso, now_utc, normalize_and_validate_phone, validate_email_optional, audit,
+                  now_iso, now_utc, parse_phone, apply_country_filter, validate_email_optional, audit,
                   live_client_filter, escape_regex, clamp_page_size, PAGE_SIZE_MAX)
 from lead_sources import (
     list_lead_sources,
@@ -343,7 +343,7 @@ async def _parse_lead_input(body: LeadIn, *, allow_import_source: bool = False) 
     if not name:
         raise HTTPException(status_code=400, detail="Name is required")
     try:
-        phone = normalize_and_validate_phone(body.phone)
+        phone, phone_country = parse_phone(body.phone)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
@@ -351,7 +351,10 @@ async def _parse_lead_input(body: LeadIn, *, allow_import_source: bool = False) 
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     source = await _validate_lead_source(body.source, allow_import=allow_import_source)
-    return {"name": name, "phone": phone, "email": email, "source": source, "city": (body.city or "").strip()}
+    return {
+        "name": name, "phone": phone, "phone_country": phone_country,
+        "email": email, "source": source, "city": (body.city or "").strip(),
+    }
 
 
 async def _scoped_leads_query(principal: dict) -> dict:
@@ -361,7 +364,12 @@ async def _scoped_leads_query(principal: dict) -> dict:
 def _apply_lead_filters(q: dict, *, search: Optional[str] = None, status: Optional[str] = None,
                         disposition: Optional[str] = None, assigned_to: Optional[str] = None,
                         assignment_status: Optional[str] = None, stage: Optional[str] = None,
-                        source: Optional[str] = None, skip_assignment_status: bool = False) -> dict:
+                        source: Optional[str] = None, country: Optional[str] = None,
+                        skip_assignment_status: bool = False) -> dict:
+    try:
+        apply_country_filter(q, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if search:
         safe = escape_regex(search)
         q["$or"] = [{"name": {"$regex": safe, "$options": "i"}},
@@ -492,7 +500,8 @@ async def _auto_assign_plan(
 async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
                      disposition: Optional[str] = None, assigned_to: Optional[str] = None,
                      assignment_status: Optional[str] = None, stage: Optional[str] = None,
-                     source: Optional[str] = None, sort: Optional[str] = None,
+                     source: Optional[str] = None, country: Optional[str] = None,
+                     sort: Optional[str] = None,
                      page: int = 1, page_size: int = 25,
                      principal: dict = Depends(require("leads:view"))):
     page = max(1, page)
@@ -501,7 +510,8 @@ async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
     skip_assignment = principal.get("data_scope") == "OWN"
     _apply_lead_filters(q, search=search, status=status, disposition=disposition,
                         assigned_to=assigned_to, assignment_status=assignment_status,
-                        stage=stage, source=source, skip_assignment_status=skip_assignment)
+                        stage=stage, source=source, country=country,
+                        skip_assignment_status=skip_assignment)
     total = await db.leads.count_documents(q)
     skip = (page - 1) * page_size
     sort_map = {
@@ -533,6 +543,7 @@ async def create_lead(body: LeadIn, principal: dict = Depends(require("leads:cre
         assigned_date = now_utc().date().isoformat()
     lid = new_id()
     doc = {"id": lid, "companyId": COMPANY_ID, "name": parsed["name"], "phone": parsed["phone"],
+           "phone_country": parsed["phone_country"],
            "email": parsed["email"], "source": parsed["source"], "city": parsed["city"],
            "status": "active", "assigned_to": assigned,
            "assigned_name": assigned_name, "owner_id": owner_id,
@@ -560,8 +571,12 @@ async def assignable_callers(principal: dict = Depends(require("leads:assign")))
 
 
 @router.get("/leads/tab-counts")
-async def leads_tab_counts(principal: dict = Depends(require("leads:view"))):
+async def leads_tab_counts(country: Optional[str] = None, principal: dict = Depends(require("leads:view"))):
     base = await _scoped_leads_query(principal)
+    try:
+        apply_country_filter(base, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if principal.get("data_scope") == "OWN":
         assigned = await db.leads.count_documents(base)
         return {"unassigned": 0, "assigned": assigned}
@@ -671,7 +686,8 @@ async def update_lead(lid: str, body: LeadIn, principal: dict = Depends(require(
         {"companyId": COMPANY_ID, "phone": parsed["phone"], "id": {"$ne": lid}})
     if dup:
         raise HTTPException(status_code=400, detail="A lead with this phone already exists")
-    upd = {"name": parsed["name"], "phone": parsed["phone"], "email": parsed["email"],
+    upd = {"name": parsed["name"], "phone": parsed["phone"], "phone_country": parsed["phone_country"],
+           "email": parsed["email"],
            "source": parsed["source"], "city": parsed["city"],
            "custom_fields": body.custom_fields, "updated_at": now_iso()}
     if body.assigned_to:
@@ -773,9 +789,14 @@ def _today_calls_window():
     return today, today_s, today_lo, today_hi, upcoming_end.isoformat()
 
 
-async def _today_calls_base(principal: dict) -> dict:
+async def _today_calls_base(principal: dict, country: Optional[str] = None) -> dict:
     scope = await scope_filter(principal, "assigned_to")
-    return {"companyId": COMPANY_ID, "status": "active", "is_client": False, **scope}
+    q = {"companyId": COMPANY_ID, "status": "active", "is_client": False, **scope}
+    try:
+        apply_country_filter(q, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return q
 
 
 def _today_calls_bucket_clause(
@@ -1017,10 +1038,13 @@ async def _waterfall_urgency_page(
 
 
 @router.get("/today-calls/counts")
-async def today_calls_counts(principal: dict = Depends(require("today_calls:view"))):
+async def today_calls_counts(
+    country: Optional[str] = None,
+    principal: dict = Depends(require("today_calls:view")),
+):
     """Lightweight KPI counts for the Today Calls workbench (no lead payloads)."""
     today, today_s, today_lo, today_hi, upcoming_end = _today_calls_window()
-    base = await _today_calls_base(principal)
+    base = await _today_calls_base(principal, country)
     counts = await _today_calls_queue_counts(base, today_s, today_lo, today_hi, upcoming_end)
     called = await _called_today_count(principal, today_lo, today_hi)
     counts["called_today"] = called
@@ -1047,6 +1071,7 @@ async def today_calls(
     pipeline_stage: Optional[str] = None,
     source: Optional[str] = None,
     disposition: Optional[str] = None,
+    country: Optional[str] = None,
     principal: dict = Depends(require("today_calls:view")),
 ):
     """Paginated Today Calls workbench. Default page_size=50."""
@@ -1061,7 +1086,7 @@ async def today_calls(
 
     today, today_s, today_lo, today_hi, upcoming_end = _today_calls_window()
     now = now_utc()
-    base = await _today_calls_base(principal)
+    base = await _today_calls_base(principal, country)
     filters_kwargs = {
         "search": search,
         "pipeline_stage": pipeline_stage,
@@ -1187,6 +1212,7 @@ async def log_call(body: LogCallIn, principal: dict = Depends(require("today_cal
     cid = new_id()
     call = {"id": cid, "companyId": COMPANY_ID, "lead_id": body.lead_id,
             "lead_name": lead["name"], "lead_phone": lead["phone"],
+            "lead_phone_country": lead.get("phone_country") or "IN",
             "agent_id": principal["id"], "agent_name": principal["name"],
             "disposition_id": disp["id"], "disposition_name": disp["name"],
             "outcome": body.outcome, "notes": notes, "duration": body.duration,
@@ -1304,6 +1330,7 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
                        agent_id: Optional[str] = None,
                        from_date: Optional[str] = Query(None, alias="from"),
                        to_date: Optional[str] = Query(None, alias="to"),
+                       country: Optional[str] = None,
                        sort: Optional[str] = None,
                        page: int = 1, page_size: int = 30,
                        principal: dict = Depends(require("call_history:view"))):
@@ -1319,6 +1346,10 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
         raise HTTPException(status_code=400, detail="from must be on or before to")
 
     q = {"companyId": COMPANY_ID, **await scope_filter(principal, "agent_id")}
+    try:
+        apply_country_filter(q, country, "lead_phone_country")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if search:
         safe = escape_regex(search)
         q["$or"] = [{"lead_name": {"$regex": safe, "$options": "i"}},
@@ -1355,12 +1386,14 @@ async def _pipeline_base_query(
     source: Optional[str] = None,
     disposition: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
 ) -> dict:
     q = await _scoped_leads_query(principal)
     skip_assignment = principal.get("data_scope") == "OWN"
     _apply_lead_filters(
         q, search=search, source=source, disposition=disposition,
-        assigned_to=assigned_to, skip_assignment_status=skip_assignment,
+        assigned_to=assigned_to, country=country,
+        skip_assignment_status=skip_assignment,
     )
     return q
 
@@ -1418,12 +1451,13 @@ async def pipeline_counts(
     source: Optional[str] = None,
     disposition: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     principal: dict = Depends(require("pipeline:view")),
 ):
     """True per-stage totals for Pipeline (no lead payloads)."""
     base = await _pipeline_base_query(
         principal, search=search, source=source,
-        disposition=disposition, assigned_to=assigned_to,
+        disposition=disposition, assigned_to=assigned_to, country=country,
     )
     counts, total = await _pipeline_stage_counts(base)
     return {"stages": PIPELINE_STAGES, "counts": counts, "total": total}
@@ -1435,6 +1469,7 @@ async def pipeline(
     source: Optional[str] = None,
     disposition: Optional[str] = None,
     assigned_to: Optional[str] = None,
+    country: Optional[str] = None,
     view: Optional[str] = None,
     page: int = 1,
     page_size: int = 50,
@@ -1450,7 +1485,7 @@ async def pipeline(
 
     base = await _pipeline_base_query(
         principal, search=search, source=source,
-        disposition=disposition, assigned_to=assigned_to,
+        disposition=disposition, assigned_to=assigned_to, country=country,
     )
     counts, total = await _pipeline_stage_counts(base)
 
@@ -1563,6 +1598,7 @@ def _followup_at_clause(bucket: Optional[str]) -> dict:
 
 @router.get("/followups")
 async def followups(page: int = 1, page_size: int = 25, bucket: Optional[str] = None,
+                    country: Optional[str] = None,
                     principal: dict = Depends(require("followups:view"))):
     page = max(1, page)
     page_size = clamp_page_size(page_size, 25)
@@ -1573,6 +1609,10 @@ async def followups(page: int = 1, page_size: int = 25, bucket: Optional[str] = 
         "status": {"$ne": "converted"},
         **await scope_filter(principal, "assigned_to"),
     }
+    try:
+        apply_country_filter(q, country)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     total = await db.leads.count_documents(q)
     skip = (page - 1) * page_size
     leads = await db.leads.find(q, {"_id": 0}).sort("follow_up_at", 1).skip(skip).limit(page_size).to_list(page_size)

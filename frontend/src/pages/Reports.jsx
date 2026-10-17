@@ -12,6 +12,7 @@ import {
 import { SearchableSelect } from "@/components/ui/searchable-select"
 import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { DATE_PRESETS, matchDatePresetId } from "@/components/filters/datePresets"
 import {
   PanelHeader, KpiCard, buildLeadHref, todayISO,
@@ -31,6 +32,7 @@ const INITIAL_FILTERS = {
   disposition: "",
   assignment_status: "",
   assigned_to: "",
+  country: "",
 }
 
 export default function Reports() {
@@ -53,6 +55,7 @@ export default function Reports() {
   const appendLeadParams = (p, f, kind) => {
     if (f.from) p.set("from", f.from)
     if (f.to) p.set("to", f.to)
+    if (f.country) p.set("country", f.country)
     if (kind === "affiliate") return
     if (f.status) p.set("status", f.status)
     if (f.stage) p.set("stage", f.stage)
@@ -258,6 +261,7 @@ export default function Reports() {
                 data-testid="filter-to"
               />
             </FilterField>
+            <CountryFilter value={filters.country} onChange={(v) => fc("country", v)} />
             {leadFiltersVisible && (
               <>
                 <FilterField label="Status" className="w-36">

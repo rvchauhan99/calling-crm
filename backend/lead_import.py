@@ -5,7 +5,7 @@ import io
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, List, Optional
 
-from core import COMPANY_ID, db, new_id, now_iso, normalize_and_validate_phone
+from core import COMPANY_ID, db, new_id, now_iso, parse_phone
 from lead_sources import source_names
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
@@ -90,13 +90,14 @@ def _is_empty_row(row_data: dict) -> bool:
     return not any((v or "").strip() for v in row_data.values())
 
 
-def _lead_doc(name: str, phone: str, email: str, source: str, city: str) -> dict:
+def _lead_doc(name: str, phone: str, email: str, source: str, city: str, phone_country: str = "IN") -> dict:
     ts = now_iso()
     return {
         "id": new_id(),
         "companyId": COMPANY_ID,
         "name": name,
         "phone": phone,
+        "phone_country": phone_country,
         "email": email,
         "source": source,
         "city": city,
@@ -208,7 +209,7 @@ async def run_lead_import(raw: bytes, on_progress: ProgressCallback = None) -> I
             continue
         raw_phone = _cell(row_data, header_lookup, PHONE_ALIASES)
         try:
-            phone = normalize_and_validate_phone(raw_phone)
+            phone, phone_country = parse_phone(raw_phone)
         except ValueError as exc:
             progress.invalid += 1
             progress.processed += 1
@@ -234,6 +235,7 @@ async def run_lead_import(raw: bytes, on_progress: ProgressCallback = None) -> I
             "row_data": row_data,
             "name": name,
             "phone": phone,
+            "phone_country": phone_country,
             "email": _cell(row_data, header_lookup, EMAIL_ALIASES),
             "source": source,
             "city": _cell(row_data, header_lookup, CITY_ALIASES),
@@ -262,6 +264,7 @@ async def run_lead_import(raw: bytes, on_progress: ProgressCallback = None) -> I
             else:
                 to_insert.append(_lead_doc(
                     item["name"], item["phone"], item["email"], item["source"], item["city"],
+                    phone_country=item["phone_country"],
                 ))
                 existing.add(item["phone"])
             progress.processed += 1

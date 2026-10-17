@@ -295,6 +295,7 @@ class TestSheetColumnMapping:
         )
         assert mapped is not None
         assert mapped["phone"] == "+918847490594"
+        assert mapped["phone_country"] == "IN"
         assert mapped["name"] == "Gulsan Kumar"
 
         name = uniq("TEST_RickyPhone_")

@@ -18,6 +18,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog"
 import { SearchableSelect } from "@/components/ui/searchable-select"
+import { CountryFilter } from "@/components/filters/CountrySelect"
 import { toast } from "sonner"
 import { CalendarCheck, PhoneCall, AlertTriangle, CheckCircle2 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -44,6 +45,7 @@ export default function Followups() {
   const [params, setParams] = useSearchParams()
   const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
   const filter = FILTERS.some((f) => f.id === params.get("bucket")) ? params.get("bucket") : "all"
+  const country = params.get("country") || ""
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [dispositions, setDispositions] = useState([])
@@ -70,12 +72,13 @@ export default function Followups() {
       p.set("page", String(page))
       p.set("page_size", String(pageSize))
       if (filter && filter !== "all") p.set("bucket", filter)
+      if (country) p.set("country", country)
       const { data: fu } = await api.get(`/followups?${p.toString()}`)
       setData(fu)
     } finally {
       setLoading(false)
     }
-  }, [page, pageSize, filter])
+  }, [page, pageSize, filter, country])
 
   useEffect(() => { loadMeta().catch(() => {}) }, [loadMeta])
   useEffect(() => { load().catch(() => {}) }, [load])
@@ -193,7 +196,14 @@ export default function Followups() {
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap gap-2" data-testid="followups-filters" role="group" aria-label="Follow-up filters">
+      <div className="mb-4 flex flex-wrap items-end gap-2" data-testid="followups-filters" role="group" aria-label="Follow-up filters">
+        <CountryFilter value={country} onChange={(v) => {
+          const p = new URLSearchParams(params)
+          if (!v) p.delete("country")
+          else p.set("country", v)
+          p.set("page", "1")
+          setParams(p)
+        }} />
         {FILTERS.map((f) => (
           <Button
             key={f.id}
@@ -246,7 +256,7 @@ export default function Followups() {
                     </TableCell>
                     <TableCell>
                       <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`followup-phone-${l.id}`}>
-                        {l.phone}
+                        {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell>

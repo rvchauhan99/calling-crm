@@ -17,7 +17,7 @@ from core import (
     COMPANY_ID,
     db,
     new_id,
-    normalize_and_validate_phone,
+    parse_phone,
     now_iso,
     now_utc,
     validate_email_optional,
@@ -277,7 +277,7 @@ def map_row(row: dict, column_map: dict, preset: str) -> Optional[dict]:
         return None
 
     try:
-        phone = normalize_and_validate_phone(phone_raw)
+        phone, phone_country = parse_phone(phone_raw)
     except ValueError:
         return None
 
@@ -296,6 +296,7 @@ def map_row(row: dict, column_map: dict, preset: str) -> Optional[dict]:
     return {
         "name": name,
         "phone": phone,
+        "phone_country": phone_country,
         "email": email,
         "city": city,
         "external_id": external_id or None,
@@ -771,6 +772,7 @@ async def sync_source(
                         "companyId": COMPANY_ID,
                         "name": mapped["name"],
                         "phone": phone,
+                        "phone_country": mapped.get("phone_country") or "IN",
                         "email": mapped["email"],
                         "source": lead_source,
                         "city": mapped.get("city") or "",
