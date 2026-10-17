@@ -22,6 +22,16 @@ async def count_active_calls() -> int:
     })
 
 
+async def find_agent_by_stringee_user_id(stringee_user_id: str) -> Optional[dict]:
+    sid = (stringee_user_id or "").strip()
+    if not sid:
+        return None
+    return await db.users.find_one(
+        {"companyId": COMPANY_ID, "stringee_user_id": sid},
+        {"_id": 0, "id": 1, "name": 1, "stringee_user_id": 1},
+    )
+
+
 async def upsert_provider_call(
     *,
     provider: str,
@@ -38,7 +48,12 @@ async def upsert_provider_call(
     agent_id: Optional[str] = None,
     agent_name: Optional[str] = None,
     ivr_digits: str = "",
+    started_at: str = "",
+    ringing_at: str = "",
+    answered_at: str = "",
+    ended_at: str = "",
     extra: Optional[dict] = None,
+    merge_meta: bool = True,
 ) -> dict[str, Any]:
     if not provider_call_id:
         provider_call_id = new_id()
@@ -48,19 +63,32 @@ async def upsert_provider_call(
         {"_id": 0},
     )
     now = now_iso()
-    fields = {
+    fields: dict[str, Any] = {
         "provider": provider,
         "provider_call_id": provider_call_id,
-        "direction": direction,
-        "status": status,
-        "from_number": from_number,
-        "to_number": to_number,
-        "did": did or from_number if direction == "outbound" else (did or to_number),
-        "talk_sec": talk_sec,
-        "recording_url": recording_url,
-        "room_name": room_name,
         "updated_at": now,
     }
+    if direction and direction != "unknown":
+        fields["direction"] = direction
+    if status and status != "unknown":
+        fields["status"] = status
+        fields["outcome"] = status
+    if from_number:
+        fields["from_number"] = from_number
+    if to_number:
+        fields["to_number"] = to_number
+    if did or from_number or to_number:
+        direction_eff = fields.get("direction") or (existing or {}).get("direction") or direction
+        fields["did"] = did or (
+            from_number if direction_eff == "outbound" else (did or to_number)
+        )
+    if talk_sec:
+        fields["talk_sec"] = talk_sec
+        fields["duration"] = talk_sec
+    if recording_url:
+        fields["recording_url"] = recording_url
+    if room_name:
+        fields["room_name"] = room_name
     if ivr_digits:
         fields["ivr_digits"] = ivr_digits
     if lead_id:
@@ -69,19 +97,43 @@ async def upsert_provider_call(
         fields["agent_id"] = agent_id
     if agent_name:
         fields["agent_name"] = agent_name
-    if extra:
-        fields["telephony_meta"] = extra
+    if started_at:
+        fields["started_at"] = started_at
+    if ringing_at:
+        fields["ringing_at"] = ringing_at
+    if answered_at:
+        fields["answered_at"] = answered_at
+    if ended_at:
+        fields["ended_at"] = ended_at
 
-    # duration alias for existing Call History UI
-    if talk_sec:
-        fields["duration"] = talk_sec
+    if extra:
+        if merge_meta and existing and isinstance(existing.get("telephony_meta"), dict):
+            merged = dict(existing["telephony_meta"])
+            merged.update({k: v for k, v in extra.items() if v is not None})
+            fields["telephony_meta"] = merged
+        else:
+            fields["telephony_meta"] = extra
 
     if existing:
+        # Avoid clearing talk_sec/recording with zeros when status-only updates arrive
+        if "talk_sec" not in fields and existing.get("talk_sec"):
+            pass
         await db.calls.update_one(
             {"companyId": COMPANY_ID, "provider_call_id": provider_call_id},
             {"$set": fields},
         )
         existing.update(fields)
+        if lead_id and not existing.get("lead_name"):
+            lead = await db.leads.find_one({"id": lead_id, "companyId": COMPANY_ID}, {"_id": 0})
+            if lead:
+                await db.calls.update_one(
+                    {"id": existing["id"]},
+                    {"$set": {
+                        "lead_name": lead.get("name") or "",
+                        "lead_phone": lead.get("phone") or existing.get("lead_phone"),
+                    }},
+                )
+                existing["lead_name"] = lead.get("name") or ""
         return existing
 
     doc = {
@@ -97,10 +149,30 @@ async def upsert_provider_call(
         "outcome": status,
         "notes": "",
         "duration": talk_sec or 0,
+        "talk_sec": talk_sec or 0,
         "follow_up_at": None,
         "created_at": now,
-        **fields,
+        "direction": direction if direction != "unknown" else "outbound",
+        "status": status if status != "unknown" else "ringing",
+        "from_number": from_number,
+        "to_number": to_number,
+        "did": did or from_number,
+        "recording_url": recording_url or "",
+        "room_name": room_name or "",
+        "provider": provider,
+        "provider_call_id": provider_call_id,
+        "updated_at": now,
     }
+    if started_at:
+        doc["started_at"] = started_at
+    if ringing_at:
+        doc["ringing_at"] = ringing_at
+    if answered_at:
+        doc["answered_at"] = answered_at
+    if ended_at:
+        doc["ended_at"] = ended_at
+    if extra:
+        doc["telephony_meta"] = extra
     if lead_id:
         lead = await db.leads.find_one({"id": lead_id, "companyId": COMPANY_ID}, {"_id": 0})
         if lead:
@@ -145,3 +217,23 @@ async def ensure_missed_inbound_lead(from_number: str, did: str) -> Optional[dic
     }
     await db.leads.insert_one(dict(doc))
     return doc
+
+
+def attach_recording_play_url(call: dict) -> dict:
+    """Add browser-playable recording_play_url (Stringee needs signed play URL)."""
+    if not call:
+        return call
+    raw = (call.get("recording_url") or "").strip()
+    if not raw:
+        return call
+    if call.get("provider") == "stringee" or "stringee.com" in raw:
+        try:
+            from telephony.stringee import StringeeAdapter
+            se = StringeeAdapter()
+            if se.configured():
+                call["recording_play_url"] = se.recording_play_url(raw)
+                return call
+        except Exception:
+            pass
+    call["recording_play_url"] = raw
+    return call

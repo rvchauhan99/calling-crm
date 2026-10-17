@@ -648,6 +648,8 @@ async def lead_360(lid: str, principal: dict = Depends(require("leads:view"))):
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
     calls = await db.calls.find({"lead_id": lid}, {"_id": 0}).sort("created_at", -1).to_list(200)
+    from telephony import service as tel_svc
+    calls = [tel_svc.attach_recording_play_url(c) for c in calls]
     client = await db.clients.find_one({"lead_id": lid, **live_client_filter()}, {"_id": 0})
     activity = await db.audit_logs.find(
         {
@@ -1336,6 +1338,8 @@ async def call_history(search: Optional[str] = None, disposition: Optional[str] 
     skip = (page - 1) * page_size
     sort_dir = 1 if sort == "created_at_asc" else -1
     calls = await db.calls.find(q, {"_id": 0}).sort("created_at", sort_dir).skip(skip).limit(page_size).to_list(page_size)
+    from telephony import service as tel_svc
+    calls = [tel_svc.attach_recording_play_url(c) for c in calls]
     return {"calls": calls, "total": total, "page": page, "page_size": page_size}
 
 

@@ -141,4 +141,42 @@ describe("CallHistory filters", () => {
     await user.click(screen.getByTestId("call-lead-phone-c1"))
     await waitFor(() => expect(screen.getByTestId("lead-360")).toBeInTheDocument())
   })
+
+  it("shows recording and CDR columns when present", async () => {
+    api.get.mockImplementation((url) => {
+      if (url.startsWith("/call-history?")) {
+        return Promise.resolve({
+          data: {
+            calls: [{
+              id: "c-rec",
+              lead_id: "l1",
+              lead_name: "Lead Rec",
+              lead_phone: "+919988877766",
+              agent_name: "Rohan",
+              disposition_name: "Interested",
+              duration: 42,
+              talk_sec: 42,
+              started_at: "2026-09-01T10:00:00.000Z",
+              ended_at: "2026-09-01T10:01:00.000Z",
+              recording_play_url: "https://example.com/play.mp3",
+              telephony_meta: { end_call_cause: "USER_END_CALL" },
+              notes: "",
+              created_at: "2026-09-01T10:00:00.000Z",
+            }],
+            total: 1,
+            page: 1,
+            page_size: 25,
+          },
+        })
+      }
+      if (url === "/dispositions") return Promise.resolve({ data: { dispositions: [] } })
+      if (url === "/dashboard/filter-options") return Promise.resolve({ data: { agents: [] } })
+      return Promise.resolve({ data: {} })
+    })
+    render(<CallHistory />)
+    await waitFor(() => expect(screen.getByTestId("call-recording-c-rec")).toBeInTheDocument())
+    expect(screen.getByTestId("call-duration-c-rec")).toHaveTextContent("42s")
+    expect(screen.getByTestId("call-started-c-rec")).toBeInTheDocument()
+    expect(screen.getByTestId("call-ended-c-rec")).toBeInTheDocument()
+  })
 })

@@ -218,16 +218,28 @@ export const Lead360Sheet = ({ leadId, onClose, onLogged }) => {
                         {new Date(c.created_at).toLocaleString("en-IN")}
                       </span>
                     </div>
-                    {(c.direction || c.talk_sec || c.duration) && (
-                      <p className="mt-1 text-xs text-slate-500">
-                        {[c.direction, `${c.talk_sec || c.duration || 0}s`].filter(Boolean).join(" · ")}
+                    {(c.direction || c.talk_sec || c.duration || c.started_at || c.ended_at) && (
+                      <p className="mt-1 text-xs text-slate-500" data-testid={`lead-360-call-meta-${c.id}`}>
+                        {[
+                          c.direction,
+                          `${c.talk_sec || c.duration || 0}s talk`,
+                          c.started_at ? `start ${new Date(c.started_at).toLocaleTimeString("en-IN")}` : null,
+                          c.answered_at ? `answered ${new Date(c.answered_at).toLocaleTimeString("en-IN")}` : null,
+                          c.ended_at ? `end ${new Date(c.ended_at).toLocaleTimeString("en-IN")}` : null,
+                        ].filter(Boolean).join(" · ")}
                       </p>
                     )}
-                    {c.recording_url && (
+                    {c.telephony_meta?.end_call_cause && (
+                      <p className="mt-0.5 text-[11px] text-slate-400" data-testid={`lead-360-end-cause-${c.id}`}>
+                        End: {c.telephony_meta.end_call_cause}
+                        {c.telephony_meta.ended_by ? ` · by ${c.telephony_meta.ended_by}` : ""}
+                      </p>
+                    )}
+                    {(c.recording_play_url || c.recording_url) && (
                       <audio
                         className="mt-2 w-full"
                         controls
-                        src={c.recording_url}
+                        src={c.recording_play_url || c.recording_url}
                         data-testid={`lead-360-recording-${c.id}`}
                       >
                         <track kind="captions" />

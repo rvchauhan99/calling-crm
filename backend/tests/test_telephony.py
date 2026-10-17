@@ -34,7 +34,7 @@ class TestTelephony:
         r = admin.get(f"{BASE_URL}/api/telephony/status", timeout=30)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["adapter"] in ("mock", "plivo_livekit")
+        assert body["adapter"] in ("mock", "plivo_livekit", "stringee")
         assert "max_concurrent" in body
         assert body["max_concurrent"] >= 1
         assert "enabled" in body

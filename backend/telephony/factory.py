@@ -9,6 +9,9 @@ from telephony.mock import MockTelephonyAdapter
 
 def get_adapter() -> TelephonyAdapter:
     provider = (os.environ.get("TELEPHONY_PROVIDER") or "mock").strip().lower()
+    if provider == "stringee":
+        from telephony.stringee import StringeeAdapter
+        return StringeeAdapter()
     if provider in ("plivo_livekit", "livekit", "plivo"):
         from telephony.livekit_plivo import LiveKitPlivoAdapter
         return LiveKitPlivoAdapter()

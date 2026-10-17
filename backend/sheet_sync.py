@@ -253,9 +253,19 @@ def map_row(row: dict, column_map: dict, preset: str) -> Optional[dict]:
     city_col = cmap.get("city") or ""
     ext_col = cmap.get("external_id") or ""
 
-    # Exact mapped columns only (UI / suggested_map owns aliases)
+    # Exact mapped columns; if the mapped phone cell is blank, use another phone alias
+    # (Meta sheets often leave phone_number empty and store p:+91… in phone).
     name = _cell(row, name_col)
     phone_raw = _cell(row, phone_col)
+    if not phone_raw:
+        mapped_phone = _norm_header(phone_col)
+        for alias in PHONE_ALIASES:
+            if _norm_header(alias) == mapped_phone:
+                continue
+            alt = _cell(row, alias)
+            if alt:
+                phone_raw = alt
+                break
     email_raw = _cell(row, email_col)
     city = _cell(row, city_col)
     external_id = _cell(row, ext_col)

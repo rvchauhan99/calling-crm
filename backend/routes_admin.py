@@ -18,11 +18,24 @@ class UserIn(BaseModel):
     team_id: Optional[str] = None
     daily_quota: int = 0
     active: bool = True
+    stringee_user_id: Optional[str] = None
+    stringee_enabled: Optional[bool] = None
 
 
 async def _role_name(role_id):
     r = await db.roles.find_one({"id": role_id}, {"_id": 0, "name": 1})
     return r["name"] if r else None
+
+
+async def _assert_stringee_user_id_unique(stringee_user_id: str, exclude_uid: Optional[str] = None):
+    sid = (stringee_user_id or "").strip()
+    if not sid:
+        return
+    q = {"companyId": COMPANY_ID, "stringee_user_id": sid, "active": True}
+    if exclude_uid:
+        q["id"] = {"$ne": exclude_uid}
+    if await db.users.find_one(q, {"_id": 0, "id": 1}):
+        raise HTTPException(status_code=400, detail="stringee_user_id already in use")
 
 
 @router.get("/users")
@@ -34,6 +47,10 @@ async def list_users(user_type: Optional[str] = None, principal: dict = Depends(
     roles = {r["id"]: r["name"] for r in await db.roles.find({"companyId": COMPANY_ID}, {"_id": 0}).to_list(100)}
     for u in users:
         u["role_name"] = roles.get(u.get("role_id"))
+        if "stringee_enabled" not in u:
+            u["stringee_enabled"] = True
+        if "stringee_user_id" not in u:
+            u["stringee_user_id"] = f"agent-{u['id']}" if u.get("user_type") == "caller" else ""
     return {"users": users}
 
 
@@ -44,10 +61,20 @@ async def create_user(body: UserIn, principal: dict = Depends(require("users:cre
     if not body.password:
         raise HTTPException(status_code=400, detail="Password is required")
     uid = new_id()
+    stringee_enabled = True if body.stringee_enabled is None else bool(body.stringee_enabled)
+    stringee_user_id = (body.stringee_user_id or "").strip()
+    if body.user_type == "caller" and not stringee_user_id:
+        stringee_user_id = f"agent-{uid}"
+    if body.user_type != "caller":
+        stringee_user_id = (body.stringee_user_id or "").strip()
+        stringee_enabled = False if body.stringee_enabled is None else bool(body.stringee_enabled)
+    await _assert_stringee_user_id_unique(stringee_user_id)
     doc = {"id": uid, "companyId": COMPANY_ID, "name": body.name, "email": body.email.lower(),
            "password_hash": hash_password(body.password), "role_id": body.role_id,
            "user_type": body.user_type, "team_id": body.team_id,
            "daily_quota": body.daily_quota, "active": body.active,
+           "stringee_user_id": stringee_user_id,
+           "stringee_enabled": stringee_enabled,
            "acw_pending_lead_id": None, "created_at": now_iso()}
     await db.users.insert_one(dict(doc))
     await audit(principal, "create", "user", uid, {"email": body.email})
@@ -57,9 +84,21 @@ async def create_user(body: UserIn, principal: dict = Depends(require("users:cre
 
 @router.put("/users/{uid}")
 async def update_user(uid: str, body: UserIn, principal: dict = Depends(require("users:edit"))):
+    existing = await db.users.find_one({"id": uid, "companyId": COMPANY_ID}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found")
+    stringee_user_id = (body.stringee_user_id if body.stringee_user_id is not None else existing.get("stringee_user_id") or "").strip()
+    if body.user_type == "caller" and not stringee_user_id:
+        stringee_user_id = f"agent-{uid}"
+    stringee_enabled = existing.get("stringee_enabled", True) if body.stringee_enabled is None else bool(body.stringee_enabled)
+    if body.user_type != "caller" and body.stringee_enabled is None:
+        stringee_enabled = False
+    await _assert_stringee_user_id_unique(stringee_user_id, exclude_uid=uid)
     upd = {"name": body.name, "email": body.email.lower(), "role_id": body.role_id,
            "user_type": body.user_type, "team_id": body.team_id,
-           "daily_quota": body.daily_quota, "active": body.active}
+           "daily_quota": body.daily_quota, "active": body.active,
+           "stringee_user_id": stringee_user_id,
+           "stringee_enabled": stringee_enabled}
     if body.password:
         upd["password_hash"] = hash_password(body.password)
     res = await db.users.update_one({"id": uid, "companyId": COMPANY_ID}, {"$set": upd})

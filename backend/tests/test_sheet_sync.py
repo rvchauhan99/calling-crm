@@ -24,6 +24,11 @@ EMPTY_NAME_CSV = """id,full_name,phone_number
 l:x,,p:+919876543299
 """
 
+# Meta export: numbers live in `phone` as p:+91… while mapped `phone_number` is empty.
+RICKY_PHONE_CSV = """id,full_name,phone,phone_number,email
+l:ricky1,Gulsan Kumar,p:+918847490594,,gulsan.ricky1@example.com
+"""
+
 
 def uniq(p="TEST_Sheet_"):
     return f"{p}{uuid.uuid4().hex[:8]}"
@@ -272,6 +277,61 @@ class TestSheetColumnMapping:
             assert l["assigned_to"] is None
             assert l["source"] == "Facebook Ads"
             assert l.get("external_id", "").startswith("l:maptest")
+
+    def test_meta_phone_alias_when_phone_number_empty(self, admin):
+        """phone=p:+91… is imported when the mapped phone_number column is blank."""
+        from sheet_sync import map_row, default_column_map
+
+        mapped = map_row(
+            {
+                "id": "l:ricky1",
+                "full_name": "Gulsan Kumar",
+                "phone": "p:+918847490594",
+                "phone_number": "",
+                "email": "gulsan.ricky1@example.com",
+            },
+            default_column_map("meta_lead_ads"),
+            "meta_lead_ads",
+        )
+        assert mapped is not None
+        assert mapped["phone"] == "+918847490594"
+        assert mapped["name"] == "Gulsan Kumar"
+
+        name = uniq("TEST_RickyPhone_")
+        create = admin.post(
+            f"{BASE_URL}/api/sheet-sources",
+            json={
+                "name": name,
+                "sheet_url": SAMPLE_URL,
+                "enabled": False,
+                "auto_assign": False,
+                "source": "Facebook Ads",
+                "preset": "meta_lead_ads",
+                "poll_seconds": 120,
+            },
+            timeout=30,
+        )
+        assert create.status_code == 200, create.text
+        src = create.json()["sheet_source"]
+        TestSheetColumnMapping.sources.append(src["id"])
+        assert src["column_map"]["phone"] == "phone_number"
+
+        sync = admin.post(
+            f"{BASE_URL}/api/sheet-sources/{src['id']}/sync",
+            json={"csv_text": RICKY_PHONE_CSV},
+            timeout=60,
+        )
+        assert sync.status_code == 200, sync.text
+        assert sync.json()["created"] == 1, sync.text
+        leads = admin.get(
+            f"{BASE_URL}/api/leads?search=Gulsan+Kumar&page_size=50",
+            timeout=30,
+        ).json()["leads"]
+        matched = [l for l in leads if l.get("sheet_source_id") == src["id"]]
+        assert len(matched) == 1
+        TestSheetColumnMapping.leads.append(matched[0]["id"])
+        assert matched[0]["phone"] == "+918847490594"
+        assert matched[0].get("external_id") == "l:ricky1"
 
     def test_agent_cannot_create_sheet_source(self, agent):
         r = agent.post(

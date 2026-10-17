@@ -17,7 +17,10 @@ import {
 import { toast } from "sonner";
 import { Plus, IdCard, Pencil, Trash2 } from "lucide-react";
 
-const empty = { name: "", email: "", password: "", role_id: "", user_type: "caller", daily_quota: 25, active: true };
+const empty = {
+  name: "", email: "", password: "", role_id: "", user_type: "caller",
+  daily_quota: 25, active: true, stringee_user_id: "", stringee_enabled: true,
+};
 
 export default function Users() {
   const { can } = useAuth();
@@ -155,6 +158,32 @@ export default function Users() {
               </div>
             </div>
             <div><Label>Daily lead quota</Label><Input type="number" value={form.daily_quota} className="mt-1 focus-visible:ring-sky-500" onChange={(e) => setForm({ ...form, daily_quota: Number(e.target.value) })} data-testid="user-quota" /></div>
+            {form.user_type === "caller" && (
+              <>
+                <div>
+                  <Label>Stringee User ID</Label>
+                  <Input
+                    value={form.stringee_user_id || ""}
+                    className="mt-1 focus-visible:ring-sky-500"
+                    placeholder="Leave blank to auto-assign"
+                    onChange={(e) => setForm({ ...form, stringee_user_id: e.target.value })}
+                    data-testid="user-stringee-id"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-400">Unique Stringee client identity for this caller&apos;s softphone JWT.</p>
+                </div>
+                <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
+                  <div>
+                    <p className="text-sm font-medium">Stringee calling</p>
+                    <p className="text-[11px] text-slate-400">Allow this caller to use the softphone</p>
+                  </div>
+                  <Switch
+                    checked={form.stringee_enabled !== false}
+                    onCheckedChange={(v) => setForm({ ...form, stringee_enabled: v })}
+                    data-testid="user-stringee-enabled"
+                  />
+                </div>
+              </>
+            )}
             <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
               <p className="text-sm font-medium">Active</p>
               <Switch checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} data-testid="user-active" />

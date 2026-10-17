@@ -226,7 +226,9 @@ export default function CallHistory() {
               <TableHeader>
                 <TableRow className="bg-slate-50">
                   <TableHead>When</TableHead><TableHead>Lead</TableHead><TableHead>Phone</TableHead>
-                  <TableHead>Agent</TableHead><TableHead>Disposition</TableHead><TableHead>Duration</TableHead><TableHead>Notes</TableHead>
+                  <TableHead>Agent</TableHead><TableHead>Disposition</TableHead>
+                  <TableHead>Started</TableHead><TableHead>Ended</TableHead>
+                  <TableHead>Duration</TableHead><TableHead>Recording</TableHead><TableHead>Notes</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -244,8 +246,38 @@ export default function CallHistory() {
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell className="text-slate-500">{c.agent_name}</TableCell>
-                    <TableCell><StatusPill>{c.disposition_name}</StatusPill></TableCell>
-                    <TableCell className="tabular text-slate-500">{c.duration}s</TableCell>
+                    <TableCell>
+                      <StatusPill>{c.disposition_name || c.status || c.outcome || "—"}</StatusPill>
+                      {c.telephony_meta?.end_call_cause && (
+                        <p className="mt-0.5 max-w-[8rem] truncate text-[10px] text-slate-400" title={c.telephony_meta.end_call_cause}>
+                          {c.telephony_meta.end_call_cause}
+                        </p>
+                      )}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-slate-500" data-testid={`call-started-${c.id}`}>
+                      {c.started_at ? new Date(c.started_at).toLocaleString("en-IN") : "—"}
+                    </TableCell>
+                    <TableCell className="whitespace-nowrap text-xs text-slate-500" data-testid={`call-ended-${c.id}`}>
+                      {c.ended_at ? new Date(c.ended_at).toLocaleString("en-IN") : "—"}
+                    </TableCell>
+                    <TableCell className="tabular text-slate-500" data-testid={`call-duration-${c.id}`}>
+                      {c.talk_sec || c.duration || 0}s
+                    </TableCell>
+                    <TableCell>
+                      {(c.recording_play_url || c.recording_url) ? (
+                        <audio
+                          className="h-8 max-w-[10rem]"
+                          controls
+                          preload="none"
+                          src={c.recording_play_url || c.recording_url}
+                          data-testid={`call-recording-${c.id}`}
+                        >
+                          <track kind="captions" />
+                        </audio>
+                      ) : (
+                        <span className="text-xs text-slate-300">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="max-w-[220px] truncate text-slate-500">{c.notes || "—"}</TableCell>
                   </TableRow>
                 ))}
