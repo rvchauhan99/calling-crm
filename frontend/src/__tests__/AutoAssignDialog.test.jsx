@@ -16,6 +16,16 @@ jest.mock("sonner", () => ({
   toast: { success: jest.fn(), error: jest.fn() },
 }))
 
+jest.mock("@/components/ui/searchable-select", () => ({
+  SearchableSelect: ({ testId, value, onChange, options }) => (
+    <select data-testid={testId} value={value} onChange={(e) => onChange(e.target.value)}>
+      {(options || []).map((o) => (
+        <option key={o.value} value={o.value}>{o.label}</option>
+      ))}
+    </select>
+  ),
+}))
+
 const previewData = {
   assigned: 5,
   requested: 5,
@@ -82,6 +92,25 @@ describe("AutoAssignDialog", () => {
       })
     })
     expect(onComplete).toHaveBeenCalled()
+  })
+
+  it("posts fresh when that disposition is selected", async () => {
+    render(
+      <AutoAssignDialog
+        open
+        onOpenChange={jest.fn()}
+        onComplete={jest.fn()}
+        dispositions={[{ id: "d1", name: "Interested" }]}
+      />,
+    )
+    await screen.findByTestId("auto-assign-agent-count-a1")
+    await userEvent.selectOptions(screen.getByTestId("auto-assign-disposition"), "fresh")
+    await userEvent.click(screen.getByTestId("confirm-auto-assign-btn"))
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith("/leads/auto-assign", expect.objectContaining({
+        disposition: "fresh",
+      }))
+    })
   })
 
   it("clamps per-agent input to slots_available", async () => {

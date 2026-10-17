@@ -22,6 +22,7 @@ import {
 import { toast } from "sonner"
 import { Search, LayoutGrid, List, PhoneCall, Kanban } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 
 const COLORS = {
   New: "sky", Contacted: "blue", Qualified: "sky", Proposal: "amber", Won: "emerald", Lost: "slate",
@@ -415,7 +416,7 @@ export default function Pipeline() {
                       aria-label={`${l.name} in ${stage}`}
                     >
                       <p className="text-sm font-medium text-slate-800">{l.name}</p>
-                      <p className="tabular text-xs text-slate-500">{l.phone_country ? `${l.phone_country} ` : ""}{l.phone}</p>
+                      <p className="tabular text-xs text-slate-500">{l.phone_country ? `${l.phone_country} ` : ""}{formatPhoneDisplay(l.phone)}</p>
                       <div className="mt-2 flex flex-wrap items-center gap-1.5">
                         <span className="text-[11px] text-slate-400">{l.source || "—"}</span>
                         {l.assigned_name && (
@@ -510,7 +511,7 @@ export default function Pipeline() {
                       </TableCell>
                       <TableCell>
                         <LeadPhoneLink leadId={l.id} onOpen={openDetail} testId={`pipeline-phone-${l.id}`}>
-                          {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
+                          {l.phone_country ? `${l.phone_country} ` : ""}{formatPhoneDisplay(l.phone)}
                         </LeadPhoneLink>
                       </TableCell>
                       <TableCell>

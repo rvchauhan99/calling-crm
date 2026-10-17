@@ -25,6 +25,7 @@ import {
 import { toast } from "sonner"
 import { UserCog, Search, Plus, UserPlus, Undo2 } from "lucide-react"
 import { parseDepositAmount } from "@/lib/followupBuckets"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 
 export default function Clients() {
   const { can } = useAuth()
@@ -215,7 +216,7 @@ export default function Clients() {
                     <TableCell className="font-medium text-slate-800">{c.name}</TableCell>
                     <TableCell className="tabular text-slate-600">
                       {c.phone_country ? <span className="mr-1 text-xs font-medium text-slate-500">{c.phone_country}</span> : null}
-                      {c.phone}
+                      {formatPhoneDisplay(c.phone)}
                     </TableCell>
                     <TableCell className="text-slate-500">{c.assigned_name || "—"}</TableCell>
                     <TableCell>

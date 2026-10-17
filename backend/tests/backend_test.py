@@ -450,7 +450,7 @@ class TestLeads:
 
     def test_unassign_over_page_cap(self, admin):
         r = admin.post(f"{BASE_URL}/api/leads/unassign",
-                       json={"lead_ids": [f"id-{i}" for i in range(101)]}, timeout=30)
+                       json={"lead_ids": [f"id-{i}" for i in range(1001)]}, timeout=30)
         assert r.status_code == 422
 
     def test_agent_denied_unassign(self, agent):

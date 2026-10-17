@@ -32,6 +32,7 @@ import {
   parseDepositAmount,
 } from "@/lib/followupBuckets"
 import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 
 export { classifyFollowup, sortFollowups } from "@/lib/followupBuckets"
 const FILTERS = [
@@ -256,7 +257,7 @@ export default function Followups() {
                     </TableCell>
                     <TableCell>
                       <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`followup-phone-${l.id}`}>
-                        {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
+                        {l.phone_country ? `${l.phone_country} ` : ""}{formatPhoneDisplay(l.phone)}
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell>

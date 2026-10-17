@@ -10,14 +10,16 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import { toast } from "sonner"
+import { SearchableSelect } from "@/components/ui/searchable-select"
 
-export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
+export function AutoAssignDialog({ open, onOpenChange, onComplete, dispositions = [] }) {
   const [maxLeads, setMaxLeads] = useState("")
   const [preview, setPreview] = useState(null)
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [counts, setCounts] = useState({})
+  const [disposition, setDisposition] = useState("keep")
 
   const syncCountsFromPreview = useCallback((data) => {
     const next = {}
@@ -52,6 +54,7 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
       setPreview(null)
       setResult(null)
       setCounts({})
+      setDisposition("keep")
       return
     }
     loadPreview("")
@@ -111,6 +114,7 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
           .filter((a) => a.count > 0),
       }
       if (maxLeads.trim()) body.max_leads = Number(maxLeads)
+      if (disposition && disposition !== "keep") body.disposition = disposition
       const { data } = await api.post("/leads/auto-assign", body)
       setResult(data)
       toast.success(`Auto-assigned ${data.assigned} leads`)
@@ -163,6 +167,23 @@ export function AutoAssignDialog({ open, onOpenChange, onComplete }) {
                   Selected total is {totalSelected} (cap was {requestedCap}). Counts will be used as entered.
                 </p>
               )}
+            </div>
+            <div>
+              <Label>Disposition</Label>
+              <div className="mt-1">
+                <SearchableSelect
+                  value={disposition}
+                  onChange={setDisposition}
+                  options={[
+                    { value: "keep", label: "Keep current" },
+                    { value: "fresh", label: "Fresh lead" },
+                    ...dispositions.map((d) => ({ value: d.id, label: d.name })),
+                  ]}
+                  placeholder="Disposition"
+                  searchPlaceholder="Search dispositions…"
+                  testId="auto-assign-disposition"
+                />
+              </div>
             </div>
           </div>
         )}

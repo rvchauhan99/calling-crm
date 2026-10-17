@@ -1,6 +1,14 @@
 import { useAuth } from "@/context/AuthContext"
 import { cn } from "@/lib/utils"
 
+function childText(node) {
+  if (node == null || typeof node === "boolean") return ""
+  if (typeof node === "string" || typeof node === "number") return String(node)
+  if (Array.isArray(node)) return node.map(childText).join(" ").replace(/\s+/g, " ").trim()
+  if (node.props?.children != null) return childText(node.props.children)
+  return ""
+}
+
 /** Clickable lead name or phone that opens Lead 360 when user has leads:view. */
 export const LeadPhoneLink = ({
   leadId,
@@ -42,7 +50,7 @@ export const LeadPhoneLink = ({
         className,
       )}
       data-testid={testId}
-      aria-label={asName ? `Open lead ${children}` : `Open lead ${children}`}
+      aria-label={`Open lead ${childText(children)}`}
     >
       {children}
     </button>

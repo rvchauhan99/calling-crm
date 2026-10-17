@@ -21,6 +21,7 @@ import { monthStartISO, todayISO } from "@/components/dashboard/atoms"
 import { matchDatePresetId } from "@/components/filters/datePresets"
 import { agentFilterOptions, dispositionFilterOptions } from "@/lib/masterOptions"
 import { cn } from "@/lib/utils"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 
 export default function CallHistory() {
   const { can, dataScope } = useAuth()
@@ -247,7 +248,7 @@ export default function CallHistory() {
                     </TableCell>
                     <TableCell>
                       <LeadPhoneLink leadId={c.lead_id} onOpen={setLead360Id} testId={`call-lead-phone-${c.id}`}>
-                        {c.lead_phone_country ? `${c.lead_phone_country} ` : ""}{c.lead_phone}
+                        {c.lead_phone_country ? `${c.lead_phone_country} ` : ""}{formatPhoneDisplay(c.lead_phone)}
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell className="text-slate-500">{c.agent_name}</TableCell>

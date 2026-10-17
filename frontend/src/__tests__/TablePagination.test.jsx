@@ -25,6 +25,10 @@ describe("clampPageSize", () => {
     expect(clampPageSize(50)).toBe(50)
     expect(clampPageSize(30)).toBe(25)
     expect(clampPageSize("bad")).toBe(25)
+    const leadSizes = [25, 50, 75, 100, 500, 1000]
+    expect(clampPageSize(500, leadSizes)).toBe(500)
+    expect(clampPageSize(1000, leadSizes)).toBe(1000)
+    expect(clampPageSize(2000, leadSizes)).toBe(25)
   })
 })
 
@@ -56,6 +60,22 @@ describe("TablePagination", () => {
     )
     await userEvent.selectOptions(screen.getByTestId("page-size-select"), "50")
     expect(onPageSizeChange).toHaveBeenCalledWith(50)
+  })
+
+  it("offers 500 and 1000 when the leads page passes those sizes", () => {
+    render(
+      <TablePagination
+        page={1}
+        pageSize={25}
+        total={2000}
+        onPageChange={jest.fn()}
+        onPageSizeChange={jest.fn()}
+        pageSizeOptions={[25, 50, 75, 100, 500, 1000]}
+      />,
+    )
+    const select = screen.getByTestId("page-size-select")
+    expect(select).toHaveTextContent("500")
+    expect(select).toHaveTextContent("1000")
   })
 
   it("disables Prev on first page and Next on last page", () => {

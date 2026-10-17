@@ -9,8 +9,8 @@ class TestPageSizeClamp:
         r = admin.get(f"{BASE_URL}/api/leads?page_size=5000", timeout=60)
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["page_size"] == 100
-        assert len(body["leads"]) <= 100
+        assert body["page_size"] == 1000
+        assert len(body["leads"]) <= 1000
 
     def test_clients_page_size_clamped(self, admin):
         r = admin.get(f"{BASE_URL}/api/clients?page_size=9999", timeout=60)

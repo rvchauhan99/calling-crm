@@ -90,6 +90,7 @@ db = client[DB_NAME]
 
 # Global list pagination ceiling (matches followups); prevents huge page_size OOM.
 PAGE_SIZE_MAX = 100
+LEADS_PAGE_SIZE_MAX = 1000
 
 
 def clamp_page_size(page_size: int, default: int = 25, *, max_size: int = PAGE_SIZE_MAX) -> int:

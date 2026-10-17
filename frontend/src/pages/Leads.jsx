@@ -14,6 +14,7 @@ import { Lead360Sheet } from "@/components/leads/Lead360Sheet"
 import { LeadPhoneLink } from "@/components/leads/LeadPhoneLink"
 import { LastRemarks } from "@/components/leads/LastRemarks"
 import { validateLeadForm } from "@/lib/leadValidation"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 import { FilterToolbar, FilterField } from "@/components/filters/FilterToolbar"
 import { CountryFilter } from "@/components/filters/CountrySelect"
 import { useDebouncedParam } from "@/hooks/useDebouncedParam"
@@ -32,6 +33,8 @@ import {
 } from "@/components/ui/table"
 import { toast } from "sonner"
 import { Upload, Plus, Search, Users, Wand2, UserCheck, UserMinus, Download } from "lucide-react"
+
+const LEAD_PAGE_SIZES = [25, 50, 75, 100, 500, 1000]
 
 const SORT_OPTIONS = [
   { value: "created_at_desc", label: "Newest created" },
@@ -58,6 +61,8 @@ export default function Leads() {
   const [showAutoAssign, setShowAutoAssign] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [assignAgent, setAssignAgent] = useState("")
+  const [assignDisposition, setAssignDisposition] = useState("keep")
+  const [assignDispositions, setAssignDispositions] = useState([])
   const [form, setForm] = useState({ name: "", phone: "", email: "", source: "Manual", city: "" })
   const [formErrors, setFormErrors] = useState({})
 
@@ -71,7 +76,9 @@ export default function Leads() {
   const sort = params.get("sort") || "created_at_desc"
   const tabParam = params.get("tab")
   const tab = isOwnScope ? "assigned" : (tabParam || "unassigned")
-  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams)
+  const { page, pageSize, setPage, setPageSize } = usePageParams(params, setParams, {
+    pageSizeOptions: LEAD_PAGE_SIZES,
+  })
 
   const setParam = useCallback((k, v) => {
     const p = new URLSearchParams(params)
@@ -164,6 +171,11 @@ export default function Leads() {
     api.get("/leads/assignable-callers")
       .then((r) => setAssignAgents(r.data.users || []))
       .catch(() => setAssignAgents([]))
+    api.get("/dispositions")
+      .then((r) => setAssignDispositions(
+        (r.data.dispositions || []).filter((d) => d.active && !d.converts_to_client),
+      ))
+      .catch(() => setAssignDispositions([]))
   }, [can, isOwnScope])
 
   const filterChips = useMemo(() => {
@@ -242,10 +254,13 @@ export default function Leads() {
 
   const doAssign = async () => {
     try {
-      await api.post("/leads/assign", { lead_ids: selected, agent_id: assignAgent })
+      const body = { lead_ids: selected, agent_id: assignAgent }
+      if (assignDisposition && assignDisposition !== "keep") body.disposition = assignDisposition
+      await api.post("/leads/assign", body)
       toast.success("Leads assigned")
       setShowAssign(false)
       setAssignAgent("")
+      setAssignDisposition("keep")
       load()
     } catch (e) { toast.error(formatApiError(e.response?.data?.detail)) }
   }
@@ -489,7 +504,7 @@ export default function Leads() {
                     <TableCell>
                       <LeadPhoneLink leadId={l.id} onOpen={openDetail} testId={`lead-phone-${l.id}`}>
                         {l.phone_country ? <span className="mr-1 text-xs font-medium text-slate-500">{l.phone_country}</span> : null}
-                        {l.phone}
+                        {formatPhoneDisplay(l.phone)}
                       </LeadPhoneLink>
                     </TableCell>
                     <TableCell onClick={() => openDetail(l.id)} className="text-slate-500">{l.source}</TableCell>
@@ -521,12 +536,14 @@ export default function Leads() {
           total={data.total}
           onPageChange={setPage}
           onPageSizeChange={setPageSize}
+          pageSizeOptions={LEAD_PAGE_SIZES}
         />
       )}
 
       <AutoAssignDialog
         open={showAutoAssign}
         onOpenChange={setShowAutoAssign}
+        dispositions={assignDispositions}
         onComplete={load}
       />
       <LeadImportDialog
@@ -607,6 +624,18 @@ export default function Leads() {
             placeholder="Select caller"
             searchPlaceholder="Search callers…"
             testId="assign-agent-select"
+          />
+          <SearchableSelect
+            value={assignDisposition}
+            onChange={setAssignDisposition}
+            options={[
+              { value: "keep", label: "Keep current" },
+              { value: "fresh", label: "Fresh lead" },
+              ...assignDispositions.map((d) => ({ value: d.id, label: d.name })),
+            ]}
+            placeholder="Disposition"
+            searchPlaceholder="Search dispositions…"
+            testId="assign-disposition-select"
           />
           <DialogFooter>
             <Button variant="outline" onClick={() => setShowAssign(false)}>Cancel</Button>

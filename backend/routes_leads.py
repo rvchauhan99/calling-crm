@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from core import (db, COMPANY_ID, require, get_principal, scope_filter, team_member_ids, new_id,
                   now_iso, now_utc, parse_phone, apply_country_filter, validate_email_optional, audit,
-                  live_client_filter, escape_regex, clamp_page_size, PAGE_SIZE_MAX)
+                  live_client_filter, escape_regex, clamp_page_size, LEADS_PAGE_SIZE_MAX)
 from lead_sources import (
     list_lead_sources,
     source_names,
@@ -298,12 +298,13 @@ class LeadIn(BaseModel):
 
 
 class AssignIn(BaseModel):
-    lead_ids: List[str]
+    lead_ids: List[str] = Field(..., min_length=1, max_length=LEADS_PAGE_SIZE_MAX)
     agent_id: str
+    disposition: Optional[str] = None
 
 
 class UnassignIn(BaseModel):
-    lead_ids: List[str] = Field(..., min_length=1, max_length=PAGE_SIZE_MAX)
+    lead_ids: List[str] = Field(..., min_length=1, max_length=LEADS_PAGE_SIZE_MAX)
 
 
 class AutoAssignAllocationIn(BaseModel):
@@ -314,6 +315,7 @@ class AutoAssignAllocationIn(BaseModel):
 class AutoAssignIn(BaseModel):
     max_leads: Optional[int] = None
     allocations: Optional[List[AutoAssignAllocationIn]] = None
+    disposition: Optional[str] = None
 
 
 CSV_TEMPLATE_ROWS = [
@@ -405,10 +407,34 @@ async def _agent_assigned_today_map(agents: list, today: str) -> dict:
     return result
 
 
+async def _assignment_disposition_fields(disposition: Optional[str]) -> Optional[dict]:
+    """Fields to set on assign. None keeps the lead's current disposition."""
+    raw = (disposition or "").strip()
+    if not raw or raw.lower() in ("keep", "current"):
+        return None
+    if raw.lower() == "fresh":
+        return {
+            "disposition_id": None,
+            "disposition_name": None,
+            "follow_up_at": None,
+            "pipeline_stage": "New",
+        }
+    disp = await db.dispositions.find_one(
+        {"id": raw, "companyId": COMPANY_ID, "active": True},
+        {"_id": 0, "id": 1, "name": 1, "converts_to_client": 1},
+    )
+    if not disp:
+        raise HTTPException(status_code=400, detail="Disposition not found")
+    if disp.get("converts_to_client"):
+        raise HTTPException(status_code=400, detail="Cannot assign a converting disposition")
+    return {"disposition_id": disp["id"], "disposition_name": disp["name"]}
+
+
 async def _auto_assign_plan(
     max_leads: Optional[int],
     dry_run: bool = False,
     allocations: Optional[List[AutoAssignAllocationIn]] = None,
+    extra_set: Optional[dict] = None,
 ) -> dict:
     """Compute or execute equal (round-robin) auto-assign from the unassigned pool.
 
@@ -480,6 +506,7 @@ async def _auto_assign_plan(
                     {"$set": {
                         "assigned_to": row["agent_id"], "assigned_name": row["agent_name"],
                         "owner_id": row["agent_id"], "assigned_date": today,
+                        **(extra_set or {}),
                     }},
                 ))
         row["assigned"] = got
@@ -505,7 +532,7 @@ async def list_leads(search: Optional[str] = None, status: Optional[str] = None,
                      page: int = 1, page_size: int = 25,
                      principal: dict = Depends(require("leads:view"))):
     page = max(1, page)
-    page_size = clamp_page_size(page_size, 25)
+    page_size = clamp_page_size(page_size, 25, max_size=LEADS_PAGE_SIZE_MAX)
     q = await _scoped_leads_query(principal)
     skip_assignment = principal.get("data_scope") == "OWN"
     _apply_lead_filters(q, search=search, status=status, disposition=disposition,
@@ -715,11 +742,25 @@ async def assign_leads(body: AssignIn, principal: dict = Depends(require("leads:
     au = await db.users.find_one({"id": body.agent_id}, {"_id": 0, "name": 1})
     if not au:
         raise HTTPException(status_code=404, detail="Agent not found")
-    res = await db.leads.update_many(
-        {"id": {"$in": body.lead_ids}, "companyId": COMPANY_ID},
-        {"$set": {"assigned_to": body.agent_id, "assigned_name": au["name"],
-                  "owner_id": body.agent_id, "assigned_date": now_utc().date().isoformat()}})
-    await audit(principal, "assign", "lead", None, {"count": res.modified_count, "agent": au["name"]})
+    disp_set = await _assignment_disposition_fields(body.disposition)
+    fresh = (body.disposition or "").strip().lower() == "fresh"
+    assign_set = {
+        "assigned_to": body.agent_id, "assigned_name": au["name"],
+        "owner_id": body.agent_id, "assigned_date": now_utc().date().isoformat(),
+    }
+    match = {"id": {"$in": body.lead_ids}, "companyId": COMPANY_ID}
+    if disp_set and not fresh:
+        assign_set.update(disp_set)
+    res = await db.leads.update_many(match, {"$set": assign_set})
+    if fresh and disp_set:
+        await db.leads.update_many(
+            {**match, "is_client": {"$ne": True}},
+            {"$set": disp_set},
+        )
+    await audit(principal, "assign", "lead", None, {
+        "count": res.modified_count, "agent": au["name"],
+        "disposition": (body.disposition or "").strip() or None,
+    })
     return {"assigned": res.modified_count}
 
 
@@ -740,8 +781,9 @@ async def unassign_leads(body: UnassignIn, principal: dict = Depends(require("le
 async def auto_assign(body: AutoAssignIn = AutoAssignIn(),
                       principal: dict = Depends(require("leads:assign"))):
     """Distribute unassigned/pooled leads to active callers up to their daily quota."""
+    extra = await _assignment_disposition_fields(body.disposition)
     result = await _auto_assign_plan(
-        body.max_leads, dry_run=False, allocations=body.allocations)
+        body.max_leads, dry_run=False, allocations=body.allocations, extra_set=extra)
     await audit(principal, "auto-assign", "lead", None, {"count": result["assigned"]})
     return result
 

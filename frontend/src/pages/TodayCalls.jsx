@@ -35,6 +35,7 @@ import {
   parseDepositAmount,
 } from "@/lib/followupBuckets"
 import { mappedStageForDisposition, PIPELINE_STAGES as STAGES } from "@/components/pipeline/PipelineLogCallDialog"
+import { formatPhoneDisplay } from "@/lib/phoneDisplay"
 
 const SORTS = [
   { id: "urgency", label: "Urgency" },
@@ -515,7 +516,7 @@ export default function TodayCalls() {
                             </LeadPhoneLink>
                             <div className="mt-0.5">
                               <LeadPhoneLink leadId={l.id} onOpen={setLead360Id} testId={`today-phone-${l.id}`}>
-                                {l.phone_country ? `${l.phone_country} ` : ""}{l.phone}
+                                {l.phone_country ? `${l.phone_country} ` : ""}{formatPhoneDisplay(l.phone)}
                               </LeadPhoneLink>
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-slate-400">
