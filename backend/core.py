@@ -190,6 +190,67 @@ def _strip_phone_prefix(raw: str) -> str:
     return s.strip()
 
 
+def invalid_phone_reason(raw: str) -> str:
+    """Why parse_phone rejected this value. Always starts with 'Invalid phone number.'"""
+    import phonenumbers
+    from phonenumbers import NumberParseException
+
+    original = _strip_phone_prefix(raw)
+    if not original:
+        return "Invalid phone number. Phone is empty."
+    try:
+        num = phonenumbers.parse(original, None if original.startswith("+") else "IN")
+    except NumberParseException:
+        return "Invalid phone number. Could not parse this value as a phone number."
+    if phonenumbers.is_valid_number(num):
+        return "Invalid phone number."
+    cc = str(num.country_code or "")
+    region = phonenumbers.region_code_for_number(num) or ""
+    digits = re.sub(r"\D", "", original)
+    national = digits[len(cc):] if cc and digits.startswith(cc) else digits
+    labels = {
+        "GB": "UK",
+        "IN": "India",
+        "PK": "Pakistan",
+        "UA": "Ukraine",
+        "CN": "China",
+        "RU": "Russia",
+        "KZ": "Kazakhstan",
+        "US": "US",
+    }
+    label = labels.get(region) or (f"+{cc}" if cc else "this country")
+    if cc and national.startswith("0"):
+        if cc == "44":
+            return (
+                "Invalid phone number. UK (+44) numbers must drop the leading 0 after the country code "
+                "(use +447426717733, not +440742671773)."
+            )
+        return (
+            f"Invalid phone number. {label} (+{cc}) numbers must drop the extra 0 after +{cc}. "
+            "The national trunk 0 is not part of E.164."
+        )
+    if cc == "44" or region == "GB":
+        return (
+            "Invalid phone number. Not a valid UK (+44) number. "
+            "Use +44 plus 10 national digits with no 0 after +44."
+        )
+    if cc == "91" or region == "IN":
+        return (
+            "Invalid phone number. Not a valid India (+91) number. "
+            "Indian mobiles are +91 plus 10 digits starting with 6-9."
+        )
+    if cc:
+        where = f"{label} (+{cc})" if region else f"+{cc}"
+        return (
+            f"Invalid phone number. Not a valid {where} number. "
+            "Check the country code, length, and digits."
+        )
+    return (
+        "Invalid phone number. Not a valid E.164 number. "
+        "Check the country code, length, and digits."
+    )
+
+
 def parse_phone(raw: str) -> tuple[str, str]:
     """Return (E.164, ISO 3166-1 alpha-2). Numbers without + are parsed as India."""
     import phonenumbers
@@ -197,16 +258,16 @@ def parse_phone(raw: str) -> tuple[str, str]:
 
     original = _strip_phone_prefix(raw)
     if not original:
-        raise ValueError("Invalid phone number.")
+        raise ValueError(invalid_phone_reason(raw))
     try:
         if original.startswith("+"):
             num = phonenumbers.parse(original, None)
         else:
             num = phonenumbers.parse(original, "IN")
     except NumberParseException:
-        raise ValueError("Invalid phone number.")
+        raise ValueError(invalid_phone_reason(raw))
     if not phonenumbers.is_valid_number(num):
-        raise ValueError("Invalid phone number.")
+        raise ValueError(invalid_phone_reason(raw))
     e164 = phonenumbers.format_number(num, PhoneNumberFormat.E164)
     region = phonenumbers.region_code_for_number(num) or "IN"
     return e164, region
@@ -327,11 +388,198 @@ async def scope_filter(principal: dict, field: str = "assigned_to") -> dict:
     return {field: principal["id"]}
 
 
+async def lead_scope_filter(principal: dict) -> dict:
+    """Leads visible to principal: TEAM = team-assigned OR unassigned uploads by self."""
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return {}
+    if scope == "TEAM":
+        return {
+            "$or": [
+                {"assigned_to": {"$in": await team_member_ids(principal)}},
+                {"assigned_to": None, "created_by": principal["id"]},
+            ]
+        }
+    return {"assigned_to": principal["id"]}
+
+
+def and_filter(q: dict, clause: dict) -> dict:
+    """Append a clause under $and without clobbering an existing $or/$and."""
+    if not clause:
+        return q
+    q.setdefault("$and", []).append(clause)
+    return q
+
+
+async def merge_assignment_scope(
+    q: dict,
+    principal: dict,
+    *,
+    assigned_to: Optional[str] = None,
+    assignment_status: Optional[str] = None,
+    skip_assignment_status: bool = False,
+) -> dict:
+    """Apply assignment filters without replacing TEAM/OWN scope with a company-wide pool."""
+    if skip_assignment_status and not assigned_to:
+        return q
+    scope = principal.get("data_scope", "OWN")
+    if scope == "OWN":
+        return q
+    if scope == "ALL":
+        if assigned_to:
+            q["assigned_to"] = assigned_to
+        elif assignment_status == "unassigned":
+            q["assigned_to"] = None
+        elif assignment_status == "assigned":
+            q["assigned_to"] = {"$ne": None}
+        return q
+    # TEAM
+    team_ids = await team_member_ids(principal)
+    if assigned_to:
+        if assigned_to not in team_ids:
+            raise HTTPException(status_code=403, detail="Agent not in your team")
+        and_filter(q, {"assigned_to": assigned_to})
+        return q
+    if assignment_status == "unassigned":
+        and_filter(q, {"assigned_to": None, "created_by": principal["id"]})
+        return q
+    if assignment_status == "assigned":
+        and_filter(q, {"assigned_to": {"$in": team_ids}})
+        return q
+    return q
+
+
+async def assert_assigned_to_in_scope(principal: dict, user_id: Optional[str]) -> None:
+    """Ensure assign target is visible under principal scope."""
+    if not user_id:
+        raise HTTPException(status_code=400, detail="Agent is required")
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return
+    if scope == "OWN":
+        if user_id != principal["id"]:
+            raise HTTPException(status_code=403, detail="Agent not in scope")
+        return
+    if user_id not in await team_member_ids(principal):
+        raise HTTPException(status_code=403, detail="Agent not in your team")
+
+
+def _lead_visible_to(principal: dict, lead: dict, team_ids: Optional[list]) -> bool:
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return True
+    assigned = lead.get("assigned_to")
+    if scope == "OWN":
+        return assigned == principal["id"]
+    if assigned and team_ids is not None and assigned in team_ids:
+        return True
+    if assigned is None and lead.get("created_by") == principal["id"]:
+        return True
+    return False
+
+
+async def assert_lead_in_scope(principal: dict, lead: Optional[dict]) -> dict:
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return lead
+    team_ids = await team_member_ids(principal) if scope == "TEAM" else None
+    if not _lead_visible_to(principal, lead, team_ids):
+        raise HTTPException(status_code=403, detail="Lead not in scope")
+    return lead
+
+
+async def assert_client_in_scope(principal: dict, client: Optional[dict]) -> dict:
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found")
+    if principal.get("user_type") == "affiliate":
+        if client.get("affiliate_id") != principal["id"]:
+            raise HTTPException(status_code=403, detail="Client not in scope")
+        return client
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return client
+    owner = client.get("owner_id")
+    if scope == "OWN":
+        if owner != principal["id"]:
+            raise HTTPException(status_code=403, detail="Client not in scope")
+        return client
+    if owner not in await team_member_ids(principal):
+        raise HTTPException(status_code=403, detail="Client not in scope")
+    return client
+
+
+async def assert_call_in_scope(principal: dict, call: Optional[dict]) -> dict:
+    if not call:
+        raise HTTPException(status_code=404, detail="Call not found")
+    scope = principal.get("data_scope", "OWN")
+    if scope == "ALL":
+        return call
+    agent_id = call.get("agent_id")
+    if scope == "OWN":
+        if agent_id and agent_id != principal["id"]:
+            raise HTTPException(status_code=403, detail="Call not in scope")
+        return call
+    if agent_id and agent_id not in await team_member_ids(principal):
+        raise HTTPException(status_code=403, detail="Call not in scope")
+    return call
+
+
 async def client_scope_filter(principal: dict) -> dict:
     """Role-aware client scope: affiliates own via affiliate_id, others via owner_id."""
     if principal.get("user_type") == "affiliate":
         return {"affiliate_id": principal["id"]}
     return await scope_filter(principal, "owner_id")
+
+
+async def sheet_scope_filter(principal: dict) -> dict:
+    """Sheet sources visible to principal: ALL unrestricted; else owner or legacy creator."""
+    if principal.get("data_scope") == "ALL":
+        return {}
+    pid = principal["id"]
+    return {
+        "$or": [
+            {"owner_id": pid},
+            {"owner_id": None, "created_by": pid},
+            {"owner_id": {"$exists": False}, "created_by": pid},
+        ]
+    }
+
+
+def sheet_visible_to(principal: dict, sheet: dict) -> bool:
+    if principal.get("data_scope") == "ALL":
+        return True
+    pid = principal["id"]
+    owner = sheet.get("owner_id")
+    if owner == pid:
+        return True
+    if not owner and sheet.get("created_by") == pid:
+        return True
+    return False
+
+
+async def assert_sheet_in_scope(principal: dict, sheet: Optional[dict]) -> dict:
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    if not sheet_visible_to(principal, sheet):
+        raise HTTPException(status_code=403, detail="Sheet source not in scope")
+    return sheet
+
+
+async def resolve_sheet_lead_attribution(source: dict) -> tuple:
+    """Return (created_by, created_by_name) for leads from a sheet sync.
+
+    Prefers sheet owner_id; falls back to sheet created_by.
+    """
+    uid = source.get("owner_id") or source.get("created_by")
+    if not uid:
+        return None, None
+    name = source.get("owner_name") if source.get("owner_id") else source.get("created_by_name")
+    if not name:
+        user = await db.users.find_one({"id": uid}, {"_id": 0, "name": 1})
+        name = (user or {}).get("name")
+    return uid, name
 
 
 def live_client_filter() -> dict:
