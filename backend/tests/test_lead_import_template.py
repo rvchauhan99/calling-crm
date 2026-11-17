@@ -19,6 +19,12 @@ def test_template_csv_phones_all_parse():
     from lead_import import LEAD_IMPORT_TEMPLATE_HEADERS, build_lead_import_template_csv
 
     text = build_lead_import_template_csv()
+    # Spreadsheet-safe: international phones are tab-prefixed and quoted as text.
+    assert '\t+971' in text or '"\t+971' in text
+    assert '\t+44' in text or '"\t+44' in text
+    assert "+971" in text
+    assert "+44" in text
+
     reader = csv.DictReader(io.StringIO(text))
     assert reader.fieldnames == LEAD_IMPORT_TEMPLATE_HEADERS
     rows = list(reader)
@@ -35,10 +41,21 @@ def test_template_csv_phones_all_parse():
         assert remarks.strip(), f"missing remarks on {row.get('name')}"
     assert len(phones) == len(set(phones)), "template phones must be unique for safe upload"
     blob = text.lower()
-    assert "+971" in text
     assert "uae" in blob
     assert "without +" in blob or "without +" in text
     assert "trunk" in blob or "+440" in text
+    assert "upload-ready" in blob
+
+
+def test_parse_phone_accepts_tab_prefixed_plus():
+    _load_backend()
+    from core import parse_phone
+
+    e164, country = parse_phone("\t+971501234567")
+    assert e164 == "+971501234567"
+    assert country == "AE"
+    e1642, _ = parse_phone("+971501234567")
+    assert e1642 == "+971501234567"
 
 
 def test_import_template_endpoint_auth_deny(anon):

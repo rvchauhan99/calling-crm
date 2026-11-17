@@ -770,12 +770,13 @@ class TestLeads:
     def test_import_template(self, admin):
         r = admin.get(f"{BASE_URL}/api/leads/import/template", timeout=30)
         assert r.status_code == 200, r.text
-        header = r.text.splitlines()[0]
+        header = r.text.splitlines()[0].replace('"', "")
         assert header == "name,phone,email,city,source,remarks"
         assert "9876543210" in r.text
         assert "+971" in r.text
         assert "+44" in r.text
         assert "+1" in r.text
+        assert "\t+971" in r.text or '"\t+971' in r.text
         assert "without +" in r.text or "WITHOUT +" in r.text
         assert "+440" in r.text or "trunk" in r.text.lower()
         assert "UAE" in r.text

@@ -35,7 +35,7 @@ LEAD_IMPORT_TEMPLATE_ROWS = [
             "(2) Non-India phones MUST start with + and the country code "
             "(UAE +9715… not 9715…). (3) Never keep the local trunk 0 after the country code "
             "(UK use +447… not +4407…). (4) source must match an active Lead Source. "
-            "(5) Delete these sample rows before importing your real list."
+            "(5) Sample phones below are already upload-ready — delete these rows and paste your data in the same phone format."
         ),
     },
     {
@@ -113,6 +113,14 @@ LEAD_IMPORT_TEMPLATE_ROWS = [
 ]
 
 
+def _spreadsheet_text_phone(phone: str) -> str:
+    """Prefix + / p:+ phones with a tab so Numbers/Excel keep a visible leading +."""
+    p = (phone or "").strip()
+    if p.startswith("+") or p.lower().startswith("p:+"):
+        return "\t" + p
+    return p
+
+
 def build_lead_import_template_csv() -> str:
     """CSV sample guide for lead import (valid phones + teaching remarks)."""
     buf = io.StringIO()
@@ -121,10 +129,14 @@ def build_lead_import_template_csv() -> str:
         fieldnames=LEAD_IMPORT_TEMPLATE_HEADERS,
         extrasaction="ignore",
         lineterminator="\n",
+        # Quote text fields so Numbers/Excel treat tab-prefixed phones as text (keep visible +).
+        quoting=csv.QUOTE_NONNUMERIC,
     )
     writer.writeheader()
     for row in LEAD_IMPORT_TEMPLATE_ROWS:
-        writer.writerow({h: row.get(h, "") for h in LEAD_IMPORT_TEMPLATE_HEADERS})
+        out = {h: row.get(h, "") for h in LEAD_IMPORT_TEMPLATE_HEADERS}
+        out["phone"] = _spreadsheet_text_phone(out.get("phone", ""))
+        writer.writerow(out)
     return buf.getvalue()
 
 

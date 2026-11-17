@@ -185,7 +185,19 @@ def normalize_phone(raw: str, default_cc: str = "91") -> str:
 
 
 def _strip_phone_prefix(raw: str) -> str:
+    """Normalize spreadsheet/Meta wrappers; does not change valid E.164 upload format."""
     s = str(raw or "").strip()
+    # Zero-width / BOM left by editors or CSV text markers
+    s = s.lstrip("\ufeff\u200b\u200e\u200f")
+    s = s.strip()
+    # Excel/Numbers sometimes keep a leading apostrophe for text cells
+    if s.startswith("'") and len(s) > 1:
+        s = s[1:].strip()
+    # Excel formula-style text: ="..." or ="+971..."
+    if len(s) >= 3 and s[0] == "=" and s[1] == '"' and s.endswith('"'):
+        s = s[2:-1].strip()
+    elif s.startswith("=") and len(s) > 1 and s[1] in "+0123456789pP":
+        s = s[1:].strip()
     s = re.sub(r"^[pP]:\s*", "", s)
     return s.strip()
 
