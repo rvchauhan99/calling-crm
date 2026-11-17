@@ -53,5 +53,10 @@ test_result.md
 backend/DATA*.csv
 backend/cutover_import_errors.csv
 backend/cutover_import_duplicates.csv
+lead-import-errors-*.csv
+lead-import-ready-*.csv
+lead-import-still-invalid-*.csv
+lead-import-phone-root-causes.csv
+lead-import-*-ROOT-CAUSE.txt
 backend/cutover_import.py
 backend/tests/test_cutover_import_leads.py

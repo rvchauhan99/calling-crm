@@ -96,6 +96,7 @@ describe("LeadImportDialog", () => {
       expect(screen.getByTestId("lead-import-counts")).toHaveTextContent("Processed 3/3 rows")
     })
     expect(screen.getByTestId("lead-import-status")).toHaveTextContent("completed")
+    expect(screen.getByTestId("lead-import-progress")).toHaveTextContent(/Updated:\s*0/)
     expect(screen.getByTestId("lead-import-error-csv-btn")).toBeInTheDocument()
     expect(onComplete).toHaveBeenCalled()
 
@@ -109,5 +110,13 @@ describe("LeadImportDialog", () => {
     render(<LeadImportDialog open onOpenChange={jest.fn()} />)
     expect(screen.getByTestId("lead-import-submit-btn")).toBeDisabled()
     expect(api.post).not.toHaveBeenCalled()
+  })
+
+  it("shows the phone-format template hint", () => {
+    render(<LeadImportDialog open onOpenChange={jest.fn()} />)
+    const hint = screen.getByTestId("lead-import-template-hint")
+    expect(hint).toBeInTheDocument()
+    expect(hint).toHaveTextContent(/Non-India phones need \+/i)
+    expect(hint).toHaveTextContent(/remarks/i)
   })
 })

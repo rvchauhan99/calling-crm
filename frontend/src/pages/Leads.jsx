@@ -326,6 +326,12 @@ export default function Leads() {
         }
       />
 
+      {can("leads:import") && (
+        <p className="mb-3 text-xs text-slate-500" data-testid="leads-template-hint">
+          Non-India phones need + and the country code (e.g. UAE +9715…). Download Template includes a remarks column — delete sample rows before real import.
+        </p>
+      )}
+
       {!isOwnScope && (
         <Tabs value={tab} onValueChange={setTab} className="mb-4">
           <TabsList className="bg-slate-100">

@@ -91,6 +91,7 @@ def close_job_event_stream(job_id: str):
 def _progress_payload(job_id: str, status: str, progress: dict, message: Optional[str] = None) -> dict:
     created = int(progress.get("created") or 0)
     duplicates = int(progress.get("duplicates") or 0)
+    updated = int(progress.get("updated") or 0)
     invalid = int(progress.get("invalid") or 0)
     skipped = int(progress.get("skipped") or 0)
     payload = {
@@ -103,6 +104,7 @@ def _progress_payload(job_id: str, status: str, progress: dict, message: Optiona
         "skippedRows": skipped,
         "created": created,
         "duplicates": duplicates,
+        "updated": updated,
         "invalid": invalid,
     }
     if message:
@@ -111,7 +113,15 @@ def _progress_payload(job_id: str, status: str, progress: dict, message: Optiona
 
 
 def _empty_progress() -> dict:
-    return {"total": 0, "processed": 0, "created": 0, "duplicates": 0, "invalid": 0, "skipped": 0}
+    return {
+        "total": 0,
+        "processed": 0,
+        "created": 0,
+        "duplicates": 0,
+        "updated": 0,
+        "invalid": 0,
+        "skipped": 0,
+    }
 
 
 def job_status_dto(job: dict) -> dict:
@@ -119,6 +129,7 @@ def job_status_dto(job: dict) -> dict:
     error_rows = job.get("error_rows") or []
     created = int(progress.get("created") or 0)
     duplicates = int(progress.get("duplicates") or 0)
+    updated = int(progress.get("updated") or 0)
     invalid = int(progress.get("invalid") or 0)
     skipped = int(progress.get("skipped") or 0)
     sample = []
@@ -142,6 +153,7 @@ def job_status_dto(job: dict) -> dict:
             "skippedRows": skipped,
             "created": created,
             "duplicates": duplicates,
+            "updated": updated,
             "invalid": invalid,
         },
         "errorSample": sample,
@@ -268,6 +280,7 @@ async def _heartbeat(job_id: str, status: str, result_progress: ImportProgress):
         "processed": result_progress.processed,
         "created": result_progress.created,
         "duplicates": result_progress.duplicates,
+        "updated": result_progress.updated,
         "invalid": result_progress.invalid,
         "skipped": result_progress.skipped,
     }
@@ -289,12 +302,23 @@ async def process_job(job: dict):
         await _heartbeat(job_id, "processing", progress)
 
     try:
-        result = await run_lead_import(raw, on_progress=on_progress)
+        actor_id = job.get("created_by")
+        actor_name = None
+        if actor_id:
+            actor = await db.users.find_one({"id": actor_id}, {"_id": 0, "name": 1})
+            actor_name = (actor or {}).get("name")
+        result = await run_lead_import(
+            raw,
+            on_progress=on_progress,
+            created_by=actor_id,
+            created_by_name=actor_name,
+        )
         progress = {
             "total": result.total,
             "processed": result.total,
             "created": result.created,
             "duplicates": result.duplicates,
+            "updated": result.updated,
             "invalid": result.invalid,
             "skipped": result.skipped,
         }

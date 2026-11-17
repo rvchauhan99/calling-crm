@@ -181,6 +181,7 @@ describe("Leads role visibility", () => {
     await waitFor(() => {
       expect(screen.getByTestId("import-btn")).toBeInTheDocument()
     })
+    expect(screen.getByTestId("leads-template-hint")).toHaveTextContent(/Non-India phones need \+/i)
     expect(screen.queryByTestId("lead-import-dialog")).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByTestId("import-btn"))

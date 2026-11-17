@@ -1,7 +1,7 @@
 """Leads, dispositions, calls (today/history), pipeline, follow-ups, lead 360."""
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import Response
-from lead_import import ImportValidationError, run_lead_import
+from lead_import import ImportValidationError, build_lead_import_template_csv, run_lead_import
 from lead_import_jobs import (
     create_lead_import_job,
     get_job_error_csv,
@@ -318,21 +318,6 @@ class AutoAssignIn(BaseModel):
     disposition: Optional[str] = None
 
 
-CSV_TEMPLATE_ROWS = [
-    ("Sample Website", "9876543210", "sample@example.com", "Mumbai", "Website"),
-    ("Sample Facebook Ads", "9876543211", "sample@example.com", "Mumbai", "Facebook Ads"),
-    ("Sample Google Ads", "9876543212", "sample@example.com", "Mumbai", "Google Ads"),
-    ("Sample Referral", "9876543213", "sample@example.com", "Mumbai", "Referral"),
-    ("Sample Cold List", "9876543214", "sample@example.com", "Mumbai", "Cold List"),
-    ("Sample Webinar", "9876543215", "sample@example.com", "Mumbai", "Webinar"),
-    ("Sample Manual", "9876543216", "sample@example.com", "Mumbai", "Manual"),
-    ("Sample Import", "9876543217", "sample@example.com", "Mumbai", "Import"),
-]
-CSV_TEMPLATE = "name,phone,email,city,source\n" + "\n".join(
-    f"{name},{phone},{email},{city},{source}" for name, phone, email, city, source in CSV_TEMPLATE_ROWS
-) + "\n"
-
-
 async def _validate_lead_source(source: str, *, allow_import: bool = False) -> str:
     s = (source or "Manual").strip()
     if not await is_allowed_source(s, allow_non_creatable=allow_import):
@@ -644,7 +629,7 @@ def _ensure_csv_filename(filename: Optional[str]):
 @router.get("/leads/import/template")
 async def import_template(principal: dict = Depends(require("leads:import"))):
     return Response(
-        content=CSV_TEMPLATE,
+        content=build_lead_import_template_csv(),
         media_type="text/csv",
         headers={"Content-Disposition": 'attachment; filename="leads_import_template.csv"'},
     )

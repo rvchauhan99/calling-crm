@@ -18,6 +18,7 @@ const emptyProgress = {
   skippedRows: 0,
   created: 0,
   duplicates: 0,
+  updated: 0,
   invalid: 0,
 }
 
@@ -140,8 +141,9 @@ export function LeadImportDialog({ open, onOpenChange, onComplete }) {
           stopTracking()
           const created = data.progress?.created ?? data.progress?.successRows ?? 0
           const duplicates = data.progress?.duplicates ?? 0
+          const updated = data.progress?.updated ?? 0
           const invalid = data.progress?.invalid ?? 0
-          toast.success(`Imported ${created} · ${duplicates} dupes · ${invalid} invalid`)
+          toast.success(`Imported ${created} · ${duplicates} dupes · ${updated} updated · ${invalid} invalid`)
           await maybeAutoDownloadErrors(data)
           onComplete?.()
         } else if (data.status === "failed") {
@@ -253,6 +255,12 @@ export function LeadImportDialog({ open, onOpenChange, onComplete }) {
             >
               Download template
             </Button>
+            <p
+              className="mt-1 text-xs text-slate-500"
+              data-testid="lead-import-template-hint"
+            >
+              Non-India phones need + and the country code (e.g. UAE +9715…). Open the CSV and read the remarks column; delete sample rows before real import.
+            </p>
           </div>
 
           {importJob ? (
@@ -265,7 +273,7 @@ export function LeadImportDialog({ open, onOpenChange, onComplete }) {
                 Processed {processed}/{total} rows
               </div>
               <div className="text-slate-500">
-                Created: {progress.created ?? progress.successRows ?? 0} · Dupes: {progress.duplicates ?? 0} · Invalid: {progress.invalid ?? 0} · Skipped: {progress.skippedRows ?? 0}
+                Created: {progress.created ?? progress.successRows ?? 0} · Dupes: {progress.duplicates ?? 0} · Updated: {progress.updated ?? 0} · Invalid: {progress.invalid ?? 0} · Skipped: {progress.skippedRows ?? 0}
               </div>
               {importJob.failureReason ? (
                 <div className="text-red-600">{importJob.failureReason}</div>
